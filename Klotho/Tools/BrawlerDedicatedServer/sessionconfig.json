@@ -1,0 +1,6 @@
+{
+  "AllowLateJoin": true,
+  "ReconnectTimeoutMs": 30000,
+  "ReconnectMaxRetries": 3,
+  "MinPlayers": 2
+}

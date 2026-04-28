@@ -1,0 +1,63 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &1258021022135225480
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 7928493984336075052}
+  - component: {fileID: 3384708139685548805}
+  m_Layer: 0
+  m_Name: BrawlerGameController
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &7928493984336075052
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1258021022135225480}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 1.04931, y: 3, z: -0.16244}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &3384708139685548805
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1258021022135225480}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 90b75a733b4b14bd19842d6ff3d175eb, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: xpTURN.Klotho.Manager.Brawler::Brawler.BrawlerGameController
+  _logLevel: 2
+  _brawlerSettings:
+    _mode: 1
+    _hostAddress: localhost
+    _port: 7777
+    _roomId: 0
+    _isHost: 0
+    _maxPlayers: 4
+    _botCount: 1
+    _characterClass: 1
+  _simulationConfig: {fileID: 11400000, guid: a8bcc9ab45c7e4c14b07725c3b103952, type: 2}
+  _gameMenu: {fileID: 0}
+  _viewSync: {fileID: 0}
+  _entityViewUpdater: {fileID: 0}
+  _staticCollidersAsset: {fileID: 4900000, guid: 72ea74227aa3941cf919e2133f2a464f, type: 3}
+  _navMeshAsset: {fileID: 4900000, guid: 59ad7066f79384cc7b2e78e14c57ff50, type: 3}
+  _dataAsset: {fileID: 4900000, guid: 11a37c05526bf4fed87326fb25f7100f, type: 3}

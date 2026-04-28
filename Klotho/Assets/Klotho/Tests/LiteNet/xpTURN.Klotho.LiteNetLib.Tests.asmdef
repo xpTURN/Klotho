@@ -1,0 +1,29 @@
+{
+    "name": "xpTURN.Klotho.LiteNetLib.Tests",
+    "rootNamespace": "",
+    "references": [
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner",
+        "LiteNetLib",
+        "ZLogger.Unity",
+        "xpTURN.Klotho.Runtime",
+        "xpTURN.Klotho.Runtime.Unity",
+        "xpTURN.Klotho.LiteNetLib",
+        "xpTURN.Klotho.Gameplay"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [
+        "nunit.framework.dll",
+        "Microsoft.Extensions.Logging.dll",
+        "Microsoft.Extensions.Logging.Abstractions.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -1,0 +1,41 @@
+## ignore files
+**/.DS_Store
+**/.idea
+**/.vsconfig
+
+## ignore folders
+**/.vscode/
+**/.vs/
+**/.vsconfig/
+
+## ignore
+
+*.pem
+*.p12
+
+**/Docs/IMP/
+**/Docs/REF/
+
+**/Klotho/Docs/
+**/Klotho/**/Replays/
+**/Klotho/**/*.g.cs
+**/Klotho/*.csproj
+**/Klotho/*.sln
+**/Klotho/*.slnx
+
+/**/[Aa]ssets/[Pp]ackages/
+/**/Library/
+/**/Logs/
+/**/Temp/
+/**/UserSettings/
+
+**/obj/
+**/bin/
+**/Binaries/
+**/Intermediate/
+**/IncrementalBuildPipeline/
+**/BUILD/
+**/*.app/
+**/*_BackUpThisFolder_*/
+**/*_BurstDebugInformation_*/
+**/MemoryCaptures/

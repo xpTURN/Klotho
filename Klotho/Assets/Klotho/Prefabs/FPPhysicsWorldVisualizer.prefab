@@ -1,0 +1,75 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &4771568123632299660
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 3850141548967564118}
+  - component: {fileID: 4784498804586572521}
+  m_Layer: 0
+  m_Name: FPPhysicsWorldVisualizer
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &3850141548967564118
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4771568123632299660}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: -0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &4784498804586572521
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4771568123632299660}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 16a7cd578dce040e58232f38216f001e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: xpTURN.Klotho.Runtime.Unity::xpTURN.Klotho.Unity.Physics.FPPhysicsWorldVisualizer
+  showBodies: 1
+  showBodyShape: 1
+  showBodyAABB: 0
+  showBodyVelocity: 1
+  velocityArrowScale: 0.2
+  showStaticColliders: 1
+  showStaticShape: 1
+  showStaticAABB: 0
+  showContacts: 1
+  showContactNormals: 1
+  showCollisionHighlight: 1
+  contactNormalScale: 0.5
+  contactPointRadius: 0.05
+  dynamicShapeColor: {r: 1, g: 0.8, b: 0, a: 0.9}
+  staticBodyShapeColor: {r: 0.6, g: 0.6, b: 0.6, a: 0.9}
+  kinematicShapeColor: {r: 0, g: 0.6, b: 1, a: 0.9}
+  sceneStaticColor: {r: 0, g: 1, b: 0.5, a: 0.9}
+  aabbColor: {r: 1, g: 1, b: 1, a: 0.25}
+  velocityColor: {r: 1, g: 0.3, b: 0.3, a: 1}
+  selectedShapeColor: {r: 1, g: 0.9, b: 0, a: 1}
+  selectedAABBColor: {r: 1, g: 0.9, b: 0, a: 0.6}
+  contactPointColor: {r: 1, g: 0, b: 0, a: 1}
+  contactNormalColor: {r: 1, g: 0.5, b: 0, a: 1}
+  collisionHighlightColor: {r: 1, g: 0, b: 0, a: 0.5}
+  triggerHighlightColor: {r: 1, g: 0, b: 1, a: 0.5}
+  targetCamera: {fileID: 0}
+  alwaysOnTop: 1
+  showInSceneView: 1
+  showInGameView: 0

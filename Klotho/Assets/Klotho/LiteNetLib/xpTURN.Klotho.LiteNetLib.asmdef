@@ -1,0 +1,17 @@
+{
+    "name": "xpTURN.Klotho.LiteNetLib",
+    "rootNamespace": "",
+    "references": [
+        "LiteNetLib",
+        "xpTURN.Klotho.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": true
+}

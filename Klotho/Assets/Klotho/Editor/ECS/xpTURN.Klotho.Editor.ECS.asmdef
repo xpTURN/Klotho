@@ -1,0 +1,19 @@
+{
+    "name": "xpTURN.Klotho.Editor.ECS",
+    "rootNamespace": "",
+    "references": [
+        "GUID:169f113c81c3048f2956d785b2922ae9",
+        "GUID:a1aa7502faa924578b7ea3f78617fa0b"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

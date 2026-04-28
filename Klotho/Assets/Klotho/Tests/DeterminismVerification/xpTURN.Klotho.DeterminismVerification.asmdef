@@ -1,0 +1,19 @@
+{
+    "name": "xpTURN.Klotho.DeterminismVerification",
+    "rootNamespace": "",
+    "references": [
+        "xpTURN.Klotho.Runtime",
+        "xpTURN.Polyfill.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [
+        "Microsoft.Extensions.Logging.Abstractions.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

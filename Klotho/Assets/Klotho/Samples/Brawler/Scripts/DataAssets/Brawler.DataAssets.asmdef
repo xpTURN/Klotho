@@ -1,0 +1,22 @@
+{
+    "name": "Brawler.DataAssets",
+    "rootNamespace": "",
+    "references": [
+        "GUID:e54187357b07148a9ad4cf24f45837a7",
+        "GUID:169f113c81c3048f2956d785b2922ae9"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [
+        "Microsoft.Extensions.Logging.dll",
+        "Microsoft.Extensions.Logging.Abstractions.dll",
+        "ZLogger.dll",
+        "Utf8StringInterpolation.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": true
+}

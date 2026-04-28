@@ -1,0 +1,59 @@
+<!--
+  KlothoServer.Core.props — Tier 1+2 shared source links.
+  Imported via <Import> from each game-specific DedicatedServer.csproj.
+
+  Why use .props (source sharing) instead of ProjectReference (binary reference):
+  The source generator (KlothoGenerator) emits RegisterGeneratedTypes as a partial
+  method on CommandFactory/MessageSerializer, so every [KlothoSerializable] type
+  must live in a single compilation unit.
+  Splitting via ProjectReference would force the partial class to cross assembly
+  boundaries, leaving registration incomplete.
+-->
+<Project>
+  <PropertyGroup>
+    <KlothoRuntimeRoot>$(MSBuildThisFileDirectory)..\..\Assets\Klotho\Runtime</KlothoRuntimeRoot>
+    <KlothoLiteNetLibRoot>$(MSBuildThisFileDirectory)..\..\Assets\Plugins\LiteNetLib</KlothoLiteNetLibRoot>
+    <KlothoTransportRoot>$(MSBuildThisFileDirectory)..\..\Assets\Klotho\LiteNetLib</KlothoTransportRoot>
+    <KlothoGameplayRoot>$(MSBuildThisFileDirectory)..\..\Assets\Klotho\Gameplay</KlothoGameplayRoot>
+  </PropertyGroup>
+
+  <!-- Source Generator -->
+  <ItemGroup>
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\KlothoGenerator\KlothoGenerator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- NuGet -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+    <PackageReference Include="ZLogger" Version="2.5.10" />
+    <PackageReference Include="Utf8StringInterpolation" Version="1.3.2" />
+    <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ═══ Tier 1: Runtime (only Core remains after Gameplay split) ═══ -->
+    <Compile Include="$(KlothoRuntimeRoot)\**\*.cs"
+             Exclude="$(KlothoRuntimeRoot)\**\Json\**\*.cs"
+             Link="Runtime\%(RecursiveDir)%(Filename)%(Extension)" />
+
+    <!-- ═══ Tier 1: LiteNetLib sources ═══ -->
+    <Compile Include="$(KlothoLiteNetLibRoot)\*.cs" Link="LiteNetLib\%(Filename)%(Extension)" />
+    <Compile Include="$(KlothoLiteNetLibRoot)\Layers\*.cs" Link="LiteNetLib\Layers\%(Filename)%(Extension)" />
+    <Compile Include="$(KlothoLiteNetLibRoot)\Utils\*.cs" Link="LiteNetLib\Utils\%(Filename)%(Extension)" />
+
+    <!-- ═══ Tier 1: LiteNetLibTransport ═══ -->
+    <Compile Include="$(KlothoTransportRoot)\LiteNetLibTransport.cs" Link="Transport\LiteNetLibTransport.cs" />
+    <Compile Include="$(KlothoTransportRoot)\LiteNetLibPeerMap.cs" Link="Transport\LiteNetLibPeerMap.cs" />
+    <Compile Include="$(KlothoTransportRoot)\LiteNetLibNetLogger.cs" Link="Transport\LiteNetLibNetLogger.cs" />
+    <Compile Include="$(KlothoTransportRoot)\Pugins\iOS\IPv6Helper.cs" Link="Transport\IPv6Helper.cs" />
+
+    <!-- ═══ Tier 3: Gameplay (built-in, optional) ═══ -->
+    <Compile Include="$(KlothoGameplayRoot)\**\*.cs" Link="Gameplay\%(RecursiveDir)%(Filename)%(Extension)" />
+
+    <!-- ═══ Server shared utilities ═══ -->
+    <Compile Include="$(MSBuildThisFileDirectory)*.cs" Link="Server\%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

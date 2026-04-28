@@ -1,0 +1,265 @@
+[
+    {
+        "$type": "Brawler.BrawlerGameRulesAsset, Brawler.DataAssets",
+        "AssetId": 1001,
+        "GameDurationSeconds": 120,
+        "StageBoundsSize": 40.0,
+        "FallDeathY": -10.0,
+        "RespawnTicks": 120,
+        "CharacterSpawnY": 0.0,
+        "SpawnPositions": [
+            { "x": -4.0, "y": 0.0, "z": -4.0 },
+            { "x":  4.0, "y": 0.0, "z": -4.0 },
+            { "x": -4.0, "y": 0.0, "z":  4.0 },
+            { "x":  4.0, "y": 0.0, "z":  4.0 }
+        ]
+    },
+
+    {
+        "$type": "Brawler.CharacterStatsAsset, Brawler.DataAssets",
+        "AssetId": 1100,
+        "PrototypeId": 100,
+        "MoveSpeed": 5.0,
+        "Mass": 1.0,
+        "Friction": 0.5,
+        "ColliderRadius": 0.5,
+        "ColliderHalfHeight": 0.5,
+        "ColliderOffsetY": 1.0,
+        "Skill0Id": 1200,
+        "Skill1Id": 1201
+    },
+    {
+        "$type": "Brawler.CharacterStatsAsset, Brawler.DataAssets",
+        "AssetId": 1101,
+        "PrototypeId": 101,
+        "MoveSpeed": 3.0,
+        "Mass": 1.0,
+        "Friction": 0.5,
+        "ColliderRadius": 0.5,
+        "ColliderHalfHeight": 0.5,
+        "ColliderOffsetY": 1.0,
+        "Skill0Id": 1210,
+        "Skill1Id": 1211
+    },
+    {
+        "$type": "Brawler.CharacterStatsAsset, Brawler.DataAssets",
+        "AssetId": 1102,
+        "PrototypeId": 102,
+        "MoveSpeed": 7.0,
+        "Mass": 1.0,
+        "Friction": 0.5,
+        "ColliderRadius": 0.5,
+        "ColliderHalfHeight": 0.5,
+        "ColliderOffsetY": 1.0,
+        "Skill0Id": 1220,
+        "Skill1Id": 1221
+    },
+    {
+        "$type": "Brawler.CharacterStatsAsset, Brawler.DataAssets",
+        "AssetId": 1103,
+        "PrototypeId": 103,
+        "MoveSpeed": 3.0,
+        "Mass": 1.0,
+        "Friction": 0.5,
+        "ColliderRadius": 0.5,
+        "ColliderHalfHeight": 0.5,
+        "ColliderOffsetY": 1.0,
+        "Skill0Id": 1230,
+        "Skill1Id": 1231
+    },
+
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1200,
+        "Cooldown": 60,
+        "ActionLockTicks": 20,
+        "MoveSpeedOrRange": 0.0,
+        "RangeSqr": 9.0,
+        "KnockbackPower": 20,
+        "EffectRadius": 0.0,
+        "AuxDurationTicks": 0,
+        "ImpactOffsetDist": 0.0
+    },
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1201,
+        "Cooldown": 60,
+        "ActionLockTicks": 12,
+        "MoveSpeedOrRange": 15.0,
+        "RangeSqr": 0.0,
+        "KnockbackPower": 0,
+        "EffectRadius": 0.0,
+        "AuxDurationTicks": 0,
+        "ImpactOffsetDist": 0.0
+    },
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1210,
+        "Cooldown": 60,
+        "ActionLockTicks": 18,
+        "MoveSpeedOrRange": 6.0,
+        "RangeSqr": 4.0,
+        "KnockbackPower": 15,
+        "EffectRadius": 0.0,
+        "AuxDurationTicks": 0,
+        "ImpactOffsetDist": 0.0
+    },
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1211,
+        "Cooldown": 60,
+        "ActionLockTicks": 10,
+        "MoveSpeedOrRange": 8.0,
+        "RangeSqr": 0.0,
+        "KnockbackPower": 0,
+        "EffectRadius": 0.0,
+        "AuxDurationTicks": 0,
+        "ImpactOffsetDist": 0.0
+    },
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1220,
+        "Cooldown": 60,
+        "ActionLockTicks": 12,
+        "MoveSpeedOrRange": 15.0,
+        "RangeSqr": 4.0,
+        "KnockbackPower": 12,
+        "EffectRadius": 0.0,
+        "AuxDurationTicks": 0,
+        "ImpactOffsetDist": 2.0
+    },
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1221,
+        "Cooldown": 60,
+        "ActionLockTicks": 15,
+        "MoveSpeedOrRange": 0.0,
+        "RangeSqr": 36.0,
+        "KnockbackPower": 8,
+        "EffectRadius": 0.0,
+        "AuxDurationTicks": 0,
+        "ImpactOffsetDist": 0.0
+    },
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1230,
+        "Cooldown": 60,
+        "ActionLockTicks": 20,
+        "MoveSpeedOrRange": 0.0,
+        "RangeSqr": 0.0,
+        "KnockbackPower": 0,
+        "EffectRadius": 0.0,
+        "AuxDurationTicks": 30,
+        "ImpactOffsetDist": 0.0
+    },
+    {
+        "$type": "Brawler.SkillConfigAsset, Brawler.DataAssets",
+        "AssetId": 1231,
+        "Cooldown": 60,
+        "ActionLockTicks": 25,
+        "MoveSpeedOrRange": 0.0,
+        "RangeSqr": 16.0,
+        "KnockbackPower": 25,
+        "EffectRadius": 4.0,
+        "AuxDurationTicks": 0,
+        "ImpactOffsetDist": 0.0
+    },
+
+    {
+        "$type": "Brawler.CombatPhysicsAsset, Brawler.DataAssets",
+        "AssetId": 1300,
+        "DefaultKnockbackDurationTicks": 20,
+        "HitReactionDurationTicks": 10,
+        "PushDurationTicks": 10,
+        "BodyRadiusSqr": 1.0,
+        "ContactPower": 5,
+        "ShieldDurationTicks": 100,
+        "BoostDurationTicks": 100,
+        "BombRadiusSqr": 9.0,
+        "BombBasePower": 15,
+        "BombImpulse": 15.0
+    },
+
+    {
+        "$type": "Brawler.BasicAttackConfigAsset, Brawler.DataAssets",
+        "AssetId": 1301,
+        "MeleeRangeSqr": 4.0,
+        "BasePower": 10,
+        "ActionLockTicks": 15,
+        "HitStunTicks": 6
+    },
+
+    {
+        "$type": "Brawler.ItemConfigAsset, Brawler.DataAssets",
+        "AssetId": 1400,
+        "SpawnIntervalTicks": 200,
+        "MaxItems": 4,
+        "ItemLifetimeTicks": 600,
+        "SpawnMinRange": 4.0,
+        "SpawnMaxRange": 8.0,
+        "BoostSpeedMultiplier": 1.5,
+        "PickupRadiusSqr": 0.4
+    },
+
+    {
+        "$type": "Brawler.MovementPhysicsAsset, Brawler.DataAssets",
+        "AssetId": 1500,
+        "JumpSpeed": 10.0,
+        "GravityAccel": 20.0,
+        "MinMoveSqr": 0.0001,
+        "SkinOffset": 0.3,
+        "MaxFallProbe": 5.0,
+        "GroundEnterDepth": 0.19,
+        "GroundSnapDepth": 0.05
+    },
+
+    {
+        "$type": "Brawler.BotBehaviorAsset, Brawler.DataAssets",
+        "AssetId": 1600,
+        "StageBoundary": 10.0,
+        "ChaseStopDistance": 1.5,
+        "NavSnapMaxDist": 3.0,
+        "EvadeCooldownTicks": 300,
+        "EyeHeight": 1.5,
+        "TargetScoreKnockbackFactor": 0.05,
+        "TargetScoreStockFactor": 2.0,
+        "EvadePoints": [
+            { "x": -5.0, "y": 0.0, "z": -5.0 },
+            { "x":  5.0, "y": 0.0, "z": -5.0 },
+            { "x": -5.0, "y": 0.0, "z":  5.0 },
+            { "x":  5.0, "y": 0.0, "z":  5.0 },
+            { "x":  0.0, "y": 0.0, "z": -5.0 },
+            { "x":  0.0, "y": 0.0, "z":  5.0 },
+            { "x": -5.0, "y": 0.0, "z":  0.0 },
+            { "x":  5.0, "y": 0.0, "z":  0.0 }
+        ]
+    },
+
+    {
+        "$type": "Brawler.BotDifficultyAsset, Brawler.DataAssets",
+        "AssetId": 1700,
+        "DecisionCooldown": 20,
+        "AttackCooldownBase": 30,
+        "EvadeMargin": 1.0,
+        "EvadeKnockbackPct": 50,
+        "SkillExtraDelay": 30
+    },
+    {
+        "$type": "Brawler.BotDifficultyAsset, Brawler.DataAssets",
+        "AssetId": 1701,
+        "DecisionCooldown": 10,
+        "AttackCooldownBase": 20,
+        "EvadeMargin": 2.0,
+        "EvadeKnockbackPct": 70,
+        "SkillExtraDelay": 10
+    },
+    {
+        "$type": "Brawler.BotDifficultyAsset, Brawler.DataAssets",
+        "AssetId": 1702,
+        "DecisionCooldown": 5,
+        "AttackCooldownBase": 12,
+        "EvadeMargin": 3.0,
+        "EvadeKnockbackPct": 85,
+        "SkillExtraDelay": 0
+    }
+]

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>xpTURN.Klotho.BrawlerDedicatedServer</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <PublishReadyToRun>true</PublishReadyToRun>
+  </PropertyGroup>
+
+  <!-- Tier 1+2+3: server framework shared sources -->
+  <Import Project="..\Server\KlothoServer.Core.props" />
+
+  <PropertyGroup>
+    <BrawlerRoot>..\..\Assets\Klotho\Samples\Brawler\Scripts</BrawlerRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Tier 4: Brawler DataAssets/ECS (game project) -->
+    <Compile Include="$(BrawlerRoot)\DataAssets\**\*.cs" Link="Game\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="$(BrawlerRoot)\ECS\**\*.cs" Link="Game\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Brawler Data (.bytes) → copy to bin/Data/ -->
+    <Content Include="..\..\Assets\Klotho\Samples\Brawler\Data\*.bytes">
+      <Link>Data\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Server config JSON -->
+    <Content Include="simulationconfig.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="sessionconfig.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

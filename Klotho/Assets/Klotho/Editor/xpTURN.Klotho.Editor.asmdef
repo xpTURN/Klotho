@@ -1,0 +1,22 @@
+{
+    "name": "xpTURN.Klotho.Editor",
+    "rootNamespace": "",
+    "references": [
+        "ZLogger.Unity",
+        "xpTURN.Klotho.Runtime",
+        "xpTURN.Klotho.Runtime.Unity",
+        "xpTURN.Klotho.Editor.ECS",
+        "xpTURN.Klotho.DataAsset.Json"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

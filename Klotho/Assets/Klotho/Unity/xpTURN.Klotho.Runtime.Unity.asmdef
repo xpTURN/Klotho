@@ -1,0 +1,20 @@
+{
+    "name": "xpTURN.Klotho.Runtime.Unity",
+    "rootNamespace": "",
+    "references": [
+        "GUID:75469ad4d38634e559750d17036d5f7c",
+        "GUID:f51ebe6a0ceec4240a699833d6309b23",
+        "GUID:2b78dc61ba35e42c39ba2aabce11b6c4",
+        "GUID:c87cf8b4e18f24d06b35a618fc788dbd",
+        "GUID:169f113c81c3048f2956d785b2922ae9"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
