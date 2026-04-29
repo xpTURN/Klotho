@@ -30,6 +30,31 @@ A Unity-based framework supporting Client-Side Prediction (CSP), Rollback, Frame
 
 ---
 
+## Suitable Genres
+
+Genres that benefit most from Klotho's deterministic simulation features.
+
+### Best Fit (core targets)
+
+- **Fighting games** — frame-perfect inputs + rollback netcode
+- **Platform fighters / arena brawlers**
+- **2–4 player PvP action** — optimal for small-roster P2P rollback
+- **Tactics / turn-based SRPG** — determinism + replay + sync verification
+- **Real-time strategy (RTS)** — lockstep frame sync
+- **MOBA / top-down arena** — ECS, physics, and navigation all included
+- **Twin-stick shooters / co-op shooters** — deterministic physics + ORCA avoidance
+- **Auto-battlers** — deterministic simulation + shareable replays
+
+### Good Fit (structurally well-suited)
+
+- **Roguelike / roguelite (PvE co-op)** — deterministic RNG (Xorshift128+) for shared seeds and replays
+- **Card / board / deckbuilder PvP** — low input volume, strong verification and replay
+- **Puzzle PvP / falling-block versus**
+- **Racing (small scale)** — fixed-point physics guarantees determinism for small grids
+- **Top-down survival action**
+
+---
+
 ## Architecture Overview
 
 ```
