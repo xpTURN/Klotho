@@ -16,8 +16,8 @@ using xpTURN.Klotho.BrawlerDedicatedServer;
 using xpTURN.Klotho.BrawlerDedicatedServer.Tests;
 
 // ── CLI parsing ──
-// Single room: dotnet run -- <port> <maxPlayers> <botCount> [logLevel]
-// Multi-room:  dotnet run -- --multi <port> <maxRooms> <maxPlayersPerRoom> <botCount> [logLevel]
+// Single room: dotnet run -- <port> <botCount> [logLevel]
+// Multi-room:  dotnet run -- --multi <port> <maxRooms> <botCount> [logLevel]
 // Test:        dotnet run -- --test
 // Config:      dotnet run -- --config-dir <dir> ...  (auto-discovered from CWD or bin directory if not specified)
 bool isTest = args.Length > 0 && args[0] == "--test";
@@ -37,14 +37,13 @@ return 0;
 static void RunSingleRoom(string[] args)
 {
     int port = args.Length > 0 ? int.Parse(args[0]) : 7777;
-    int maxPlayers = args.Length > 1 ? int.Parse(args[1]) : 4;
-    int botCount = args.Length > 2 ? int.Parse(args[2]) : 0;
+    int botCount = args.Length > 1 ? int.Parse(args[1]) : 0;
 
     var staticColliderPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.StaticColliders.bytes");
     var navMeshPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.NavMeshData.bytes");
     var assetPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerAssets.bytes");
 
-    var logLevel = args.Length > 3 ? Enum.Parse<LogLevel>(args[3]) : LogLevel.Warning;
+    var logLevel = args.Length > 2 ? Enum.Parse<LogLevel>(args[2]) : LogLevel.Warning;
     using var loggerFactory = CreateLoggerFactory(logLevel);
     var logger = loggerFactory.CreateLogger("Server");
 
@@ -52,6 +51,8 @@ static void RunSingleRoom(string[] args)
     var simConfig = SimulationConfigLoader.Load(args, logger);
     var sessionConfig = SessionConfigLoader.Load(args, logger);
     int tickIntervalMs = simConfig.TickIntervalMs;
+    var maxPlayers = sessionConfig.MaxPlayers;
+    var maxSpectators = sessionConfig.MaxSpectators;
 
     // Pre-load data
     var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);
@@ -88,9 +89,10 @@ static void RunSingleRoom(string[] args)
     networkService.SubscribeEngine(engine);
 
     networkService.CreateRoom("default", maxPlayers);
-    networkService.Listen("0.0.0.0", port, maxPlayers);
+    networkService.MaxSpectatorsPerRoom = maxSpectators;
+    networkService.Listen("0.0.0.0", port, maxPlayers + maxSpectators);
 
-    logger.ZLogInformation($"[BrawlerDedicatedServer] Server listening on port {port}, maxPlayers={maxPlayers}, botCount={botCount}, tickInterval={tickIntervalMs}ms");
+    logger.ZLogInformation($"[BrawlerDedicatedServer] Server listening on port {port}, maxPlayers={maxPlayers}, maxSpectators={maxSpectators}, botCount={botCount}, tickInterval={tickIntervalMs}ms");
 
     var loop = new DedicatedServerLoop(engine, transport, tickIntervalMs, logger);
     loop.Run();
@@ -106,17 +108,16 @@ static void RunSingleRoom(string[] args)
 // ═══════════════════════════════════════════════════════════
 static void RunMultiRoom(string[] args)
 {
-    // dotnet run -- --multi <port> <maxRooms> <maxPlayersPerRoom> <botCount> [logLevel]
+    // dotnet run -- --multi <port> <maxRooms> <botCount> [logLevel]
     int port = args.Length > 1 ? int.Parse(args[1]) : 7777;
     int maxRooms = args.Length > 2 ? int.Parse(args[2]) : 4;
-    int maxPlayersPerRoom = args.Length > 3 ? int.Parse(args[3]) : 4;
-    int botCount = args.Length > 4 ? int.Parse(args[4]) : 0;
+    int botCount = args.Length > 3 ? int.Parse(args[3]) : 0;
 
     var staticColliderPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.StaticColliders.bytes");
     var navMeshPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.NavMeshData.bytes");
     var assetPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerAssets.bytes");
 
-    var logLevel = args.Length > 5 ? Enum.Parse<LogLevel>(args[5]) : LogLevel.Warning;
+    var logLevel = args.Length > 4 ? Enum.Parse<LogLevel>(args[4]) : LogLevel.Warning;
     using var loggerFactory = CreateLoggerFactory(logLevel);
     var logger = loggerFactory.CreateLogger("Server");
 
@@ -124,6 +125,8 @@ static void RunMultiRoom(string[] args)
     var simConfig = SimulationConfigLoader.Load(args, logger);
     var sessionConfig = SessionConfigLoader.Load(args, logger);
     int tickIntervalMs = simConfig.TickIntervalMs;
+    var maxPlayersPerRoom = sessionConfig.MaxPlayers;
+    var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
 
     // Pre-load data — shared across rooms (read-only)
     var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);
@@ -140,7 +143,7 @@ static void RunMultiRoom(string[] args)
 
     // Single Transport (one port)
     var transport = new LiteNetLibTransport(logger);
-    transport.Listen("0.0.0.0", port, maxRooms * maxPlayersPerRoom);
+    transport.Listen("0.0.0.0", port, maxRooms * (maxPlayersPerRoom + maxSpectatorsPerRoom));
 
     // RoomRouter + RoomManager
     var router = new RoomRouter(transport, logger);
@@ -148,6 +151,7 @@ static void RunMultiRoom(string[] args)
     {
         MaxRooms = maxRooms,
         MaxPlayersPerRoom = maxPlayersPerRoom,
+        MaxSpectatorsPerRoom = maxSpectatorsPerRoom,
         SimulationFactory = () => new EcsSimulation(
             maxEntities: simConfig.MaxEntities,
             maxRollbackTicks: 1,

@@ -294,7 +294,6 @@ namespace xpTURN.Klotho.Core
                 var engineSnapshot = _engineSnapshots[restoreTick % _engineSnapshots.Length];
                 if (engineSnapshot.ActivePlayerIds != null)
                 {
-                    _playerCount = engineSnapshot.PlayerCount;
                     _activePlayerIds.Clear();
                     _activePlayerIds.AddRange(engineSnapshot.ActivePlayerIds);
                 }

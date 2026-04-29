@@ -146,7 +146,6 @@ namespace xpTURN.Klotho.Core
         private bool _consumePendingDeltaTime;
         private int _lastVerifiedTick;
         private int _lastBatchedTick = -1;
-        private int _playerCount;
         private readonly List<int> _activePlayerIds = new List<int>();
 
         private readonly List<ICommand> _pendingCommands = new List<ICommand>();
@@ -434,7 +433,6 @@ namespace xpTURN.Klotho.Core
             _dispatcher = new EventDispatcher(logger, _simConfig.EventDispatchWarnMs);
             (_inputBuffer as InputBuffer)?.SetLogger(logger);
 
-            _playerCount = networkService.PlayerCount;
             _activePlayerIds.Clear();
             for (int i = 0; i < networkService.Players.Count; i++)
                 _activePlayerIds.Add(networkService.Players[i].PlayerId);
@@ -448,7 +446,7 @@ namespace xpTURN.Klotho.Core
                     if (i > 0) sb.Append(',');
                     sb.Append(_activePlayerIds[i]);
                 }
-                _logger?.ZLogInformation($"[KlothoEngine][Roster] Initialize: PlayerCount={_playerCount}, active=[{sb}], LocalPlayerId={networkService.LocalPlayerId}, IsHost={networkService.IsHost}");
+                _logger?.ZLogInformation($"[KlothoEngine][Roster] Initialize: PlayerCount={_activePlayerIds.Count}, active=[{sb}], LocalPlayerId={networkService.LocalPlayerId}, IsHost={networkService.IsHost}");
             }
 #endif
 
@@ -488,7 +486,7 @@ namespace xpTURN.Klotho.Core
                 _networkService.OnFrameAdvantageReceived += HandleFrameAdvantage;
             }
 
-            _simulation.OnPlayerCountChanged += HandlePlayerCountChanged;
+            _simulation.OnPlayerJoinedNotification += HandlePlayerJoinedNotification;
             _simulation.Initialize();
 
             // Event system. SD server does not collect events, so substitute a null implementation.
@@ -565,7 +563,7 @@ namespace xpTURN.Klotho.Core
 
             if (enableRecording && !_isReplayMode)
             {
-                _replaySystem.StartRecording(_playerCount, _simConfig, _randomSeed);
+                _replaySystem.StartRecording(_activePlayerIds.Count, _simConfig, _randomSeed);
             }
 
             State = KlothoState.Running;
@@ -811,13 +809,13 @@ namespace xpTURN.Klotho.Core
 
         private bool CanAdvanceTick()
         {
-            if (_inputBuffer.HasAllCommands(CurrentTick, _playerCount))
+            if (_inputBuffer.HasAllCommands(CurrentTick, _activePlayerIds.Count))
                 return true;
 
             if (_disconnectedPlayerIds.Count > 0)
                 OnDisconnectedInputNeeded?.Invoke(CurrentTick);
 
-            return _inputBuffer.HasAllCommands(CurrentTick, _playerCount);
+            return _inputBuffer.HasAllCommands(CurrentTick, _activePlayerIds.Count);
         }
 
         private void ExecuteTick()
@@ -1080,12 +1078,11 @@ namespace xpTURN.Klotho.Core
         private void HandleGameStart()
         {
             // After all players are confirmed, refresh the player count and ID list.
-            _playerCount = _networkService.PlayerCount;
             _activePlayerIds.Clear();
             for (int i = 0; i < _networkService.Players.Count; i++)
                 _activePlayerIds.Add(_networkService.Players[i].PlayerId);
             _randomSeed = _networkService.RandomSeed;
-            _logger?.ZLogInformation($"[KlothoEngine] HandleGameStart: Game start: playerCount={_playerCount}");
+            _logger?.ZLogInformation($"[KlothoEngine] HandleGameStart: Game start: playerCount={_activePlayerIds.Count}");
 
             if (_simConfig.Mode == NetworkMode.ServerDriven)
                 _lastServerVerifiedTick = 0;

@@ -81,5 +81,10 @@ namespace xpTURN.Klotho.Core
         /// Range: 1 or greater. Typically 100~500.
         /// </summary>
         int CatchupMaxTicksPerFrame { get; }
+
+        /// <summary>
+        /// Maximum number of spectators allowed in the session.
+        /// </summary>
+        int MaxSpectators { get; }
     }
 }

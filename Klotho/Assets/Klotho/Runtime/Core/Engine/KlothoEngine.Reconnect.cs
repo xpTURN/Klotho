@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 
+using ZLogger;
+
 using xpTURN.Klotho.Input;
 using xpTURN.Klotho.Serialization;
 
@@ -28,9 +30,9 @@ namespace xpTURN.Klotho.Core
 
         public void NotifyPlayerLeft(int playerId)
         {
-            _playerCount--;
             _activePlayerIds.Remove(playerId);
             _disconnectedPlayerIds.Remove(playerId);
+            _logger?.ZLogTrace($"[KlothoEngine][Roster] PlayerLeft: playerId={playerId}, rosterCount={_activePlayerIds.Count}, CurrentTick={CurrentTick}");
         }
 
         public void PauseForReconnect()

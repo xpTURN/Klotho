@@ -136,21 +136,19 @@ namespace xpTURN.Klotho.Core
             _networkService.SendCommand(cmd);
         }
 
-        private void HandlePlayerCountChanged(int newPlayerCount, int changedPlayerId)
+        private void HandlePlayerJoinedNotification(int joinedPlayerId)
         {
-            _playerCount = newPlayerCount;
-            if (!_activePlayerIds.Contains(changedPlayerId))
-                _activePlayerIds.Add(changedPlayerId);
+            if (!_activePlayerIds.Contains(joinedPlayerId))
+                _activePlayerIds.Add(joinedPlayerId);
 
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
-            // Diagnostic — roster snapshot when player count changes.
             var sb = new System.Text.StringBuilder();
             for (int i = 0; i < _activePlayerIds.Count; i++)
             {
                 if (i > 0) sb.Append(',');
                 sb.Append(_activePlayerIds[i]);
             }
-            _logger?.ZLogInformation($"[KlothoEngine][Roster] PlayerCountChanged: newCount={newPlayerCount}, changed={changedPlayerId}, active=[{sb}], CurrentTick={CurrentTick}, _lastVerifiedTick={_lastVerifiedTick}");
+            _logger?.ZLogInformation($"[KlothoEngine][Roster] PlayerJoined: playerId={joinedPlayerId}, rosterCount={_activePlayerIds.Count}, active=[{sb}], CurrentTick={CurrentTick}, _lastVerifiedTick={_lastVerifiedTick}");
 #endif
         }
 

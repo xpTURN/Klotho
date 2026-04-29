@@ -1,6 +1,7 @@
 {
   "AllowLateJoin": true,
-  "ReconnectTimeoutMs": 30000,
+  "ReconnectTimeoutMs": 60000,
   "ReconnectMaxRetries": 3,
-  "MinPlayers": 2
+  "MinPlayers": 2,
+  "MaxSpectators": 4
 }

@@ -9,7 +9,7 @@
 
 A Unity-based framework supporting Client-Side Prediction (CSP), Rollback, Frame Synchronization, Server-Driven mode, and Replay. By excluding floating-point and building the simulation solely on 32.32 fixed-point (`FP64`) and a deterministic RNG (Xorshift128+), it guarantees full reproducibility across platforms and compilers.
 
-> Klotho weaves every frame of the simulation, one thread at a time.
+> Klotho weaves the simulation, one frame at a time.
 
 ---
 
@@ -24,7 +24,7 @@ A Unity-based framework supporting Client-Side Prediction (CSP), Rollback, Frame
 | **ECS** | Sparse-set `ComponentStorage<T>` · `Frame` (single byte[] heap) · `FilterWithout/Filter<T1..T5>` · `FrameRingBuffer` · `SystemRunner` |
 | **Serialization / Source Generator** | `SpanWriter/Reader` (ref struct, GC-free) · automatic code generation via `[KlothoComponent]` / `[KlothoSerializable]` / `[KlothoDataAsset]` |
 | **Data Assets** | `IDataAsset` · `DataAssetRegistry` · `DataAssetRef` · JSON serialization (`xpTURN.Klotho.DataAsset.Json`) |
-| **Replay** | Record / playback / seek / variable speed · LZ4 compression (`K4os.Compression.LZ4`) · `RPLY` magic |
+| **Replay** | Record / playback / seek / variable speed · LZ4 compression (`K4os.Compression.LZ4`) |
 | **Verification Tools** | `SyncTestRunner` (GGPO-style determinism verification) · `DeterminismVerificationRunner` · benchmark suite |
 | **Unity Integration** | `UKlothoBehaviour` · `USimulationConfig` · View layer (`EntityViewFactory` / `EntityViewUpdater` / `EntityView`, `BindBehaviour` / `ViewFlags`, `VerifiedFrameInterpolator`) |
 
@@ -64,8 +64,8 @@ Three-layer separation:
 
 ## Tech Stack
 
-- **Unity 6.3**, URP, Input System
-- **C# 9.0** (some assemblies use C# 11)
+- **Unity 2022.3+**, URP, Input System
+- **C# 8.0** (some assemblies opt into newer C# language features via the `xpTURN.Polyfill` package, which supplies the runtime-attribute shims required by C# 11)
 - **UniTask** — async (Cysharp)
 - **ZLogger + Microsoft.Extensions.Logging** — structured logging
 - **LiteNetLib** — default reference implementation for UDP transport (MIT, pure C#). The network transport layer is abstracted via the `INetworkTransport` interface and can be replaced with any other library.

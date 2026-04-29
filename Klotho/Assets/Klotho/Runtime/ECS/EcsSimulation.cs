@@ -63,12 +63,7 @@ namespace xpTURN.Klotho.ECS
                 _snapshotParticipants.Add(sp);
         }
 
-        public void SetPlayerCount(int playerCount)
-        {
-            _playerCount = playerCount;
-        }
-
-        public void Initialize()
+public void Initialize()
         {
             _frame.Clear();
             _frame.Tick = 0;
@@ -77,8 +72,6 @@ namespace xpTURN.Klotho.ECS
             _frame.OnEntityDestroyed = entity => _systemRunner.OnEntityDestroyed(ref _frame, entity);
             _systemRunner.Init(ref _frame);
         }
-
-        private int _playerCount;
 
         public void Tick(List<ICommand> commands)
         {
@@ -91,10 +84,7 @@ namespace xpTURN.Klotho.ECS
                 _systemRunner.RunCommandSystems(ref _frame, cmd);
 
                 if (cmd is Core.PlayerJoinCommand joinCmd)
-                {
-                    _playerCount++;
                     OnPlayerJoined(joinCmd.JoinedPlayerId, _frame.Tick);
-                }
             }
 
             // Phase.Update → PostUpdate → LateUpdate
@@ -254,11 +244,11 @@ namespace xpTURN.Klotho.ECS
             _systemRunner.EmitSyncEvents(ref _frame);
         }
 
-        public event Action<int, int> OnPlayerCountChanged;
+        public event Action<int> OnPlayerJoinedNotification;
 
         public void OnPlayerJoined(int playerId, int tick)
         {
-            OnPlayerCountChanged?.Invoke(_playerCount, playerId);
+            OnPlayerJoinedNotification?.Invoke(playerId);
         }
 
         public int RollbackCapacity => _ringBuffer.Capacity;

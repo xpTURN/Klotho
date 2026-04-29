@@ -37,7 +37,7 @@ namespace xpTURN.Klotho.Network.Tests
             public byte[] SerializeFullState() => BitConverter.GetBytes(StateHash);
             public (byte[] data, long hash) SerializeFullStateWithHash() => (BitConverter.GetBytes(StateHash), StateHash);
             public void EmitSyncEvents() { }
-            public event Action<int, int> OnPlayerCountChanged;
+            public event Action<int> OnPlayerJoinedNotification;
             public void OnPlayerJoined(int playerId, int tick) { }
         }
 

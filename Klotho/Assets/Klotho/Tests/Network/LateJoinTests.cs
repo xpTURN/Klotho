@@ -59,10 +59,10 @@ namespace xpTURN.Klotho.Network.Tests
             public (byte[] data, long hash) SerializeFullStateWithHash() => (BitConverter.GetBytes(StateHash), StateHash);
             public void EmitSyncEvents() { }
 
-            public event Action<int, int> OnPlayerCountChanged;
+            public event Action<int> OnPlayerJoinedNotification;
             public void OnPlayerJoined(int playerId, int tick)
             {
-                OnPlayerCountChanged?.Invoke(_playerCount, playerId);
+                OnPlayerJoinedNotification?.Invoke(playerId);
             }
 
             public void SetPlayerCount(int count) { _playerCount = count; }
@@ -214,10 +214,8 @@ namespace xpTURN.Klotho.Network.Tests
             var snapshot = snapshotsArray.GetValue(idx);
             var snapshotType = snapshot.GetType();
 
-            int playerCount = (int)snapshotType.GetField("PlayerCount").GetValue(snapshot);
             var activeIds = (int[])snapshotType.GetField("ActivePlayerIds").GetValue(snapshot);
 
-            Assert.AreEqual(2, playerCount);
             Assert.IsNotNull(activeIds);
             Assert.AreEqual(2, activeIds.Length);
             Assert.Contains(0, activeIds);
@@ -226,25 +224,6 @@ namespace xpTURN.Klotho.Network.Tests
 
         #endregion
 
-        #region #36: EngineStateSnapshot _playerCount restore
-
-        [Test]
-        public void PlayerCount_SavedInEngineSnapshot()
-        {
-            var playerCountField = GetField("_playerCount");
-            Assert.AreEqual(2, (int)playerCountField.GetValue(_engine));
-
-            AdvanceToTick(5);
-
-            // Verify the tick 3 snapshot has the correct PlayerCount
-            var snapshotsArray = GetField("_engineSnapshots").GetValue(_engine) as System.Array;
-            int idx = 3 % snapshotsArray.Length;
-            var snapshot = snapshotsArray.GetValue(idx);
-            int savedCount = (int)snapshot.GetType().GetField("PlayerCount").GetValue(snapshot);
-            Assert.AreEqual(2, savedCount, "PlayerCount saved correctly in EngineStateSnapshot");
-        }
-
-        #endregion
 
         #region #37: Late Join normal scenario (1 player)
 
@@ -341,11 +320,9 @@ namespace xpTURN.Klotho.Network.Tests
             }
             _engine.Update(0.3f);
 
-            var playerCount = (int)GetField("_playerCount").GetValue(_engine);
             var activeIds = (List<int>)GetField("_activePlayerIds").GetValue(_engine);
 
-            // PlayerJoinCommand should increment the player count
-            Assert.AreEqual(3, playerCount, "PlayerCount should be 3 after PlayerJoinCommand");
+            Assert.AreEqual(3, activeIds.Count, "PlayerCount should be 3 after PlayerJoinCommand");
             Assert.Contains(2, activeIds, "PlayerId 2 should be in _activePlayerIds");
         }
 
@@ -473,8 +450,8 @@ namespace xpTURN.Klotho.Network.Tests
         [Test]
         public void PlayerJoinCommand_UpdatesPlayerCountViaCallback()
         {
-            var playerCountField = GetField("_playerCount");
-            Assert.AreEqual(2, (int)playerCountField.GetValue(_engine));
+            var activeIds = (List<int>)GetField("_activePlayerIds").GetValue(_engine);
+            Assert.AreEqual(2, activeIds.Count);
 
             // Simulate PlayerJoinCommand being processed via Tick
             _networkService.FireLateJoinPlayerAdded(2, _engine.CurrentTick + 2);
@@ -489,10 +466,8 @@ namespace xpTURN.Klotho.Network.Tests
             float deltaTime = (3 * _engine.TickInterval + 1) / 1000f;
             _engine.Update(deltaTime);
 
-            Assert.AreEqual(3, (int)playerCountField.GetValue(_engine),
+            Assert.AreEqual(3, activeIds.Count,
                 "PlayerCount should be 3 after PlayerJoinCommand callback");
-
-            var activeIds = (List<int>)GetField("_activePlayerIds").GetValue(_engine);
             Assert.Contains(2, activeIds, "PlayerId 2 should be in _activePlayerIds");
         }
 
@@ -513,9 +488,6 @@ namespace xpTURN.Klotho.Network.Tests
             Assert.AreEqual(1, activeIds.Count);
             Assert.Contains(0, activeIds);
             Assert.IsFalse(activeIds.Contains(1));
-
-            var playerCount = (int)GetField("_playerCount").GetValue(_engine);
-            Assert.AreEqual(1, playerCount);
         }
 
         [Test]
@@ -575,11 +547,8 @@ namespace xpTURN.Klotho.Network.Tests
             // Execute
             _engine.Update(0.001f);
 
-            // After joinTick, _playerCount == 3, _activePlayerIds contains 2
-            var playerCount = (int)GetField("_playerCount").GetValue(_engine);
-            Assert.AreEqual(3, playerCount, "PlayerCount should be 3 after PlayerJoinCommand during catchup");
-
             var activeIds = (List<int>)GetField("_activePlayerIds").GetValue(_engine);
+            Assert.AreEqual(3, activeIds.Count, "PlayerCount should be 3 after PlayerJoinCommand during catchup");
             Assert.Contains(2, activeIds, "PlayerId 2 should be in _activePlayerIds");
 
             // Verify all ticks have executed

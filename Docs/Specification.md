@@ -217,22 +217,22 @@ Configuration is split into two layers.
 
 | Field | Default | Unit | Description |
 | ---- | ---- | ---- | ---- |
-| TickIntervalMs | 25 | ms | Tick interval (= 40 ticks/sec) |
-| InputDelayTicks | 4 | ticks | Input delay (= 100 ms) |
-| MaxRollbackTicks | 50 | ticks | Maximum rollback range |
-| SyncCheckInterval | 30 | ticks | State-hash verification period |
-| UsePrediction | true | bool | Whether input prediction is enabled |
-| MaxEntities | 256 | entities | ECS entity capacity |
-| Mode | P2P | NetworkMode | Network topology (P2P / ServerDriven) |
-| HardToleranceMs | 0 | ms | (SD) Hard tolerance |
-| InputResendIntervalMs | 25 | ms | (SD) Unacked input resend interval |
-| MaxUnackedInputs | 30 | count | (SD) Max queued unacked inputs |
-| ServerSnapshotRetentionTicks | 0 | ticks | (SD) Server snapshot retention |
-| SDInputLeadTicks | 0 | ticks | (SD) Input lead ticks |
-| EnableErrorCorrection | false | bool | Enable error correction |
-| InterpolationDelayTicks | 3 | ticks | View interpolation delay |
-| EventDispatchWarnMs | 5 | ms | Event dispatch warning threshold |
-| TickDriftWarnMultiplier | 2 | × | Tick drift warning multiplier |
+| TickIntervalMs | 25 | ms | Tick interval (= 40 ticks/sec). Range: 1 or greater (typically 16~50ms) |
+| InputDelayTicks | 4 | ticks | Local-input delay shift. Effective input delay = TickIntervalMs × InputDelayTicks (= 100 ms). Range: 0 or greater (typically 2~6) |
+| MaxRollbackTicks | 50 | ticks | Maximum rollback range. Determines snapshot ring buffer + input-buffer retention. Must be ≥ SyncCheckInterval |
+| SyncCheckInterval | 30 | ticks | State-hash verification period. Must be ≤ MaxRollbackTicks |
+| UsePrediction | true | bool | Whether input prediction is enabled. False → engine waits for all inputs (Paused) |
+| MaxEntities | 256 | entities | ECS entity capacity (EntityManager array size) |
+| Mode | P2P | NetworkMode | Network topology (P2P / ServerDriven). Discriminator for SD-only fields |
+| HardToleranceMs | 0 | ms | (SD) Server cmd-acceptance wall-clock deadline. **0 = auto** ((effectiveLeadTicks + InputDelayTicks + 1) × TickIntervalMs + RTT/2 + 20ms jitter); manual values for advanced tuning |
+| InputResendIntervalMs | 25 | ms | (SD) Interval at which the client resends unacknowledged inputs |
+| MaxUnackedInputs | 30 | count | (SD) Cap on accumulated unacknowledged inputs (warning emitted on overflow) |
+| ServerSnapshotRetentionTicks | 0 | ticks | (SD) Server snapshot ring-buffer slots. **0 = auto** (TickRate × 10). Independent of MaxRollbackTicks — used for FullStateRequest replies |
+| SDInputLeadTicks | 0 | ticks | (SD) Initial client lead ticks at game start. **0 = auto (default 10)**. Reused on LateJoin/Reconnect. Additive with InputDelayTicks; reflected in HardToleranceMs auto-calc |
+| EnableErrorCorrection | false | bool | Enable Error Correction (default off). Enable selectively in high-latency / multiplayer scenarios |
+| InterpolationDelayTicks | 3 | ticks | View-layer snapshot interpolation delay (used by RenderClock.VerifiedBaseTick = LastVerifiedTick - InterpolationDelayTicks). Recommended [1, 3]. SD: upper bound for AdaptiveRenderClock |
+| EventDispatchWarnMs | 5 | ms | Warning threshold for OnEvent* handler execution time (DEVELOPMENT_BUILD / UNITY_EDITOR only). 0 or less = disabled |
+| TickDriftWarnMultiplier | 2 | × | Tick-loop drift warning multiplier (warns if actual interval > TickIntervalMs × multiplier). 0 or less = disabled |
 
 #### SessionConfig Defaults
 
@@ -240,8 +240,10 @@ Configuration is split into two layers.
 | ---- | ---- | ---- | ---- |
 | RandomSeed | 0 | int | If 0, auto-generated via `Environment.TickCount` (host) |
 | MaxPlayers | 4 | count | Max players in a room |
+| MaxSpectators | 0 | count | Max spectators allowed in the session. Combined with MaxPlayers as the transport-level capacity (`MaxPlayersPerRoom + MaxSpectatorsPerRoom`) for spectator admission. 0 means spectators are not admitted. |
+| MinPlayers | 2 | count | Min players required to start. Range: 1 ≤ MinPlayers ≤ MaxPlayers (clamped at SessionConfigLoader.Load and KlothoSession.Create with a warning log; SD start gate also clamps to MaxPlayersPerRoom at runtime). |
 | AllowLateJoin | true | bool | Whether mid-game join is allowed |
-| ReconnectTimeoutMs | 30000 | ms | Reconnect timeout |
+| ReconnectTimeoutMs | 60000 | ms | Reconnect timeout |
 | ReconnectMaxRetries | 3 | tries | Max reconnect attempts |
 | LateJoinDelayTicks | 10 | ticks | Late-join activation delay |
 | ResyncMaxRetries | 3 | tries | Max resync attempts |
@@ -945,6 +947,7 @@ Carries the SessionConfig payload + StartTime + PlayerIds together (a separated 
   [long StartTime]                    // absolute game-start time, in SharedNow
   [int  RandomSeed]
   [int  MaxPlayers]
+  [int  MinPlayers]
   [bool AllowLateJoin]
   [int  ReconnectTimeoutMs]
   [int  ReconnectMaxRetries]
@@ -1012,6 +1015,7 @@ Every SPECTATOR_INPUT_INTERVAL ticks:
 - `SpectatorService.SetEngine(engine)` — deferred-Engine injection API used in the pattern above
 - `engine.StartSpectator(SpectatorStartInfo)` — start the engine in spectator mode
 - `engine.IsSpectatorMode` — whether spectator mode is active (prediction/rollback disabled)
+- Capacity gate — spectator admission is bounded by `SessionConfig.MaxSpectators`, exposed at the network layer as `ServerNetworkService.MaxSpectatorsPerRoom`. The transport listen capacity is `MaxPlayersPerRoom + MaxSpectatorsPerRoom`, and `RoomRouter` keeps the player capacity gate independent of the spectator slots.
 
 #### Reconnect Protocol
 
@@ -1178,4 +1182,4 @@ Payload:
 
 ---
 
-*Last updated: 2026-04-24*
+*Last updated: 2026-04-27*

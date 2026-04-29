@@ -116,7 +116,6 @@ public class DeterminismVerificationRunner : MonoBehaviour
         sim.AddSystem(new TrigStressSystem(), SystemPhase.PostUpdate);
         sim.AddSystem(new RandomStressSystem(), SystemPhase.LateUpdate);
         sim.Initialize();
-        sim.SetPlayerCount(1);
         return sim;
     }
 

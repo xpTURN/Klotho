@@ -201,7 +201,8 @@ namespace xpTURN.Klotho.Network
                 return null;
             }
 
-            if (room.Transport.PeerCount >= room.NetworkService.MaxPlayersPerRoom)
+            int transportCap = room.NetworkService.MaxPlayersPerRoom + room.NetworkService.MaxSpectatorsPerRoom;
+            if (room.Transport.PeerCount >= transportCap)
             {
                 _logger?.ZLogWarning($"[RoomRouter] Peer {peerId}: room {roomId} is full");
                 RejectAndDisconnect(peerId, 2); // RoomFull

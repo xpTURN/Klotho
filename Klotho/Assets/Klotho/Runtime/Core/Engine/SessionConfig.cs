@@ -39,5 +39,8 @@ namespace xpTURN.Klotho.Core
 
         /// <inheritdoc />
         public int CatchupMaxTicksPerFrame { get; set; } = 200;
+
+        /// <inheritdoc />
+        public int MaxSpectators { get; set; } = 0;
     }
 }

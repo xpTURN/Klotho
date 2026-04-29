@@ -127,8 +127,8 @@ A single headless server runs the simulation; clients only send input commands.
 cd Klotho/Tools/BrawlerDedicatedServer
 ./build.sh                                         # dotnet build -c Debug
 
-# Run: <port> <maxPlayers> <botCount> [logLevel]
-dotnet run --project BrawlerDedicatedServer.csproj -- 7777 4 0 Information
+# Run: <port> <botCount> [logLevel]
+dotnet run --project BrawlerDedicatedServer.csproj -- 7777 0 Information
 ```
 
 The server prints a banner with the bound endpoint once it is ready to accept clients. See [Brawler.H.DedicatedServer.md §H-5](Brawler.H.DedicatedServer.md#h-5-single-room-mode-phase-1) for bootstrap details.
@@ -172,11 +172,11 @@ A single server process hosts up to `maxRooms` matches concurrently on one share
 ```bash
 cd Klotho/Tools/BrawlerDedicatedServer
 
-# --multi <port> <maxRooms> <maxPlayersPerRoom> <botCount> [logLevel]
-dotnet run --project BrawlerDedicatedServer.csproj -- --multi 7777 4 2 0 Information
+# --multi <port> <maxRooms> <botCount> [logLevel]
+dotnet run --project BrawlerDedicatedServer.csproj -- --multi 7777 4 0 Information
 ```
 
-Listens on `0.0.0.0:7777`, hosts up to `4` rooms of `2` players each. See [Brawler.H.DedicatedServer.md §H-6](Brawler.H.DedicatedServer.md#h-6-multi-room-mode-phase-2) for routing details.
+Listens on `0.0.0.0:7777`, hosts up to `4` rooms. See [Brawler.H.DedicatedServer.md §H-6](Brawler.H.DedicatedServer.md#h-6-multi-room-mode-phase-2) for routing details.
 
 ### I-4-2. Client — choosing a room
 
@@ -205,7 +205,7 @@ The sample has no matchmaker — clients pick a room directly via `_roomId`. To 
 
 ### I-4-4. Spectating a specific room
 
-The **Spectator** button connects with `BrawlerSettings._roomId`, so set the room ID before clicking. The spectator path defers `Engine` creation until both `SimulationConfig` and `SessionConfig` arrive from the server, so spectators run with the room's authoritative settings.
+The **Spectator** button connects with `BrawlerSettings._roomId`, so set the room ID before clicking. The spectator path defers `Engine` creation until both `SimulationConfig` and `SessionConfig` arrive from the server, so spectators run with the room's authoritative settings. Spectator slots are bounded by `SessionConfig.MaxSpectators` (configured via `sessionconfig.json` for the dedicated server); if the value is 0 the transport rejects spectator connections.
 
 ---
 

@@ -50,18 +50,16 @@ namespace xpTURN.Klotho.Core
 
         /// <summary>
         /// Called when a new player is added via Late Join.
-        /// Creates entities required by the simulation and notifies the engine
-        /// to update _playerCount via the OnPlayerCountChanged callback.
         /// Automatically invoked when a PlayerJoinCommand is detected inside Tick(commands).
-        /// Implementations MUST raise OnPlayerCountChanged (contract).
+        /// Implementations MUST raise OnPlayerJoinedNotification (contract).
         /// </summary>
         void OnPlayerJoined(int playerId, int tick);
 
         /// <summary>
-        /// Callback to notify the engine when the player count changes (newPlayerCount, changedPlayerId).
-        /// Raised inside ISimulation.OnPlayerJoined.
+        /// Raised inside ISimulation.OnPlayerJoined to signal the engine that a player joined.
+        /// Carries only the joined playerId — sim entity count is internal to the simulation.
         /// </summary>
-        event Action<int, int> OnPlayerCountChanged;
+        event Action<int> OnPlayerJoinedNotification;
     }
 
 }

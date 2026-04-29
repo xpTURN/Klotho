@@ -101,6 +101,7 @@ namespace xpTURN.Klotho.Tests.Integration
             serverService.SubscribeEngine(peer.Engine);
 
             serverService.CreateRoom("test", maxPlayers);
+            serverService.MaxSpectatorsPerRoom = maxPlayers;
             serverService.Listen("localhost", 7777, maxPlayers);
 
             _server = peer;

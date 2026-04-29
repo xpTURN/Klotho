@@ -35,7 +35,7 @@ namespace xpTURN.Klotho.Core
             int tick = _lastVerifiedTick + 1;
             while (tick < CurrentTick)
             {
-                if (!_inputBuffer.HasAllCommands(tick, _playerCount))
+                if (!_inputBuffer.HasAllCommands(tick, _activePlayerIds.Count))
                 {
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
                     LogChainAdvanceBreak(tick);
@@ -85,7 +85,7 @@ namespace xpTURN.Klotho.Core
             }
             sb.Append(']');
 
-            _logger?.ZLogWarning($"[KlothoEngine][ChainBreak] stuck at tick={tick} (_lastVerifiedTick={_lastVerifiedTick}, CurrentTick={CurrentTick}, _playerCount={_playerCount}, activeIds.Count={_activePlayerIds.Count}) {sb}");
+            _logger?.ZLogWarning($"[KlothoEngine][ChainBreak] stuck at tick={tick} (_lastVerifiedTick={_lastVerifiedTick}, CurrentTick={CurrentTick}, activeIds.Count={_activePlayerIds.Count}) {sb}");
         }
 #endif
 

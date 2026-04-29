@@ -51,7 +51,7 @@ namespace xpTURN.Klotho.Core.Tests
 
             public void EmitSyncEvents() { }
 
-            public event System.Action<int, int> OnPlayerCountChanged;
+            public event System.Action<int> OnPlayerJoinedNotification;
             public void OnPlayerJoined(int playerId, int tick) { }
 
             public (byte[] data, long hash) SerializeFullStateWithHash()

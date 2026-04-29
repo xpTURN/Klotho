@@ -117,13 +117,15 @@ Key choices:
 ```json
 {
   "AllowLateJoin": true,
-  "ReconnectTimeoutMs": 30000,
+  "ReconnectTimeoutMs": 60000,
   "ReconnectMaxRetries": 3,
-  "MinPlayers": 2
+  "MinPlayers": 2,
+  "MaxSpectators": 4
 }
 ```
 
 - `MinPlayers` — minimum number of players required to start the game. Range: 1 or greater, must satisfy `MinPlayers <= MaxPlayers`. Out-of-range values are clamped at load time with a warning log. SD runtime gate clamps to `MaxPlayersPerRoom`; clamp also fires once with a warning if `MinPlayers > MaxPlayersPerRoom`.
+- `MaxSpectators` — maximum spectators per session. The transport listen capacity becomes `MaxPlayers + MaxSpectators` (single-room) or `maxRooms * (MaxPlayersPerRoom + MaxSpectatorsPerRoom)` (multi-room). 0 means spectators are not admitted.
 
 ### H-3-3. Path-Resolution Rules
 
@@ -198,11 +200,11 @@ Key points:
 # Dev build
 ./build.sh
 
-# Run (port=7777, maxPlayers=4, botCount=0, logLevel=Warning)
-dotnet run --project BrawlerDedicatedServer.csproj -- 7777 4 0
+# Run (port=7777, botCount=0, logLevel=Warning)
+dotnet run --project BrawlerDedicatedServer.csproj -- 7777 0
 ```
 
-Argument order: `<port> <maxPlayers> <botCount> [logLevel]`. Defaults when omitted: `7777 / 4 / 0 / Warning`.
+Argument order: `<port> <botCount> [logLevel]`. Defaults when omitted: `7777 / 0 / Warning`.
 
 ### H-5-2. Bootstrap Flow — `RunSingleRoom(args)`
 
@@ -211,6 +213,8 @@ Argument order: `<port> <maxPlayers> <botCount> [logLevel]`. Defaults when omitt
 
 var simConfig     = SimulationConfigLoader.Load(args, logger);
 var sessionConfig = SessionConfigLoader.Load(args, logger);
+var maxPlayers    = sessionConfig.MaxPlayers;
+var maxSpectators = sessionConfig.MaxSpectators;
 
 // 1. Pre-load data
 var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);
@@ -246,7 +250,8 @@ networkService.SubscribeEngine(engine);
 
 // 5. Create the room + listen
 networkService.CreateRoom("default", maxPlayers);
-networkService.Listen("0.0.0.0", port, maxPlayers);
+networkService.MaxSpectatorsPerRoom = maxSpectators;
+networkService.Listen("0.0.0.0", port, maxPlayers + maxSpectators);
 
 // 6. Main loop
 var loop = new DedicatedServerLoop(engine, transport, simConfig.TickIntervalMs, logger);
@@ -273,11 +278,11 @@ Defined in `Assets/Klotho/Runtime/Core/Server/DedicatedServerLoop.cs`. In one it
 ### H-6-1. Run
 
 ```bash
-# Single port, maxRooms=4, maxPlayers=2 per room, 0 bots
-dotnet run --project BrawlerDedicatedServer.csproj -- --multi 7777 4 2 0
+# Single port, maxRooms=4, 0 bots
+dotnet run --project BrawlerDedicatedServer.csproj -- --multi 7777 4 0
 ```
 
-Argument order: `--multi <port> <maxRooms> <maxPlayersPerRoom> <botCount> [logLevel]`
+Argument order: `--multi <port> <maxRooms> <botCount> [logLevel]`
 
 ### H-6-2. Key Difference — `RoomManager` + `RoomRouter`
 
@@ -285,6 +290,8 @@ Argument order: `--multi <port> <maxRooms> <maxPlayersPerRoom> <botCount> [logLe
 // Excerpt from Program.cs RunMultiRoom
 
 // 1. Pre-load data — shared across rooms (read-only)
+var maxPlayersPerRoom    = sessionConfig.MaxPlayers;
+var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
 var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);
 var navMeshBytes    = File.ReadAllBytes(navMeshPath);        // Deserialize fresh per room
 var dataAssets      = DataAssetReader.LoadMixedCollectionFromBytes(assetPath);
@@ -296,15 +303,16 @@ ThreadPool.SetMinThreads(Math.Max(Environment.ProcessorCount, maxRooms + 2),
 
 // 3. Single Transport (one port shared by all rooms)
 var transport = new LiteNetLibTransport(logger);
-transport.Listen("0.0.0.0", port, maxRooms * maxPlayersPerRoom);
+transport.Listen("0.0.0.0", port, maxRooms * (maxPlayersPerRoom + maxSpectatorsPerRoom));
 
 // 4. RoomRouter + RoomManager
 var router = new RoomRouter(transport, logger);
 var roomManager = new RoomManager(transport, router, loggerFactory, new RoomManagerConfig
 {
-    MaxRooms           = maxRooms,
-    MaxPlayersPerRoom  = maxPlayersPerRoom,
-    SimulationFactory  = () => new EcsSimulation(
+    MaxRooms             = maxRooms,
+    MaxPlayersPerRoom    = maxPlayersPerRoom,
+    MaxSpectatorsPerRoom = maxSpectatorsPerRoom,
+    SimulationFactory    = () => new EcsSimulation(
         maxEntities: simConfig.MaxEntities,
         maxRollbackTicks: 1,
         deltaTimeMs: simConfig.TickIntervalMs,
@@ -362,7 +370,7 @@ The exit code is the `failed` count — CI can use the `exit status` directly to
 ```bash
 cd Tools/BrawlerDedicatedServer
 ./build.sh                                 # = dotnet build -c Debug
-dotnet run --project . -- 7777 4 0
+dotnet run --project . -- 7777 0
 ```
 
 ### Release Deploy (self-contained, macOS arm64)
@@ -399,7 +407,7 @@ The core of determinism is **"do not configure the system set differently"**. Bo
 - **No view callbacks** — if the server needs `OnTickExecuted` / `OnGameStart`, those are not part of `ISimulationCallbacks`, so a separate subscription is required (the current Brawler server doesn't use them).
 - **Single shared port (multi-room)** — convenient from a firewall / NAT / port-scan perspective, but to isolate a particular room, running multiple single-room server processes is simpler.
 - **`MaxRollbackTicks = 1`** — the server is its own authority, so the rollback buffer is minimized. Increasing this only wastes memory.
-- **Default log level `Warning`** — during development, pass `Information` / `Debug` as the 4th CLI argument. E.g., `dotnet run -- 7777 4 0 Information`.
+- **Default log level `Warning`** — during development, pass `Information` / `Debug` as the 4th CLI argument. E.g., `dotnet run -- 7777 0 Information`.
 
 ---
 

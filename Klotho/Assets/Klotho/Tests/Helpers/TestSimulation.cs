@@ -111,11 +111,11 @@ namespace xpTURN.Klotho.Helper.Tests
 
         public void EmitSyncEvents() { }
 
-        public event Action<int, int> OnPlayerCountChanged;
+        public event Action<int> OnPlayerJoinedNotification;
 
         public void OnPlayerJoined(int playerId, int tick)
         {
-            OnPlayerCountChanged?.Invoke(_playerCount, playerId);
+            OnPlayerJoinedNotification?.Invoke(playerId);
         }
 
         public void SetPlayerCount(int count) { _playerCount = count; }

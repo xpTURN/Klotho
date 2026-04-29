@@ -53,7 +53,6 @@ namespace xpTURN.Klotho.Core
 
         internal struct EngineStateSnapshot
         {
-            public int PlayerCount;
             public int[] ActivePlayerIds;
         }
 
@@ -132,7 +131,6 @@ namespace xpTURN.Klotho.Core
 
             // Restore engine-layer state.
             var engineSnapshot = _engineSnapshots[resolvedTick % _engineSnapshots.Length];
-            _playerCount = engineSnapshot.PlayerCount;
             _activePlayerIds.Clear();
             if (engineSnapshot.ActivePlayerIds != null)
                 _activePlayerIds.AddRange(engineSnapshot.ActivePlayerIds);
@@ -225,7 +223,6 @@ namespace xpTURN.Klotho.Core
         {
             _engineSnapshots[tick % _engineSnapshots.Length] = new EngineStateSnapshot
             {
-                PlayerCount = _playerCount,
                 ActivePlayerIds = _activePlayerIds.ToArray(),
             };
 

@@ -16,6 +16,7 @@ namespace xpTURN.Klotho.Network
     {
         public int MaxRooms { get; set; } = 4;
         public int MaxPlayersPerRoom { get; set; } = 4;
+        public int MaxSpectatorsPerRoom { get; set; } = 0;
 
         /// <summary>
         /// Factory that creates the EcsSimulation for each room.
@@ -142,6 +143,7 @@ namespace xpTURN.Klotho.Network
             networkService.SubscribeEngine(engine);
 
             networkService.CreateRoom($"room-{roomId}", _config.MaxPlayersPerRoom);
+            networkService.MaxSpectatorsPerRoom = _config.MaxSpectatorsPerRoom;
 
             var room = new Room(
                 roomId, simConfig, sessionConfig, sim, commandFactory,

@@ -24,8 +24,9 @@ namespace xpTURN.Klotho.Core
         public void StartSpectator(SpectatorStartInfo info)
         {
             _isSpectatorMode = true;
-            _playerCount = info.PlayerCount;
             _randomSeed = info.RandomSeed;
+            _activePlayerIds.Clear();
+            _activePlayerIds.AddRange(info.PlayerIds);
 
             CurrentTick = 0;
             _lastVerifiedTick = -1;

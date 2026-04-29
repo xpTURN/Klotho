@@ -86,6 +86,7 @@ namespace xpTURN.Klotho.Network
         private DisconnectedPlayerInfo[] _disconnectedPlayerPool;
         private int _disconnectedPlayerCount;
         private int _maxPlayersPerRoom;
+        private int _maxSpectatorsPerRoom;
 
         // Phase-branched player count accounting
         private bool _gameStarted;
@@ -110,6 +111,11 @@ namespace xpTURN.Klotho.Network
         public int DisconnectedPlayerCount => _disconnectedPlayerCount;
         public int MaxPlayersPerRoom => _maxPlayersPerRoom;
         public int MaxPlayerCapacity => _maxPlayersPerRoom;
+        public int MaxSpectatorsPerRoom
+        {
+            get => _maxSpectatorsPerRoom;
+            set => _maxSpectatorsPerRoom = value;
+        }
 
         // ── IKlothoNetworkService properties ────────────────────
 
@@ -1052,6 +1058,14 @@ namespace xpTURN.Klotho.Network
 
         private void HandleSpectatorJoin(int peerId)
         {
+            if (_spectators.Count >= _maxSpectatorsPerRoom)
+            {
+                _logger?.ZLogWarning($"[ServerNetworkService] Spectator rejected: count={_spectators.Count}, max={_maxSpectatorsPerRoom}");
+                SendJoinReject(peerId, /*RoomFull*/2);
+                _transport.DisconnectPeer(peerId);
+                return;
+            }
+
             var info = new SpectatorInfo
             {
                 SpectatorId = _spectators.Count,
