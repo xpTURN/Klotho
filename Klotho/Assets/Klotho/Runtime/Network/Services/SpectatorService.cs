@@ -129,7 +129,11 @@ namespace xpTURN.Klotho.Network
         private void HandleDataReceived(int peerId, byte[] data, int length)
         {
             var message = _messageSerializer.Deserialize(data, length);
-            if (message == null) return;
+            if (message == null)
+            {
+                _logger?.ZLogWarning($"[SpectatorService] Malformed payload from peerId={peerId}, length={length}");
+                return;
+            }
 
             _logger?.ZLogTrace($"[SpectatorService] Received: {message.GetType().Name}, state={_state}");
 

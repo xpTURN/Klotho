@@ -114,7 +114,8 @@ namespace xpTURN.Klotho.Network
 
         public INetworkMessage Deserialize(byte[] data, int length, int offset)
         {
-            if (data == null || length < 1 || offset < 0 || offset + length > data.Length)
+            // overflow-safe: 'length > data.Length - offset' avoids int overflow when offset is near int.MaxValue
+            if (data == null || length < 1 || offset < 0 || length > data.Length - offset)
                 return null;
 
             NetworkMessageType type = (NetworkMessageType)data[offset];
@@ -134,7 +135,16 @@ namespace xpTURN.Klotho.Network
             }
 
             var reader = new SpanReader(data, offset, length);
-            message.Deserialize(ref reader);
+            try
+            {
+                message.Deserialize(ref reader);
+            }
+            catch (Exception)
+            {
+                // Malformed wire payload — invalidate cache instance to avoid stale-field bleed
+                _messageCache.Remove(type);
+                return null;
+            }
             return message;
         }
     }

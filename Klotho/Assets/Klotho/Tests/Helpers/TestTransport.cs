@@ -26,6 +26,11 @@ namespace xpTURN.Klotho.Helper.Tests
         public string RemoteAddress { get; private set; }
         public int RemotePort { get; private set; }
 
+        /// <summary>
+        /// Number of times DisconnectPeer has been called (test instrumentation).
+        /// </summary>
+        public int DisconnectPeerCallCount { get; private set; }
+
         // INetworkTransport events
         public event Action OnConnected;
         public event Action<DisconnectReason> OnDisconnected;
@@ -115,6 +120,7 @@ namespace xpTURN.Klotho.Helper.Tests
 
         public void DisconnectPeer(int peerId)
         {
+            DisconnectPeerCallCount++;
             if (!_isHost) return;
             if (_peers.TryGetValue(peerId, out var client))
             {

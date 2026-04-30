@@ -610,8 +610,8 @@ namespace xpTURN.Klotho.Network
         {
             if (_pendingPeers.Contains(peerId))
             {
-                _pendingPeers.Remove(peerId);
                 var firstMsg = _messageSerializer.Deserialize(data, length);
+                _pendingPeers.Remove(peerId);
                 if (firstMsg is PlayerJoinMessage playerJoin)
                 {
                     _peerDeviceIds[peerId] = playerJoin.DeviceId ?? string.Empty;
@@ -640,13 +640,20 @@ namespace xpTURN.Klotho.Network
                 else if (firstMsg is ReconnectRequestMessage reconnectReq)
                     HandleReconnectRequest(peerId, reconnectReq);
                 else
-                    _logger?.ZLogWarning($"[KlothoNetworkService][HandleDataReceived] Unknown role for pending peer {peerId}: {firstMsg?.GetType().Name}");
+                {
+                    _logger?.ZLogWarning($"[KlothoNetworkService] Malformed/unknown first message — peerId={peerId} disconnected");
+                    _transport.DisconnectPeer(peerId);
+                }
                 return;
             }
 
             var message = _messageSerializer.Deserialize(data, length);
             if (message == null)
+            {
+                _logger?.ZLogWarning($"[KlothoNetworkService] Malformed payload from peerId={peerId} — disconnect");
+                _transport.DisconnectPeer(peerId);
                 return;
+            }
 
             // Spectator peers: process FullStateRequest without the player-side throttle
             if (message is FullStateRequestMessage spectatorFullReq)

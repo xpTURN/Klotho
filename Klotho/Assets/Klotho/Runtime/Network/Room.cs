@@ -99,8 +99,18 @@ namespace xpTURN.Klotho.Network
                 switch (entry.Type)
                 {
                     case InboundEventType.Data:
-                        Transport.RaiseDataReceived(entry.PeerId, entry.Buffer, entry.Length);
-                        StreamPool.ReturnBuffer(entry.Buffer);
+                        try
+                        {
+                            Transport.RaiseDataReceived(entry.PeerId, entry.Buffer, entry.Length);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.ZLogError($"[Room {RoomId}] RaiseDataReceived exception: peerId={entry.PeerId}, len={entry.Length}, ex={ex.Message}");
+                        }
+                        finally
+                        {
+                            StreamPool.ReturnBuffer(entry.Buffer);
+                        }
                         break;
 
                     case InboundEventType.Connected:

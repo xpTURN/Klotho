@@ -157,6 +157,25 @@ namespace xpTURN.Klotho.Core
         #endregion
         
         /// <summary>
+        /// Number of buffer buckets (for testing).
+        /// </summary>
+        public static int BucketCount => _BUCKET_SIZES.Length;
+
+        /// <summary>
+        /// Number of buffers currently held in the bucket (for testing).
+        /// </summary>
+        public static int GetPoolCount(int bucketIndex)
+        {
+            if (bucketIndex < 0 || bucketIndex >= _bufferBuckets.Length)
+                return 0;
+            var bucket = _bufferBuckets[bucketIndex];
+            lock (bucket)
+            {
+                return bucket.Count;
+            }
+        }
+
+        /// <summary>
         /// Clear MemoryStream and Buffer pools (for testing)
         /// </summary>
         public static void Clear()

@@ -232,7 +232,11 @@ namespace xpTURN.Klotho.Core
             if (_completed) return;
 
             var message = _messageSerializer.Deserialize(data, length);
-            if (message == null) return;
+            if (message == null)
+            {
+                _logger?.ZLogWarning($"[KlothoConnection] Malformed payload from peerId={peerId}, length={length}");
+                return;
+            }
 
             switch (message)
             {

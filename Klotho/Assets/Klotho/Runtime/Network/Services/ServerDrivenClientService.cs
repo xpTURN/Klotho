@@ -417,7 +417,10 @@ namespace xpTURN.Klotho.Network
         {
             var message = _messageSerializer.Deserialize(data, length);
             if (message == null)
+            {
+                _logger?.ZLogWarning($"[ServerDrivenClientService] Malformed payload from peerId={peerId}, length={length}");
                 return;
+            }
 
             switch (message)
             {
