@@ -26,7 +26,7 @@ namespace xpTURN.Klotho.Core
         /// Session Magic. The SyncCompleteMessage.Magic / LateJoinAccept.Magic / ReconnectAccept (via creds) value
         /// is forwarded as-is.
         /// </summary>
-        public int SessionMagic { get; set; }
+        public long SessionMagic { get; set; }
 
         /// <summary>
         /// Clock synchronization — SharedClock epoch.

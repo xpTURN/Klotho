@@ -26,12 +26,13 @@ namespace xpTURN.Klotho.Network
         private ISessionConfig _sessionConfig;
         private IReconnectCredentialsStore _reconnectCredentialsStore;
         private string _appVersion;
+        private IDeviceIdProvider _deviceIdProvider;
 
         // Player management
         private readonly List<PlayerInfo> _players = new List<PlayerInfo>();
 
         // Session
-        private int _sessionMagic;
+        private long _sessionMagic;
         private SharedTimeClock _sharedClock;
         private int _roomId = -1;
         private SessionPhase _phase;
@@ -130,11 +131,14 @@ namespace xpTURN.Klotho.Network
         /// Inject the cold-start Reconnect credentials store. Optional — when null, cold-start
         /// credentials are not persisted.
         /// </summary>
-        public void SetReconnectCredentialsStore(IReconnectCredentialsStore store, string appVersion)
+        public void SetReconnectCredentialsStore(IReconnectCredentialsStore store, string appVersion, IDeviceIdProvider deviceIdProvider = null)
         {
             _reconnectCredentialsStore = store;
             _appVersion = appVersion;
+            _deviceIdProvider = deviceIdProvider;
         }
+
+        private string GetDeviceId() => _deviceIdProvider?.GetDeviceId() ?? string.Empty;
 
         private void SaveReconnectCredentialsIfApplicable()
         {
@@ -152,6 +156,7 @@ namespace xpTURN.Klotho.Network
                 RoomName = null,    // SD path uses RoomId; RoomName retained for P2P symmetry
                 RoomId = _roomId,   // SD multi-room routing identifier
                 AppVersion = _appVersion,
+                DeviceId = GetDeviceId(),
             };
             _reconnectCredentialsStore.Save(creds);
         }
@@ -215,7 +220,7 @@ namespace xpTURN.Klotho.Network
             SeedPlayersFromCatchupPayload(_sessionMagic, msg.RandomSeed, msg.PlayerCount, msg.PlayerIds, msg.PlayerConnectionStates);
         }
 
-        private void SeedPlayersFromCatchupPayload(int sessionMagic, int randomSeed, int playerCount, List<int> playerIds, List<byte> playerConnectionStates)
+        private void SeedPlayersFromCatchupPayload(long sessionMagic, int randomSeed, int playerCount, List<int> playerIds, List<byte> playerConnectionStates)
         {
             _sessionMagic = sessionMagic;
             _randomSeed = randomSeed;
@@ -250,7 +255,11 @@ namespace xpTURN.Klotho.Network
         /// </summary>
         public void Connect(string address, int port)
         {
-            _transport.Connect(address, port);
+            if (!_transport.Connect(address, port))
+            {
+                _logger?.ZLogError($"[SDClientService] Failed to start client transport for {address}:{port}");
+                Phase = SessionPhase.Disconnected;
+            }
         }
 
         public void LeaveRoom()
@@ -604,20 +613,24 @@ namespace xpTURN.Klotho.Network
                 return;
             }
 
-            _logger?.ZLogInformation($"[SDClientService] Connected to server, sending PlayerJoinMessage");
             Phase = SessionPhase.Syncing;
-            var joinMsg = new PlayerJoinMessage();
+            var joinMsg = new PlayerJoinMessage { DeviceId = GetDeviceId() };
+            _logger?.ZLogInformation($"[SDClientService] Connected to server, sending PlayerJoinMessage (deviceId='{joinMsg.DeviceId}')");
+
             using (var serialized = _messageSerializer.SerializePooled(joinMsg))
             {
                 SendFirstMessage(serialized.Data, serialized.Length);
             }
         }
 
-        private void HandleDisconnected()
+        private void HandleDisconnected(DisconnectReason reason)
         {
-            if (Phase == SessionPhase.Playing)
+            bool reconnectEligible = reason == DisconnectReason.NetworkFailure
+                                  || reason == DisconnectReason.ReconnectRequested;
+
+            if (Phase == SessionPhase.Playing && reconnectEligible)
             {
-                // Disconnected during game → attempt reconnect
+                // Disconnected during game by network failure → attempt reconnect
                 _reconnectState = ReconnectState.WaitingForTransport;
                 _reconnectStartTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 _reconnectRetryCount = 0;
@@ -694,7 +707,14 @@ namespace xpTURN.Klotho.Network
                     else if (now - _lastTransportReconnectTime > TRANSPORT_RECONNECT_INTERVAL_MS)
                     {
                         _lastTransportReconnectTime = now;
-                        _transport.Connect(_transport.RemoteAddress, _transport.RemotePort);
+                        if (!_transport.Connect(_transport.RemoteAddress, _transport.RemotePort))
+                        {
+                            _logger?.ZLogError($"[SDClientService] Reconnect transport start failed — aborting reconnect");
+                            _reconnectState = ReconnectState.Failed;
+                            Phase = SessionPhase.Disconnected;
+                            OnReconnectFailed?.Invoke("TransportStartFailed");
+                            return;
+                        }
                     }
                     break;
 
@@ -724,8 +744,11 @@ namespace xpTURN.Klotho.Network
             var msg = new ReconnectRequestMessage
             {
                 SessionMagic = _sessionMagic,
-                PlayerId = _localPlayerId
+                PlayerId = _localPlayerId,
+                DeviceId = GetDeviceId(),
             };
+            _logger?.ZLogInformation($"[SDClientService] Sending ReconnectRequestMessage (playerId={msg.PlayerId}, deviceId='{msg.DeviceId}')");
+
             using (var serialized = _messageSerializer.SerializePooled(msg))
             {
                 SendFirstMessage(serialized.Data, serialized.Length);

@@ -89,7 +89,12 @@ namespace xpTURN.Klotho.Network
         {
             _roomId = roomId;
             _state = SpectatorState.Connecting;
-            _transport.Connect(hostAddress, port);
+            if (!_transport.Connect(hostAddress, port))
+            {
+                _logger?.ZLogError($"[SpectatorService] Failed to start client transport for {hostAddress}:{port}");
+                _state = SpectatorState.Disconnected;
+                OnSpectatorStopped?.Invoke("Failed to start client transport");
+            }
         }
 
         public void Disconnect()
@@ -228,7 +233,7 @@ namespace xpTURN.Klotho.Network
             }
         }
 
-        private void HandleDisconnected()
+        private void HandleDisconnected(DisconnectReason _)
         {
             _state = SpectatorState.Disconnected;
             OnSpectatorStopped?.Invoke("Host disconnected");

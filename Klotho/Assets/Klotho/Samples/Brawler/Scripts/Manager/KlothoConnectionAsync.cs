@@ -27,7 +27,8 @@ namespace xpTURN.Klotho.Samples.Brawler
         public static UniTask<ConnectionResult> ConnectAsync(
             INetworkTransport transport, string host, int port,
             CancellationToken ct = default, ILogger logger = null,
-            NetworkMessageBase preJoinMessage = null)
+            NetworkMessageBase preJoinMessage = null,
+            IDeviceIdProvider deviceIdProvider = null)
         {
             var tcs = new UniTaskCompletionSource<ConnectionResult>();
 
@@ -36,7 +37,8 @@ namespace xpTURN.Klotho.Samples.Brawler
                 onCompleted: result => tcs.TrySetResult(result),
                 onFailed: reason => tcs.TrySetException(new Exception(reason)),
                 logger: logger,
-                preJoinMessage: preJoinMessage);
+                preJoinMessage: preJoinMessage,
+                deviceIdProvider: deviceIdProvider);
 
             // On ct cancellation, clean up connection + cancel TCS
             var ctRegistration = ct.Register(() =>

@@ -54,6 +54,8 @@ namespace Brawler
     [DefaultExecutionOrder(-100)]
     public class BrawlerGameController : MonoBehaviour
     {
+        const string KLOTHO_CONNECTION_KEY = "xpTURN.Brawler";
+
         [Header("Debug")]
         [SerializeField] private LogLevel _logLevel = LogLevel.Information;
 
@@ -170,7 +172,7 @@ namespace Brawler
             _credentialsStore = new PlayerPrefsReconnectCredentialsStore();
 
             var logLevels = new LiteNetLib.NetLogLevel[] { LiteNetLib.NetLogLevel.Warning, LiteNetLib.NetLogLevel.Error };
-            _transport = new LiteNetLibTransport(_logger, logLevels);
+            _transport = new LiteNetLibTransport(_logger, logLevels, connectionKey: KLOTHO_CONNECTION_KEY);
             _transport.OnDisconnected += OnDisconnected;
 
             _input = new BrawlerInputCapture();
@@ -319,7 +321,6 @@ namespace Brawler
             {
             case GameMenu.ActionType.CreateRoom:
                 StartHost();
-                _gameMenu.SetActionType(GameMenu.ActionType.Ready);
                 break;
             case GameMenu.ActionType.JoinRoom:
                 JoinGame();
@@ -327,11 +328,9 @@ namespace Brawler
                 break;
             case GameMenu.ActionType.Ready:
                 SetReady();
-                _gameMenu.SetActionType(GameMenu.ActionType.Playing);
                 break;
             case GameMenu.ActionType.Playing:
                 StopGame();
-                _gameMenu.SetActionType(_brawlerSettings._isHost ? GameMenu.ActionType.CreateRoom : GameMenu.ActionType.JoinRoom);
                 break;
             case GameMenu.ActionType.Reconnect:
                 // Cancel — credentials kept; ReconnectAsync.catch (OperationCanceledException) → FallbackToInitial.
@@ -340,14 +339,13 @@ namespace Brawler
             }
         }
 
-        private void OnDisconnected()
+        private void OnDisconnected(DisconnectReason _)
         {
             // While Playing, NetworkService will attempt automatic reconnection, so do not end the game
             if (Phase == SessionPhase.Playing)
                 return;
 
             StopGame();
-            _gameMenu.SetActionType(_brawlerSettings._isHost ? GameMenu.ActionType.CreateRoom : GameMenu.ActionType.JoinRoom);
         }
 
         private void StartHost()
@@ -390,7 +388,13 @@ namespace Brawler
             ConnectPhysicsProvider();
 #endif
             _session.HostGame("Game", _brawlerSettings._maxPlayers);
-            _transport.Listen(_brawlerSettings._hostAddress, _brawlerSettings._port, _brawlerSettings._maxPlayers);
+            if (!_transport.Listen(_brawlerSettings._hostAddress, _brawlerSettings._port, _brawlerSettings._maxPlayers))
+            {
+                _logger?.ZLogError($"[Brawler] Failed to host on port {_brawlerSettings._port} — aborting StartHost.");
+
+                StopGame();
+                return;
+            }
 
             _session.NetworkService.OnPlayerDisconnected += OnPlayerDisconnected;
             _session.NetworkService.OnPlayerReconnected += OnPlayerReconnected;
@@ -403,6 +407,8 @@ namespace Brawler
             });
 
             InitializeViewSync(_session.Engine, _session.Simulation);
+
+            _gameMenu.SetActionType(GameMenu.ActionType.Ready);
         }
 
         private void JoinGame()
@@ -435,7 +441,8 @@ namespace Brawler
                 var result = await KlothoConnectionAsync.ConnectAsync(
                     _transport,
                     _brawlerSettings._hostAddress, _brawlerSettings._port,
-                    ct, _logger, preJoin);
+                    ct, _logger, preJoin,
+                    deviceIdProvider: new UnityDeviceIdProvider());
 
                 // Create the session using the received Config.
                 _simCallbacks = new BrawlerSimulationCallbacks(
@@ -570,6 +577,8 @@ namespace Brawler
         {
             _logger?.ZLogInformation($"[Brawler] Ready");
             _session?.SetReady(true);
+
+            _gameMenu.SetActionType(GameMenu.ActionType.Playing);
         }
 
         private void StartReplay()
@@ -643,7 +652,7 @@ namespace Brawler
             _pendingSpectatorSimConfig = null;
             _pendingSpectatorSessionConfig = null;
 
-            var spectatorTransport = new LiteNetLibTransport(_logger);
+            var spectatorTransport = new LiteNetLibTransport(_logger, connectionKey: KLOTHO_CONNECTION_KEY);
             var spectatorService = new SpectatorService();
             spectatorService.SetLogger(_logger);
             spectatorService.Initialize(spectatorTransport, _spectatorCommandFactory, null, _logger);
@@ -813,6 +822,7 @@ namespace Brawler
             }
 
             _gameMenu.ReconnectStatus = null;
+            _gameMenu.SetActionType(_brawlerSettings._isHost ? GameMenu.ActionType.CreateRoom : GameMenu.ActionType.JoinRoom);
 
             _session?.Stop();
             _session = null;
@@ -845,10 +855,11 @@ namespace Brawler
 
         private void InjectCredentialsStoreIntoSession()
         {
+            var deviceIdProvider = new UnityDeviceIdProvider();
             if (_session.NetworkService is KlothoNetworkService p2p)
-                p2p.SetReconnectCredentialsStore(_credentialsStore, Application.version);
+                p2p.SetReconnectCredentialsStore(_credentialsStore, Application.version, deviceIdProvider);
             else if (_session.NetworkService is ServerDrivenClientService sd)
-                sd.SetReconnectCredentialsStore(_credentialsStore, Application.version);
+                sd.SetReconnectCredentialsStore(_credentialsStore, Application.version, deviceIdProvider);
         }
 
         // Generalized fallback used by Cancel / failure / mode-toggle paths.
@@ -922,7 +933,6 @@ namespace Brawler
             _logger?.ZLogError($"[Brawler] Reconnection failed: {reason}");
             _gameMenu.ReconnectStatus = null;
             StopGame();
-            _gameMenu.SetActionType(_brawlerSettings._isHost ? GameMenu.ActionType.CreateRoom : GameMenu.ActionType.JoinRoom);
         }
 
         private void OnReconnected()

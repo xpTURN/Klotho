@@ -221,19 +221,20 @@ namespace xpTURN.Klotho.Network.Tests
             public int RemotePort { get; private set; }
 
             public event Action OnConnected;
-            public event Action OnDisconnected;
+            public event Action<DisconnectReason> OnDisconnected;
             public event Action<int, byte[], int> OnDataReceived;
             public event Action<int> OnPeerConnected;
             public event Action<int> OnPeerDisconnected;
 
-            public void Connect(string address, int port)
+            public bool Connect(string address, int port)
             {
                 RemoteAddress = address;
                 RemotePort = port;
                 IsConnected = true;
                 // OnConnected is manually triggered by the test via FireConnected (after Connect returns and event subscription completes)
+                return true;
             }
-            public void Listen(string address, int port, int maxConnections) { }
+            public bool Listen(string address, int port, int maxConnections) { return true; }
             public void Send(int peerId, byte[] data, DeliveryMethod deliveryMethod) { }
             public void Send(int peerId, byte[] data, int length, DeliveryMethod deliveryMethod) { }
             public void Broadcast(byte[] data, DeliveryMethod deliveryMethod) { }
@@ -244,7 +245,9 @@ namespace xpTURN.Klotho.Network.Tests
             public void DisconnectPeer(int peerId) { }
 
             public void FireConnected() => OnConnected?.Invoke();
-            public void FireDisconnected() => OnDisconnected?.Invoke();
+            // Default reason simulates a non-local disconnect during handshake (typical test scenario).
+            // For tests that need to verify the LocalDisconnect bypass path, pass DisconnectReason.LocalDisconnect explicitly.
+            public void FireDisconnected(DisconnectReason reason = DisconnectReason.NetworkFailure) => OnDisconnected?.Invoke(reason);
             public void FireDataReceived(int peerId, byte[] data, int length)
                 => OnDataReceived?.Invoke(peerId, data, length);
         }

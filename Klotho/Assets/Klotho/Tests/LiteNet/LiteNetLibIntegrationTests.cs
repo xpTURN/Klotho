@@ -558,6 +558,42 @@ namespace xpTURN.Klotho.Network.Tests
         }
 
         #endregion
+
+        #region Connection Key
+
+        [UnityTest]
+        public IEnumerator ConnectionKey_MatchingCustomKey_Connects()
+        {
+            const string customKey = "test123";
+            const int testPort = Port + 100;
+
+            var host = new LiteNetLibTransport(_logger, connectionKey: customKey);
+            var client = new LiteNetLibTransport(_logger, connectionKey: customKey);
+
+            bool clientConnected = false;
+            client.OnConnected += () => clientConnected = true;
+
+            host.Listen(Address, testPort, 1);
+            client.Connect(Address, testPort);
+
+            float elapsed = 0f;
+            while (!clientConnected && elapsed < 3f)
+            {
+                host.PollEvents();
+                client.PollEvents();
+                yield return null;
+                elapsed += UnityEngine.Time.deltaTime;
+            }
+
+            bool result = clientConnected;
+
+            client.Disconnect();
+            host.Disconnect();
+
+            Assert.IsTrue(result, "Client should connect when both sides use matching custom keys");
+        }
+
+        #endregion
     }
 
 }

@@ -92,8 +92,8 @@ namespace xpTURN.Klotho.Network
 
         public void PollEvents() { /* no-op */ }
         public void FlushSendQueue() { /* no-op — ServerLoop calls directly on the shared Transport */ }
-        public void Listen(string address, int port, int maxConnections) { /* no-op */ }
-        public void Connect(string address, int port) { /* no-op */ }
+        public bool Listen(string address, int port, int maxConnections) => true; /* no-op */
+        public bool Connect(string address, int port) => true; /* no-op */
         public void Disconnect() { /* no-op */ }
 
         // ── Events: raised directly from DrainInboundQueue() ──
@@ -103,7 +103,7 @@ namespace xpTURN.Klotho.Network
         public event Action<int> OnPeerDisconnected;
 #pragma warning disable CS0067
         public event Action OnConnected;
-        public event Action OnDisconnected;
+        public event Action<DisconnectReason> OnDisconnected;
 #pragma warning restore CS0067
 
         /// <summary>

@@ -13,7 +13,7 @@ namespace xpTURN.Klotho.Network
     {
         [KlothoOrder] public int PlayerId;
         [KlothoOrder] public int CurrentTick;
-        [KlothoOrder] public int Magic;
+        [KlothoOrder] public long Magic;
         [KlothoOrder] public long SharedEpoch;
         [KlothoOrder] public long ClockOffset;
         [KlothoOrder] public int PlayerCount;

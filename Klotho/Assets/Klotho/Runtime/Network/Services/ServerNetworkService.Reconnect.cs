@@ -44,6 +44,13 @@ namespace xpTURN.Klotho.Network
                 return;
             }
 
+            // 3.5. Validate deviceId (skip when not bound — info or msg empty)
+            if (!string.IsNullOrEmpty(info.DeviceId) && info.DeviceId != msg.DeviceId)
+            {
+                SendReconnectReject(peerId, ReconnectRejectReason.DeviceMismatch);
+                return;
+            }
+
             // 4. Clean up stale peerId
             int stalePeerId = -1;
             foreach (var kvp in _peerToPlayer)

@@ -217,7 +217,7 @@ namespace xpTURN.Klotho.Tests.Integration
             var magicField = typeof(ServerNetworkService).GetField("_sessionMagic",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.IsNotNull(magicField);
-            int serverMagic = (int)magicField.GetValue(_server.NetworkService);
+            long serverMagic = (long)magicField.GetValue(_server.NetworkService);
 
             var lateTransport = new TestTransport();
             ConnectionResult result = null;

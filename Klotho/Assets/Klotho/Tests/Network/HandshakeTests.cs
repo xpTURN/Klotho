@@ -522,7 +522,7 @@ namespace xpTURN.Klotho.Network.Tests
         /// the Magic in the SyncComplete delivered to the Client is the session magic.
         /// This avoids using an arbitrary value and extracts the value actually used in the handshake.
         /// </summary>
-        private int GetSessionMagic()
+        private long GetSessionMagic()
         {
             // Instead of creating a separate transport to capture the SyncComplete sent by the Host,
             // or sending a new SyncRequest after handshake completion to discover the Magic,
@@ -530,7 +530,7 @@ namespace xpTURN.Klotho.Network.Tests
             // → here we extract via reflection because the test needs the actual Magic value
             var field = typeof(KlothoNetworkService).GetField("_sessionMagic",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            return (int)field.GetValue(_hostService);
+            return (long)field.GetValue(_hostService);
         }
 
         #endregion

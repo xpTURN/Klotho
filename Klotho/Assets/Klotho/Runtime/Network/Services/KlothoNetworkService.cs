@@ -41,6 +41,7 @@ namespace xpTURN.Klotho.Network
         public long DisconnectTimeMs;
         public int LastConfirmedTick;
         public int PredictedTickCount;
+        public string DeviceId;
 
         public bool IsActive => PlayerId != 0;
 
@@ -51,6 +52,7 @@ namespace xpTURN.Klotho.Network
             DisconnectTimeMs = 0;
             LastConfirmedTick = 0;
             PredictedTickCount = 0;
+            DeviceId = null;
         }
     }
 
@@ -127,6 +129,8 @@ namespace xpTURN.Klotho.Network
         private ISessionConfig _sessionConfig;
         private IReconnectCredentialsStore _reconnectCredentialsStore;
         private string _appVersion;
+        private IDeviceIdProvider _deviceIdProvider;
+        private readonly Dictionary<int, string> _peerDeviceIds = new Dictionary<int, string>();
 
         // Cached list (GC avoidance)
         private readonly List<(int tick, int playerId)> _hashKeysToRemoveCache = new List<(int tick, int playerId)>();
@@ -142,7 +146,7 @@ namespace xpTURN.Klotho.Network
         private readonly ReconnectAcceptMessage _reconnectAcceptCache = new ReconnectAcceptMessage();
         private readonly ReconnectRejectMessage _reconnectRejectCache = new ReconnectRejectMessage();
 
-        private int _sessionMagic;
+        private long _sessionMagic;
         private SharedTimeClock _sharedClock;
         public SharedTimeClock SharedClock => _sharedClock;
         private SessionPhase _phase;
@@ -236,11 +240,14 @@ namespace xpTURN.Klotho.Network
         /// Inject the cold-start Reconnect credentials store. Optional — when null, cold-start
         /// credentials are not persisted. Game boot wires this with PlayerPrefsReconnectCredentialsStore.
         /// </summary>
-        public void SetReconnectCredentialsStore(IReconnectCredentialsStore store, string appVersion)
+        public void SetReconnectCredentialsStore(IReconnectCredentialsStore store, string appVersion, IDeviceIdProvider deviceIdProvider = null)
         {
             _reconnectCredentialsStore = store;
             _appVersion = appVersion;
+            _deviceIdProvider = deviceIdProvider;
         }
+
+        private string GetDeviceId() => _deviceIdProvider?.GetDeviceId() ?? string.Empty;
 
         /// <summary>
         /// Persist cold-start Reconnect credentials at Phase = Playing entry.
@@ -261,6 +268,7 @@ namespace xpTURN.Klotho.Network
                 ReconnectTimeoutMs = _sessionConfig.ReconnectTimeoutMs,
                 RoomName = RoomName,
                 AppVersion = _appVersion,
+                DeviceId = GetDeviceId(),
             };
             _reconnectCredentialsStore.Save(creds);
         }
@@ -300,7 +308,7 @@ namespace xpTURN.Klotho.Network
             MaxPlayers = maxPlayers;
             LocalPlayerId = 0;
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            _sessionMagic = (int)(now & 0x7FFFFFFF);
+            _sessionMagic = SessionMagicFactory.Generate();
             _sharedClock = new SharedTimeClock(now, 0);
 
             // Explicit reset before Phase = Synchronized (the Phase setter does NOT reset on Synchronized,
@@ -604,8 +612,9 @@ namespace xpTURN.Klotho.Network
             {
                 _pendingPeers.Remove(peerId);
                 var firstMsg = _messageSerializer.Deserialize(data, length);
-                if (firstMsg is PlayerJoinMessage)
+                if (firstMsg is PlayerJoinMessage playerJoin)
                 {
+                    _peerDeviceIds[peerId] = playerJoin.DeviceId ?? string.Empty;
                     // Dispatch on _gameStarted (not Phase == Playing).
                     //   Countdown peers go to LateJoin too — a standard handshake completing
                     //   after StartGame would land in a wire/PlayerId mismatch (no GameStartMessage

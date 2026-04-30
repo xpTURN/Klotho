@@ -244,35 +244,39 @@ namespace xpTURN.Klotho.Network
             }
 
             _lateJoinState = LateJoinState.WaitingForAccept;
-            _logger?.ZLogInformation($"[KlothoNetworkService][HandleConnected] Normal mode: sending PlayerJoinMessage");
+            _playerJoinMessageCache.DeviceId = GetDeviceId();
+            _logger?.ZLogInformation($"[KlothoNetworkService][HandleConnected] Normal mode: sending PlayerJoinMessage (deviceId='{_playerJoinMessageCache.DeviceId}')");
+            
             using (var serialized = _messageSerializer.SerializePooled(_playerJoinMessageCache))
             {
                 _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
             }
         }
 
-        private void HandleDisconnected()
+        private void HandleDisconnected(DisconnectReason reason)
         {
-            if (!IsHost)
+            if (IsHost) return;
+
+            bool reconnectEligible = reason == DisconnectReason.NetworkFailure
+                                  || reason == DisconnectReason.ReconnectRequested;
+
+            if (Phase == SessionPhase.Playing && reconnectEligible)
             {
-                if (Phase == SessionPhase.Playing)
+                // Disconnected mid-game by network failure → enter reconnect-attempt mode
+                _reconnectState = ReconnectState.WaitingForTransport;
+                _reconnectStartTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _reconnectRetryCount = 0;
+                OnReconnecting?.Invoke();
+                _engine?.PauseForReconnect();
+            }
+            else
+            {
+                if (_lateJoinState != LateJoinState.None)
                 {
-                    // Disconnected mid-game → enter reconnect-attempt mode
-                    _reconnectState = ReconnectState.WaitingForTransport;
-                    _reconnectStartTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    _reconnectRetryCount = 0;
-                    OnReconnecting?.Invoke();
-                    _engine?.PauseForReconnect();
+                    _engine?.CancelExpectFullState();
+                    _lateJoinState = LateJoinState.None;
                 }
-                else
-                {
-                    if (_lateJoinState != LateJoinState.None)
-                    {
-                        _engine?.CancelExpectFullState();
-                        _lateJoinState = LateJoinState.None;
-                    }
-                    Phase = SessionPhase.Disconnected;
-                }
+                Phase = SessionPhase.Disconnected;
             }
         }
 
@@ -309,6 +313,8 @@ namespace xpTURN.Klotho.Network
                             info.DisconnectTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                             info.LastConfirmedTick = _engine?.CurrentTick ?? 0;
                             info.PredictedTickCount = 0;
+                            _peerDeviceIds.TryGetValue(peerId, out var disconnectedDeviceId);
+                            info.DeviceId = disconnectedDeviceId ?? string.Empty;
                             _disconnectedPlayerCount++;
                             _engine?.NotifyPlayerDisconnected(playerId);
                             OnPlayerDisconnected?.Invoke(player);
@@ -326,6 +332,7 @@ namespace xpTURN.Klotho.Network
                 _peerToPlayer.Remove(peerId);
             }
             _peerSyncStates.Remove(peerId);
+            _peerDeviceIds.Remove(peerId);
 
             for (int i = _spectators.Count - 1; i >= 0; i--)
             {

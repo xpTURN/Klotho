@@ -108,11 +108,11 @@ namespace xpTURN.Klotho.Network.Tests
             _clientTransport.Send(0, serializer.Serialize(msg), DeliveryMethod.Reliable);
         }
 
-        private int GetSessionMagic()
+        private long GetSessionMagic()
         {
             var field = typeof(KlothoNetworkService).GetField("_sessionMagic",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            return (int)field.GetValue(_hostService);
+            return (long)field.GetValue(_hostService);
         }
 
         /// <summary>

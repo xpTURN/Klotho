@@ -15,6 +15,8 @@ using xpTURN.Klotho.Network;
 using xpTURN.Klotho.BrawlerDedicatedServer;
 using xpTURN.Klotho.BrawlerDedicatedServer.Tests;
 
+const string KLOTHO_CONNECTION_KEY = "xpTURN.Brawler";
+
 // ── CLI parsing ──
 // Single room: dotnet run -- <port> <botCount> [logLevel]
 // Multi-room:  dotnet run -- --multi <port> <maxRooms> <botCount> [logLevel]
@@ -63,7 +65,7 @@ static void RunSingleRoom(string[] args)
     registryBuilder.RegisterRange(dataAssets);
     var assetRegistry = registryBuilder.Build();
 
-    var transport = new LiteNetLibTransport(logger);
+    var transport = new LiteNetLibTransport(logger, connectionKey: KLOTHO_CONNECTION_KEY);
 
     var sim = new EcsSimulation(
         maxEntities: 256,
@@ -90,7 +92,11 @@ static void RunSingleRoom(string[] args)
 
     networkService.CreateRoom("default", maxPlayers);
     networkService.MaxSpectatorsPerRoom = maxSpectators;
-    networkService.Listen("0.0.0.0", port, maxPlayers + maxSpectators);
+    if (!networkService.Listen("0.0.0.0", port, maxPlayers + maxSpectators))
+    {
+        logger.ZLogError($"[BrawlerDedicatedServer] Failed to bind port {port} — exiting.");
+        Environment.Exit(1);
+    }
 
     logger.ZLogInformation($"[BrawlerDedicatedServer] Server listening on port {port}, maxPlayers={maxPlayers}, maxSpectators={maxSpectators}, botCount={botCount}, tickInterval={tickIntervalMs}ms");
 
@@ -142,8 +148,12 @@ static void RunMultiRoom(string[] args)
     ThreadPool.SetMinThreads(minWorker, Environment.ProcessorCount);
 
     // Single Transport (one port)
-    var transport = new LiteNetLibTransport(logger);
-    transport.Listen("0.0.0.0", port, maxRooms * (maxPlayersPerRoom + maxSpectatorsPerRoom));
+    var transport = new LiteNetLibTransport(logger, connectionKey: KLOTHO_CONNECTION_KEY);
+    if (!transport.Listen("0.0.0.0", port, maxRooms * (maxPlayersPerRoom + maxSpectatorsPerRoom)))
+    {
+        logger.ZLogError($"[BrawlerDedicatedServer] Failed to bind port {port} — exiting.");
+        Environment.Exit(1);
+    }
 
     // RoomRouter + RoomManager
     var router = new RoomRouter(transport, logger);

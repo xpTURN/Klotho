@@ -9,6 +9,7 @@ using ZLogger;
 using xpTURN.Klotho.Core;
 using xpTURN.Klotho.Network;
 using DeliveryMethod = xpTURN.Klotho.Network.DeliveryMethod;
+using DisconnectReason = xpTURN.Klotho.Network.DisconnectReason;
 
 namespace xpTURN.Klotho.LiteNetLib
 {
@@ -23,12 +24,22 @@ namespace xpTURN.Klotho.LiteNetLib
         bool _isConnected;
         int _localPeerId;
         bool _isServer;
-        string _connectionKey = "xpTURN.Klotho";
+        public const string DefaultConnectionKey = "xpTURN.Klotho";
+        string _connectionKey;
         int _maxConnections;
 
-        public LiteNetLibTransport(ILogger logger, NetLogLevel[] levels = null)
+        public LiteNetLibTransport(ILogger logger, NetLogLevel[] levels = null, string connectionKey = DefaultConnectionKey)
         {
             _logger = logger;
+            if (string.IsNullOrEmpty(connectionKey))
+            {
+                logger?.ZLogWarning($"[LiteNetLibTransport] connectionKey null/empty — falling back to DefaultConnectionKey");
+                _connectionKey = DefaultConnectionKey;
+            }
+            else
+            {
+                _connectionKey = connectionKey;
+            }
             NetDebug.Logger ??= new LiteNetLibNetLogger(logger, levels);
             _peerMap = new LiteNetLibPeerMap(logger);
         }
@@ -43,7 +54,7 @@ namespace xpTURN.Klotho.LiteNetLib
 
         // INetworkTransport events
         public event Action OnConnected;
-        public event Action OnDisconnected;
+        public event Action<DisconnectReason> OnDisconnected;
         public event Action<int, byte[], int> OnDataReceived;
         public event Action<int> OnPeerConnected;
         public event Action<int> OnPeerDisconnected;
@@ -51,7 +62,7 @@ namespace xpTURN.Klotho.LiteNetLib
         private bool _useIPv6 = false;
 
         // INetworkTransport methods
-        public void Listen(string address, int port, int maxConnections)
+        public bool Listen(string address, int port, int maxConnections)
         {
             _maxConnections = maxConnections;
             string resolvedIp = IPv6Helper.Resolve(address);
@@ -63,12 +74,13 @@ namespace xpTURN.Klotho.LiteNetLib
             if (!_netManager.Start(port))
             {
                 _logger?.ZLogError($"[LiteNetLibTransport] Server start failed — unable to bind port {port} (already in use?)");
-                return;
+                return false;
             }
             _logger?.ZLogInformation($"[LiteNetLibTransport] Server listening: port {port}");
+            return true;
         }
 
-        public void Connect(string address, int port)
+        public bool Connect(string address, int port)
         {
             RemoteAddress = address;
             RemotePort = port;
@@ -80,10 +92,11 @@ namespace xpTURN.Klotho.LiteNetLib
             if (!_netManager.Start())
             {
                 _logger?.ZLogError($"[LiteNetLibTransport] Client socket start failed");
-                return;
+                return false;
             }
             _netManager.Connect(resolvedIp, port, _connectionKey);
             _logger?.ZLogInformation($"[LiteNetLibTransport] Connecting: {address}:{port}");
+            return true;
         }
 
         public void Disconnect()
@@ -95,7 +108,7 @@ namespace xpTURN.Klotho.LiteNetLib
             _isConnected = false;
 
             if (!_isServer && wasConnected)
-                OnDisconnected?.Invoke();
+                OnDisconnected?.Invoke(DisconnectReason.LocalDisconnect);
         }
 
         public void DisconnectPeer(int peerId)
@@ -169,7 +182,7 @@ namespace xpTURN.Klotho.LiteNetLib
             if (!_isServer)
             {
                 _isConnected = false;
-                OnDisconnected?.Invoke();
+                OnDisconnected?.Invoke(MapReason(disconnectInfo.Reason));
             }
         }
 
@@ -225,5 +238,20 @@ namespace xpTURN.Klotho.LiteNetLib
             DeliveryMethod.Sequenced => global::LiteNetLib.DeliveryMethod.Sequenced,
             _ => global::LiteNetLib.DeliveryMethod.ReliableOrdered,
         };
-    }    
+
+        static DisconnectReason MapReason(global::LiteNetLib.DisconnectReason reason) => reason switch
+        {
+            global::LiteNetLib.DisconnectReason.DisconnectPeerCalled   => DisconnectReason.LocalDisconnect,
+            global::LiteNetLib.DisconnectReason.RemoteConnectionClose  => DisconnectReason.RemoteDisconnect,
+            global::LiteNetLib.DisconnectReason.ConnectionRejected     => DisconnectReason.ConnectionRejected,
+            global::LiteNetLib.DisconnectReason.InvalidProtocol        => DisconnectReason.ConnectionRejected,
+            global::LiteNetLib.DisconnectReason.ConnectionFailed       => DisconnectReason.NetworkFailure,
+            global::LiteNetLib.DisconnectReason.Timeout                => DisconnectReason.NetworkFailure,
+            global::LiteNetLib.DisconnectReason.HostUnreachable        => DisconnectReason.NetworkFailure,
+            global::LiteNetLib.DisconnectReason.NetworkUnreachable     => DisconnectReason.NetworkFailure,
+            global::LiteNetLib.DisconnectReason.UnknownHost            => DisconnectReason.NetworkFailure,
+            global::LiteNetLib.DisconnectReason.Reconnect              => DisconnectReason.ReconnectRequested,
+            _                                                          => DisconnectReason.Unknown,
+        };
+    }
 }

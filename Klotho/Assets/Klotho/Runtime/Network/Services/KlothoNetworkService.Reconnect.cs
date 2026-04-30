@@ -175,13 +175,20 @@ namespace xpTURN.Klotho.Network
                 return;
 
             _lastTransportReconnectTime = now;
-            _transport.Connect(_transport.RemoteAddress, _transport.RemotePort);
+            if (!_transport.Connect(_transport.RemoteAddress, _transport.RemotePort))
+            {
+                _logger?.ZLogError($"[KlothoNetworkService] Reconnect transport start failed — aborting reconnect");
+                _reconnectState = ReconnectState.None;
+                Phase = SessionPhase.Disconnected;
+            }
         }
 
         private void SendReconnectRequest()
         {
             _reconnectRequestCache.SessionMagic = _sessionMagic;
             _reconnectRequestCache.PlayerId = LocalPlayerId;
+            _reconnectRequestCache.DeviceId = GetDeviceId();
+            _logger?.ZLogInformation($"[KlothoNetworkService] Sending ReconnectRequestMessage (playerId={_reconnectRequestCache.PlayerId}, deviceId='{_reconnectRequestCache.DeviceId}')");
 
             using (var serialized = _messageSerializer.SerializePooled(_reconnectRequestCache))
                 _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
@@ -339,6 +346,13 @@ namespace xpTURN.Klotho.Network
                 info.Reset();
                 _disconnectedPlayerCount--;
                 SendReconnectReject(peerId, 3); // Timed out
+                return;
+            }
+
+            // 3.5. Validate deviceId (skip when not bound — info or msg empty)
+            if (!string.IsNullOrEmpty(info.DeviceId) && info.DeviceId != msg.DeviceId)
+            {
+                SendReconnectReject(peerId, ReconnectRejectReason.DeviceMismatch);
                 return;
             }
 

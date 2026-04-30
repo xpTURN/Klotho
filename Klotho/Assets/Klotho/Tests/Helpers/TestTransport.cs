@@ -28,12 +28,12 @@ namespace xpTURN.Klotho.Helper.Tests
 
         // INetworkTransport events
         public event Action OnConnected;
-        public event Action OnDisconnected;
+        public event Action<DisconnectReason> OnDisconnected;
         public event Action<int, byte[], int> OnDataReceived;
         public event Action<int> OnPeerConnected;
         public event Action<int> OnPeerDisconnected;
 
-        public void Connect(string address, int port)
+        public bool Connect(string address, int port)
         {
             _isHost = false;
             _peerId = _nextPeerId++;
@@ -44,18 +44,20 @@ namespace xpTURN.Klotho.Helper.Tests
             _hostInstance?.NotifyPeerConnected(_peerId);
 
             OnConnected?.Invoke();
+            return true;
         }
 
         /// <summary>
         /// Start as host (test extension method).
         /// </summary>
-        public void Listen(string address, int port, int maxConnections)
+        public bool Listen(string address, int port, int maxConnections)
         {
             _isHost = true;
             _peerId = 0;
             _hostInstance = this;
             _isConnected = true;
             OnConnected?.Invoke();
+            return true;
         }
 
         public void Send(int peerId, byte[] data, DeliveryMethod deliveryMethod)
@@ -117,7 +119,9 @@ namespace xpTURN.Klotho.Helper.Tests
             if (_peers.TryGetValue(peerId, out var client))
             {
                 client._isConnected = false;
-                client.OnDisconnected?.Invoke();
+                // NetworkFailure (not RemoteDisconnect) — simulates client-side detection of connection loss,
+                // matching the test intent of triggering the client's reconnect flow.
+                client.OnDisconnected?.Invoke(DisconnectReason.NetworkFailure);
                 _peers.Remove(peerId);
                 NotifyPeerDisconnected(peerId);
             }
@@ -142,7 +146,19 @@ namespace xpTURN.Klotho.Helper.Tests
                 // Notify host of disconnection
                 _hostInstance?.NotifyPeerDisconnected(_peerId);
             }
-            OnDisconnected?.Invoke();
+            // NetworkFailure (not LocalDisconnect) — test fault-injection convention.
+            // Tests use Disconnect() to simulate client-side connection loss and expect the
+            // reconnect flow to engage. For genuine local-leave semantics, use SimulateDisconnect(LocalDisconnect).
+            OnDisconnected?.Invoke(DisconnectReason.NetworkFailure);
+        }
+
+        /// <summary>
+        /// Test helper: simulate a disconnect with the given reason (fault injection).
+        /// </summary>
+        public void SimulateDisconnect(DisconnectReason reason)
+        {
+            _isConnected = false;
+            OnDisconnected?.Invoke(reason);
         }
 
         /// <summary>

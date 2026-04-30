@@ -20,13 +20,16 @@ namespace xpTURN.Klotho.Network
         /// <summary>
         /// Start listening as server/host.
         /// Determines IPv6 vs IPv4 usage based on the host IP.
+        /// Returns true on socket bind/start success, false on immediate failure.
         /// </summary>
-        void Listen(string address, int port, int maxConnections);
+        bool Listen(string address, int port, int maxConnections);
 
         /// <summary>
-        /// Connect to a server as a client/guest
+        /// Connect to a server as a client/guest.
+        /// Returns true on socket start success (actual connection establishment is reported via OnConnected/OnDisconnected),
+        /// false on immediate failure.
         /// </summary>
-        void Connect(string address, int port);
+        bool Connect(string address, int port);
 
         /// <summary>
         /// Disconnect
@@ -89,9 +92,9 @@ namespace xpTURN.Klotho.Network
         event Action OnConnected;
 
         /// <summary>
-        /// Disconnected event
+        /// Disconnected event. The argument carries the categorized disconnect reason.
         /// </summary>
-        event Action OnDisconnected;
+        event Action<DisconnectReason> OnDisconnected;
 
         /// <summary>
         /// Address of the last connected remote host. Retained after disconnection.

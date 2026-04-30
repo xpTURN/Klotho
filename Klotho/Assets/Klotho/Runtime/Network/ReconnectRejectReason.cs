@@ -11,6 +11,7 @@ namespace xpTURN.Klotho.Network
         public const byte InvalidPlayer    = 2;
         public const byte TimedOut         = 3;
         public const byte AlreadyConnected = 4;
+        public const byte DeviceMismatch   = 5;
 
         /// <summary>
         /// Returns the symbolic name for a reason byte (e.g. "InvalidMagic"). Game/UI layers should
@@ -24,6 +25,7 @@ namespace xpTURN.Klotho.Network
                 case InvalidPlayer:    return "InvalidPlayer";
                 case TimedOut:         return "TimedOut";
                 case AlreadyConnected: return "AlreadyConnected";
+                case DeviceMismatch:   return "DeviceMismatch";
                 default:               return "Unknown";
             }
         }

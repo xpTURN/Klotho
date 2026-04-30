@@ -50,20 +50,21 @@ namespace xpTURN.Klotho.Network.Tests
             public int RemotePort { get; private set; }
 
             public event Action OnConnected;
-            public event Action OnDisconnected;
+            public event Action<DisconnectReason> OnDisconnected;
             public event Action<int, byte[], int> OnDataReceived;
             public event Action<int> OnPeerConnected;
             public event Action<int> OnPeerDisconnected;
 
             public List<(int peerId, byte[] data, int length)> SentMessages = new List<(int, byte[], int)>();
 
-            public void Connect(string address, int port)
+            public bool Connect(string address, int port)
             {
                 IsConnected = true;
                 OnConnected?.Invoke();
+                return true;
             }
 
-            public void Listen(string address, int port, int maxConnections) { IsConnected = true; }
+            public bool Listen(string address, int port, int maxConnections) { IsConnected = true; return true; }
 
             public void Send(int peerId, byte[] data, DeliveryMethod dm)
                 => SentMessages.Add((peerId, data, data.Length));
@@ -83,7 +84,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void Disconnect()
             {
                 IsConnected = false;
-                OnDisconnected?.Invoke();
+                OnDisconnected?.Invoke(DisconnectReason.LocalDisconnect);
             }
 
             public void DisconnectPeer(int peerId) { }
@@ -91,8 +92,8 @@ namespace xpTURN.Klotho.Network.Tests
             public void SimulateDataReceived(int peerId, byte[] data)
                 => OnDataReceived?.Invoke(peerId, data, data.Length);
 
-            public void SimulateDisconnected()
-                => OnDisconnected?.Invoke();
+            public void SimulateDisconnected(DisconnectReason reason = DisconnectReason.RemoteDisconnect)
+                => OnDisconnected?.Invoke(reason);
 
             internal void SuppressWarnings()
             {

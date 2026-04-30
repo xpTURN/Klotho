@@ -11,13 +11,14 @@ namespace xpTURN.Klotho.Network
     {
         public string RemoteAddress;
         public int RemotePort;
-        public int SessionMagic;
+        public long SessionMagic;
         public int LocalPlayerId;
         public long SavedAtUnixMs;
         public int ReconnectTimeoutMs;
         public string RoomName;
         public int RoomId = -1;     // SD multi-room routing identifier; -1 means single-room / P2P
         public string AppVersion;
+        public string DeviceId;
     }
 
     /// <summary>

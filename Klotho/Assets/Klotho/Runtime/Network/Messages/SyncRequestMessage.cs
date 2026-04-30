@@ -9,7 +9,7 @@ namespace xpTURN.Klotho.Network
     public partial class SyncRequestMessage : NetworkMessageBase
     {
         [KlothoOrder]
-        public int Magic;
+        public long Magic;
 
         [KlothoOrder]
         public int Sequence;

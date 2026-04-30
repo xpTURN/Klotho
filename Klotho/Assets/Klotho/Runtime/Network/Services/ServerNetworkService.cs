@@ -54,6 +54,7 @@ namespace xpTURN.Klotho.Network
         // Player management
         private readonly List<PlayerInfo> _players = new List<PlayerInfo>();
         private readonly Dictionary<int, int> _peerToPlayer = new Dictionary<int, int>();
+        private readonly Dictionary<int, string> _peerDeviceIds = new Dictionary<int, string>();
         private int _nextPlayerId = 1; // No local player on server (playerId=0)
 
         // Raw bytes cache for forwarding existing player PlayerConfigs to late-join guests
@@ -73,7 +74,7 @@ namespace xpTURN.Klotho.Network
         private ServerInputCollector _inputCollector;
 
         // Session
-        private int _sessionMagic;
+        private long _sessionMagic;
         private SharedTimeClock _sharedClock;
         private SessionPhase _phase;
         private int _localTick;
@@ -232,7 +233,7 @@ namespace xpTURN.Klotho.Network
         {
             _maxPlayersPerRoom = maxPlayers;
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            _sessionMagic = (int)(now & 0x7FFFFFFF);
+            _sessionMagic = SessionMagicFactory.Generate();
             _sharedClock = new SharedTimeClock(now, 0);
 
             // Explicit reset (the Phase setter also handles Lobby — kept as defensive redundancy).
@@ -247,10 +248,11 @@ namespace xpTURN.Klotho.Network
 
         /// <summary>
         /// Starts server listening. Call after CreateRoom.
+        /// Returns true on socket bind success, false on immediate failure.
         /// </summary>
-        public void Listen(string address, int port, int maxPlayers)
+        public bool Listen(string address, int port, int maxPlayers)
         {
-            _transport.Listen(address, port, maxPlayers);
+            return _transport.Listen(address, port, maxPlayers);
         }
 
         public void JoinRoom(string roomName)
@@ -266,6 +268,7 @@ namespace xpTURN.Klotho.Network
 
             _players.Clear();
             _peerToPlayer.Clear();
+            _peerDeviceIds.Clear();
             _peerStates.Clear();
             _peerSyncStates.Clear();
             _pendingPeers.Clear();
@@ -603,8 +606,9 @@ namespace xpTURN.Klotho.Network
             {
                 _pendingPeers.Remove(peerId);
                 var firstMsg = _messageSerializer.Deserialize(data, length);
-                if (firstMsg is PlayerJoinMessage)
+                if (firstMsg is PlayerJoinMessage playerJoin)
                 {
+                    _peerDeviceIds[peerId] = playerJoin.DeviceId ?? string.Empty;
                     // Outer capacity gate covering both the Pre-GameStart Lobby race and Post-GameStart capacity.
                     // HandleLateJoin's own gate is the second-line defense for non-dispatch callers.
                     if (EffectivePlayerCount >= MaxPlayerCapacity)
@@ -855,6 +859,8 @@ namespace xpTURN.Klotho.Network
                             info.DisconnectTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                             info.LastConfirmedTick = _engine?.CurrentTick ?? 0;
                             info.PredictedTickCount = 0;
+                            _peerDeviceIds.TryGetValue(peerId, out var disconnectedDeviceId);
+                            info.DeviceId = disconnectedDeviceId ?? string.Empty;
                             _disconnectedPlayerCount++;
                             _engine?.NotifyPlayerDisconnected(playerId);
                             OnPlayerDisconnected?.Invoke(player);
@@ -878,6 +884,7 @@ namespace xpTURN.Klotho.Network
 
             _peerStates.Remove(peerId);
             _peerSyncStates.Remove(peerId);
+            _peerDeviceIds.Remove(peerId);
 
             for (int i = _spectators.Count - 1; i >= 0; i--)
             {

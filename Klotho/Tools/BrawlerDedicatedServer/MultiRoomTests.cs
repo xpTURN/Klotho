@@ -426,7 +426,7 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
         public event Action<int> OnPeerDisconnected;
 #pragma warning disable CS0067
         public event Action OnConnected;
-        public event Action OnDisconnected;
+        public event Action<DisconnectReason> OnDisconnected;
 #pragma warning restore CS0067
 
         // For test verification
@@ -482,8 +482,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
 
         public void PollEvents() { }
         public void FlushSendQueue() { }
-        public void Listen(string address, int port, int maxConnections) { }
-        public void Connect(string address, int port) { }
+        public bool Listen(string address, int port, int maxConnections) => true;
+        public bool Connect(string address, int port) => true;
         public void Disconnect() { }
     }
 }

@@ -39,6 +39,7 @@ namespace xpTURN.Klotho.Core
         // cold-start Reconnect path buffering
         private PersistedReconnectCredentials _reconnectCreds;        // null = Normal/LateJoin mode
         private ReconnectAcceptMessage _pendingReconnect;
+        private string _deviceId = string.Empty;
 
         // Timeout
         private long _connectStartMs;
@@ -66,19 +67,26 @@ namespace xpTURN.Klotho.Core
             INetworkTransport transport, string host, int port,
             Action<ConnectionResult> onCompleted, Action<string> onFailed = null,
             ILogger logger = null,
-            NetworkMessageBase preJoinMessage = null)
+            NetworkMessageBase preJoinMessage = null,
+            IDeviceIdProvider deviceIdProvider = null)
         {
             var connection = new KlothoConnection(transport, logger);
             connection._onCompleted = onCompleted;
             connection._onFailed = onFailed;
             connection._preJoinMessage = preJoinMessage;
+            connection._deviceId = deviceIdProvider?.GetDeviceId() ?? string.Empty;
 
             transport.OnConnected += connection.HandleConnected;
             transport.OnDataReceived += connection.HandleDataReceived;
             transport.OnDisconnected += connection.HandleDisconnected;
 
             connection._connectStartMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            transport.Connect(host, port);
+            if (!transport.Connect(host, port))
+            {
+                connection._completed = true;
+                connection.Dispose();
+                onFailed?.Invoke("Failed to start client transport");
+            }
 
             return connection;
         }
@@ -106,7 +114,12 @@ namespace xpTURN.Klotho.Core
             transport.OnDisconnected += connection.HandleDisconnected;
 
             connection._connectStartMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            transport.Connect(creds.RemoteAddress, creds.RemotePort);
+            if (!transport.Connect(creds.RemoteAddress, creds.RemotePort))
+            {
+                connection._completed = true;
+                connection.Dispose();
+                onFailed?.Invoke("Failed to start client transport");
+            }
 
             return connection;
         }
@@ -166,7 +179,10 @@ namespace xpTURN.Klotho.Core
                 {
                     SessionMagic = _reconnectCreds.SessionMagic,
                     PlayerId = _reconnectCreds.LocalPlayerId,
+                    DeviceId = _reconnectCreds.DeviceId ?? string.Empty,
                 };
+                _logger?.ZLogInformation($"[KlothoConnection] Reconnect: sending ReconnectRequestMessage (playerId={req.PlayerId}, deviceId='{req.DeviceId}')");
+
                 using (var serialized = _messageSerializer.SerializePooled(req))
                 {
                     _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
@@ -187,20 +203,28 @@ namespace xpTURN.Klotho.Core
             // PlayerJoinMessage must arrive first so the host can determine the pending-peer role
             // (KlothoNetworkService.HandleDataReceived → triggers StartHandshake).
             // The host then initiates SyncRequest, and the guest only responds in HandleSyncRequest.
-            var msg = new PlayerJoinMessage();
+            var msg = new PlayerJoinMessage { DeviceId = _deviceId };
+            _logger?.ZLogInformation($"[KlothoConnection] Connect: sending PlayerJoinMessage (deviceId='{msg.DeviceId}')");
+            
             using (var serialized = _messageSerializer.SerializePooled(msg))
             {
                 _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
             }
         }
 
-        private void HandleDisconnected()
+        private void HandleDisconnected(DisconnectReason reason)
         {
-            if (!_completed)
+            if (_completed) return;
+            _completed = true;
+
+            if (reason == DisconnectReason.LocalDisconnect)
             {
-                _completed = true;
-                _onFailed?.Invoke("Connection lost during handshake");
+                // User-initiated disconnect (e.g. cancel during handshake) — not a failure.
+                Dispose();
+                return;
             }
+
+            _onFailed?.Invoke($"Connection lost during handshake (reason: {reason})");
         }
 
         private void HandleDataReceived(int peerId, byte[] data, int length)
