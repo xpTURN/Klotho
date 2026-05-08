@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
+using ZLogger;
 using xpTURN.Klotho.Core;
 using xpTURN.Klotho.ECS;
 
@@ -29,13 +30,21 @@ namespace xpTURN.Klotho
         // Active views. Keyed by EntityRef.Index and mutually exclusive with the pending collection.
         private readonly Dictionary<int, EntityView> _viewsByEntityIndex = new();
 
-        // Version of entities being spawned. Since DestroyStale also clears pending keys,
-        // async completion can detect version mismatches and naturally discard the result.
-        private readonly Dictionary<int, int> _pendingVersion = new();
+        // Spawn-sequence counter per Index. SpawnViewAsync compares against this on completion to discard stale results.
+        private readonly Dictionary<int, int> _pendingSpawnCounter = new();
 
-        private readonly HashSet<int> _presentEntityIndices = new();
-        private readonly List<int>    _staleIndices         = new();
-        private readonly List<int>    _pendingStaleKeys     = new();
+        // EntityRef.Version per Index for in-flight spawns. Used to detect entity-slot reuse across rollback cycles.
+        // Invariant: _pendingSpawnCounter and _pendingEntityVersion always share the same key set.
+        private readonly Dictionary<int, int> _pendingEntityVersion = new();
+
+        // Index → EntityRef.Version snapshot of present entities, populated by CollectPresent and consumed by DestroyStale.
+        private readonly Dictionary<int, int> _presentEntityVersions = new();
+
+        // Index → OwnerComponent.OwnerId snapshot for entities that have OwnerComponent.
+        // Missing key = entity has no OwnerComponent → Owner-agnostic, treat as match in DestroyStale.
+        private readonly Dictionary<int, int> _presentEntityOwners   = new();
+        private readonly List<int>            _staleIndices          = new();
+        private readonly List<int>            _pendingStaleKeys      = new();
         private int _versionCounter;
 
         // Reusable buffer for collecting live entities during Reconcile (GC-free).
@@ -84,8 +93,10 @@ namespace xpTURN.Klotho
                 else if (view != null) Destroy(view.gameObject);
             }
             _viewsByEntityIndex.Clear();
-            _pendingVersion.Clear();
-            _presentEntityIndices.Clear();
+            _pendingSpawnCounter.Clear();
+            _pendingEntityVersion.Clear();
+            _presentEntityVersions.Clear();
+            _presentEntityOwners.Clear();
             _staleIndices.Clear();
             _pendingStaleKeys.Clear();
         }
@@ -112,7 +123,8 @@ namespace xpTURN.Klotho
 
         private void Reconcile()
         {
-            _presentEntityIndices.Clear();
+            _presentEntityVersions.Clear();
+            _presentEntityOwners.Clear();
 
             // Frame may be null immediately after ring warmup / FullState restore / Late Join, so guard against it.
             var verified  = Engine.VerifiedFrame;
@@ -148,33 +160,72 @@ namespace xpTURN.Klotho
                 if (!_factory.TryGetBindBehaviour(frame, entity, out var entityBehaviour)) continue;
                 if (entityBehaviour != matchBehaviour) continue;
 
-                _presentEntityIndices.Add(entity.Index);
+                _presentEntityVersions[entity.Index] = entity.Version;
+                if (frame.Has<OwnerComponent>(entity))
+                    _presentEntityOwners[entity.Index] = frame.GetReadOnly<OwnerComponent>(entity).OwnerId;
                 TrySpawn(entity, frameRef, entityBehaviour);
             }
         }
 
-        private void TrySpawn(EntityRef entity, FrameRef frame, BindBehaviour behaviour)
+        // Returns true if either (a) entity has no OwnerComponent (Owner-agnostic),
+        // or (b) view reports its cached Owner matches the current frame's Owner.
+        // EVU lives in xpTURN.Klotho.Runtime.Unity asmdef which has no reference to concrete view
+        // assemblies (e.g. Brawler.View) — identity comparison is delegated to a virtual method on EntityView.
+        private static bool OwnersMatch(EntityView view, EntityRef entity, Frame frame)
         {
-            if (_viewsByEntityIndex.ContainsKey(entity.Index)) return;
-            if (_pendingVersion.ContainsKey(entity.Index))    return;  // already in progress asynchronously
+            if (!frame.Has<OwnerComponent>(entity)) return true;
 
-            int version = ++_versionCounter;
-            _pendingVersion[entity.Index] = version;
-            SpawnViewAsync(entity, frame, behaviour, version).Forget();
+            int currentOwner = frame.GetReadOnly<OwnerComponent>(entity).OwnerId;
+            return view.OwnerMatches(currentOwner);
         }
 
-        private async UniTaskVoid SpawnViewAsync(EntityRef entity, FrameRef frame, BindBehaviour behaviour, int version)
+        private void TrySpawn(EntityRef entity, FrameRef frame, BindBehaviour behaviour)
+        {
+            // Active view exists for this Index — compare EntityRef.Version + OwnerId for hybrid dedup.
+            if (_viewsByEntityIndex.TryGetValue(entity.Index, out var existing))
+            {
+                bool versionMatch = existing.EntityRef.Version == entity.Version;
+                bool ownerMatch   = OwnersMatch(existing, entity, frame.Frame);
+
+                if (versionMatch && ownerMatch) return;  // truly same entity, dedup
+
+                Engine?.Logger?.ZLogDebug($"[ViewLife][Rebind] entity={entity.Index}, viewType={existing.GetType().Name}, oldVersion={existing.EntityRef.Version}, newVersion={entity.Version}, versionMatch={versionMatch}, ownerMatch={ownerMatch}, viewIID={existing.GetInstanceID()}");
+                existing.OnDeactivate();
+                if (_factory != null) _factory.Destroy(existing);
+                _viewsByEntityIndex.Remove(entity.Index);
+            }
+
+            // Pending async spawn exists — compare EntityRef.Version. On mismatch, invalidate so the in-flight result is discarded on completion.
+            if (_pendingEntityVersion.TryGetValue(entity.Index, out var pendingVer))
+            {
+                if (pendingVer == entity.Version) return;  // same async spawn in flight
+
+                _pendingSpawnCounter.Remove(entity.Index);
+                _pendingEntityVersion.Remove(entity.Index);
+            }
+
+            int spawnCounter = ++_versionCounter;
+            _pendingSpawnCounter[entity.Index]  = spawnCounter;
+            _pendingEntityVersion[entity.Index] = entity.Version;
+            SpawnViewAsync(entity, frame, behaviour, spawnCounter).Forget();
+        }
+
+        private async UniTaskVoid SpawnViewAsync(EntityRef entity, FrameRef frame, BindBehaviour behaviour, int spawnCounter)
         {
             ViewFlags flags = _factory.GetViewFlags(frame.Frame, entity);
             EntityView view = await _factory.CreateAsync(frame.Frame, entity, behaviour, flags);
 
-            // If the version changed by the time the async completes, treat it as stale and discard.
-            if (!_pendingVersion.TryGetValue(entity.Index, out int stored) || stored != version)
+            // Discard if the dispatch was invalidated (Version mismatch / stale clear) by the time the async completes.
+            if (!_pendingSpawnCounter.TryGetValue(entity.Index, out int storedCounter)
+                || storedCounter != spawnCounter
+                || !_pendingEntityVersion.TryGetValue(entity.Index, out int storedEntityVersion)
+                || storedEntityVersion != entity.Version)
             {
                 if (view != null) _factory.Destroy(view);
                 return;
             }
-            _pendingVersion.Remove(entity.Index);
+            _pendingSpawnCounter.Remove(entity.Index);
+            _pendingEntityVersion.Remove(entity.Index);
 
             if (view == null) return;  // Factory refused spawn — clean up stale and exit.
 
@@ -193,19 +244,37 @@ namespace xpTURN.Klotho
         {
             // Invalidate Pending too — on async completion, results are discarded due to version mismatch.
             _pendingStaleKeys.Clear();
-            foreach (var kvp in _pendingVersion)
-                if (!_presentEntityIndices.Contains(kvp.Key))
+            foreach (var kvp in _pendingSpawnCounter)
+                if (!_presentEntityVersions.ContainsKey(kvp.Key))
                     _pendingStaleKeys.Add(kvp.Key);
             foreach (var key in _pendingStaleKeys)
-                _pendingVersion.Remove(key);
+            {
+                _pendingSpawnCounter.Remove(key);
+                _pendingEntityVersion.Remove(key);
+            }
 
             foreach (var kvp in _viewsByEntityIndex)
-                if (!_presentEntityIndices.Contains(kvp.Key))
+            {
+                if (!_presentEntityVersions.TryGetValue(kvp.Key, out int presentVersion)
+                    || presentVersion != kvp.Value.EntityRef.Version)
+                {
                     _staleIndices.Add(kvp.Key);
+                    continue;
+                }
+
+                // Owner mismatch detection: when entity has OwnerComponent but the view's cached owner differs.
+                // Helper not used here because _presentEntityOwners only contains entries for entities with OwnerComponent.
+                if (_presentEntityOwners.TryGetValue(kvp.Key, out int presentOwner)
+                    && !kvp.Value.OwnerMatches(presentOwner))
+                {
+                    _staleIndices.Add(kvp.Key);
+                }
+            }
 
             foreach (var idx in _staleIndices)
             {
                 var view = _viewsByEntityIndex[idx];
+                Engine?.Logger?.ZLogDebug($"[ViewLife][StaleDestroy] entity={idx}, viewType={view.GetType().Name}, viewVersion={view.EntityRef.Version}, viewIID={view.GetInstanceID()}");
                 view.OnDeactivate();
                 if (_factory != null) _factory.Destroy(view);
                 else if (view != null) Destroy(view.gameObject);

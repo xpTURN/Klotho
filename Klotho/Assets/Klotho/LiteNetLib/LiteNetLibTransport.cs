@@ -28,6 +28,14 @@ namespace xpTURN.Klotho.LiteNetLib
         string _connectionKey;
         int _maxConnections;
 
+#if KLOTHO_FAULT_INJECTION
+        // RTT emulation. Each transport instance delays its incoming dispatch by rtt/2 so a
+        // round-trip across two transports totals EmulatedRttMs.
+        readonly System.Collections.Generic.List<(long releaseAtMs, int peerId, byte[] data, int length)> _delayedRecvMessages
+            = new System.Collections.Generic.List<(long, int, byte[], int)>();
+        bool _rttLogged;
+#endif
+
         public LiteNetLibTransport(ILogger logger, NetLogLevel[] levels = null, string connectionKey = DefaultConnectionKey)
         {
             _logger = logger;
@@ -107,6 +115,11 @@ namespace xpTURN.Klotho.LiteNetLib
             _peerMap.Clear();
             _isConnected = false;
 
+#if KLOTHO_FAULT_INJECTION
+            _delayedRecvMessages.Clear();
+            _rttLogged = false;
+#endif
+
             if (!_isServer && wasConnected)
                 OnDisconnected?.Invoke(DisconnectReason.LocalDisconnect);
         }
@@ -145,6 +158,24 @@ namespace xpTURN.Klotho.LiteNetLib
         public void PollEvents()
         {
             _netManager?.PollEvents();
+
+#if KLOTHO_FAULT_INJECTION
+            if (_delayedRecvMessages.Count > 0)
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                int write = 0;
+                for (int read = 0; read < _delayedRecvMessages.Count; read++)
+                {
+                    var entry = _delayedRecvMessages[read];
+                    if (entry.releaseAtMs <= now)
+                        OnDataReceived?.Invoke(entry.peerId, entry.data, entry.length);
+                    else
+                        _delayedRecvMessages[write++] = entry;
+                }
+                if (write != _delayedRecvMessages.Count)
+                    _delayedRecvMessages.RemoveRange(write, _delayedRecvMessages.Count - write);
+            }
+#endif
         }
 
         public void FlushSendQueue()
@@ -192,6 +223,25 @@ namespace xpTURN.Klotho.LiteNetLib
                 return;
 
             int length = reader.AvailableBytes;
+            
+#if KLOTHO_FAULT_INJECTION
+            int rtt = xpTURN.Klotho.Diagnostics.FaultInjection.EmulatedRttMs;
+            if (rtt > 0)
+            {
+                if (!_rttLogged)
+                {
+                    _rttLogged = true;
+                    _logger?.ZLogWarning($"[FaultInjection] LiteNetLibTransport: RTT emulation active ({rtt}ms round-trip)");
+                }
+                // Pooled buffer cannot survive across PollEvents — allocate dedicated copy for the delay queue.
+                byte[] copy = new byte[length];
+                reader.GetBytes(copy, length);
+                reader.Recycle();
+                long releaseAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (rtt / 2);
+                _delayedRecvMessages.Add((releaseAt, peerId, copy, length));
+                return;
+            }
+#endif
             byte[] data = StreamPool.GetBuffer(length);
             reader.GetBytes(data, length);
             reader.Recycle();

@@ -9,6 +9,7 @@ using xpTURN.Klotho.Deterministic.Geometry;
 using xpTURN.Klotho.Deterministic.Physics;
 using xpTURN.Klotho.ECS;
 using xpTURN.Klotho.ECS.Systems;
+using xpTURN.Klotho.Network;
 
 namespace Brawler
 {
@@ -370,17 +371,25 @@ namespace Brawler
         // ────────────────────────────────────────────
         void HandleSpawn(ref Frame frame, SpawnCharacterCommand cmd)
         {
+            frame.Logger?.ZLogDebug($"[Spawn][Recv] tick={frame.Tick}, player={cmd.PlayerId}, class={cmd.CharacterClass}");
+
             int classId = cmd.CharacterClass;
             if ((uint)classId >= (uint)_stats.Length)
             {
-                frame.Logger?.ZLogError($"[Spawn] Invalid classId={classId}: player={cmd.PlayerId} (valid range: 0~{_stats.Length - 1})");
+                frame.Logger?.ZLogError($"[Spawn][Reject:InvalidClass] tick={frame.Tick}, player={cmd.PlayerId}, classId={classId} (valid range: 0~{_stats.Length - 1})");
                 return;
             }
 
             // Prevent duplicate creation if a character already exists for this player
             if (TryFindCharacter(ref frame, cmd.PlayerId, out _))
             {
-                frame.Logger?.ZLogError($"[Spawn] Duplicate spawn rejected: player={cmd.PlayerId} already has a character");
+                frame.Logger?.ZLogError($"[Spawn][Reject:Duplicate] tick={frame.Tick}, player={cmd.PlayerId} already has a character");
+
+                var rejectEvt = EventPool.Get<CommandRejectedSimEvent>();
+                rejectEvt.PlayerId      = cmd.PlayerId;
+                rejectEvt.CommandTypeId = cmd.CommandTypeId;
+                rejectEvt.ReasonEnum    = RejectionReason.Duplicate;
+                _events.Enqueue(rejectEvt);
                 return;
             }
 
@@ -412,7 +421,7 @@ namespace Brawler
             spawnEvt.CharacterClass = classId;
             _events.Enqueue(spawnEvt);
 
-            frame.Logger?.ZLogInformation($"[Spawn] tick={frame.Tick}, player={cmd.PlayerId}, class={cmd.CharacterClass}, pos=({cmd.SpawnPosition.x},{cmd.SpawnPosition.y})");            
+            frame.Logger?.ZLogInformation($"[Spawn][Commit] tick={frame.Tick}, player={cmd.PlayerId}, class={cmd.CharacterClass}, entity={entity.Index}, version={entity.Version}, pos=({cmd.SpawnPosition.x},{cmd.SpawnPosition.y})");
         }
 
         // ────────────────────────────────────────────

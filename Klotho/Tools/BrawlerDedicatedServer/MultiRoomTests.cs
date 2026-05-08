@@ -1,18 +1,20 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using ZLogger;
 
 using xpTURN.Klotho.Core;
 using xpTURN.Klotho.ECS;
+using xpTURN.Klotho.Deterministic.Navigation;
 using xpTURN.Klotho.Network;
 using xpTURN.Klotho.BrawlerDedicatedServer;
 
 namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
 {
     /// <summary>
-    /// Multi-room E2E verification tests (§8 #8~#15).
+    /// Multi-room E2E verification tests.
     /// Validates server components with MockTransport without an actual network.
     /// Run: dotnet run -- --test
     /// </summary>
@@ -315,12 +317,46 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
         // Test infrastructure
         // ═══════════════════════════════════════════════════════
 
+        static FPNavMesh _sharedNavMesh;
+        static List<xpTURN.Klotho.Deterministic.Physics.FPStaticCollider> _sharedStaticColliders;
+        static IDataAssetRegistry _sharedAssetRegistry;
+
+        static void EnsureSharedTestData()
+        {
+            if (_sharedNavMesh == null)
+            {
+                var p = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.NavMeshData.bytes");
+                if (File.Exists(p)) _sharedNavMesh = FPNavMeshSerializer.Deserialize(p);
+            }
+            if (_sharedStaticColliders == null)
+            {
+                var p = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.StaticColliders.bytes");
+                if (File.Exists(p)) _sharedStaticColliders = xpTURN.Klotho.Deterministic.Physics.FPStaticColliderSerializer.Load(p);
+            }
+            if (_sharedAssetRegistry == null)
+            {
+                var p = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerAssets.bytes");
+                if (File.Exists(p))
+                {
+                    var assets = DataAssetReader.LoadMixedCollectionFromBytes(p);
+                    IDataAssetRegistryBuilder builder = new DataAssetRegistry();
+                    builder.RegisterRange(assets);
+                    _sharedAssetRegistry = builder.Build();
+                }
+            }
+        }
+
         static TestEnvironment CreateTestEnv(int maxRooms, int maxPlayersPerRoom)
         {
+            EnsureSharedTestData();
+
             int tickIntervalMs = 25;
             var transport = new MockTransport();
             var logger = _loggerFactory.CreateLogger("TestServer");
             var router = new RoomRouter(transport, logger);
+            var navMesh = _sharedNavMesh;
+            var staticColliders = _sharedStaticColliders;
+            var assetRegistry = _sharedAssetRegistry;
             var roomManager = new RoomManager(transport, router, _loggerFactory, new RoomManagerConfig
             {
                 MaxRooms = maxRooms,
@@ -328,14 +364,16 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
                 SimulationFactory = () => new EcsSimulation(
                     maxEntities: 64,
                     maxRollbackTicks: 1,
-                    deltaTimeMs: tickIntervalMs),
+                    deltaTimeMs: tickIntervalMs,
+                    assetRegistry: assetRegistry),
                 SimulationConfigFactory = () => new SimulationConfig
                 {
                     Mode = NetworkMode.ServerDriven,
                     TickIntervalMs = tickIntervalMs,
-                    MaxRollbackTicks = 0,
+                    MaxRollbackTicks = 1,
+                    SyncCheckInterval = 1,
                     UsePrediction = false,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                 },
                 SessionConfigFactory = () => new SessionConfig
                 {
@@ -343,7 +381,7 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
                     ReconnectTimeoutMs = 30000,
                     ReconnectMaxRetries = 3,
                 },
-                CallbacksFactory = (roomLogger) => new BrawlerServerCallbacks(roomLogger, null, null, 4, 0),
+                CallbacksFactory = (roomLogger) => new BrawlerServerCallbacks(roomLogger, staticColliders, navMesh, maxPlayersPerRoom, 0),
             });
 
             return new TestEnvironment

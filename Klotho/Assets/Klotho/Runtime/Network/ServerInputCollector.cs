@@ -35,6 +35,21 @@ namespace xpTURN.Klotho.Network
         private int _hardToleranceMs;
         private ILogger _logger;
 
+        // First scheduled tick — kept in sync with KlothoEngine.Start() setting CurrentTick = 0.
+        // Engine reference avoided here to prevent dependency cycle.
+        private const int FIRST_SCHEDULED_TICK = 0;
+
+        // Bootstrap window flag (SD-server only). When true, defensively redirects past-tick inputs
+        // arriving before any tick has executed (_lastExecutedTick == -1) to FIRST_SCHEDULED_TICK
+        // instead of rejecting. Toggled by ServerNetworkService.
+        private bool _bootstrapPending;
+
+        // Rejection / acceptance counters since last GetAndResetStats (monitoring).
+        private int _acceptedCount;
+        private int _rejectedPastTickCount;
+        private int _rejectedPeerMismatchCount;
+        private int _rejectedToleranceExceededCount;
+
         // Time provider (injectable for tests)
         private Func<long> _nowMs = () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
@@ -43,6 +58,13 @@ namespace xpTURN.Klotho.Network
         /// Parameter: playerId
         /// </summary>
         public event Action<int> OnPlayerInputTimeout;
+
+        /// <summary>
+        /// Raised when a transport-level command rejection occurs (peer mismatch, past tick, tolerance exceeded).
+        /// Consumers (ServerNetworkService) unicast a CommandRejectedMessage hint to the originating peer.
+        /// Parameters: peerId, tick, commandTypeId, reason
+        /// </summary>
+        public event Action<int, int, int, RejectionReason> OnCommandRejected;
 
         public int LastExecutedTick => _lastExecutedTick;
 
@@ -58,6 +80,12 @@ namespace xpTURN.Klotho.Network
         }
 
         public void SetLogger(ILogger logger) => _logger = logger;
+
+        /// <summary>
+        /// Toggles the bootstrap-pending window. Owned by ServerNetworkService;
+        /// set true at Phase = Playing, cleared via CompleteBootstrap on ack-complete or timeout.
+        /// </summary>
+        public void SetBootstrapPending(bool pending) => _bootstrapPending = pending;
 
         /// <summary>
         /// Replaces the time provider (for tests).
@@ -97,15 +125,28 @@ namespace xpTURN.Klotho.Network
                 || !_peerToPlayer.TryGetValue(peerId, out int expectedPlayerId)
                 || expectedPlayerId != playerId)
             {
+                _rejectedPeerMismatchCount++;
                 _logger?.ZLogWarning($"[InputCollector] Rejected (peerId mismatch): peerId={peerId}, playerId={playerId}, cmd={command.GetType().Name}");
+                OnCommandRejected?.Invoke(peerId, tick, command.CommandTypeId, RejectionReason.PeerMismatch);
                 return false;
             }
 
             // 2. Tick already executed
             if (tick <= _lastExecutedTick)
             {
-                _logger?.ZLogWarning($"[InputCollector] Rejected (past tick): tick={tick}, lastExec={_lastExecutedTick}, playerId={playerId}, cmd={command.GetType().Name}");
-                return false;
+                if (_bootstrapPending && _lastExecutedTick == -1)
+                {
+                    // Bootstrap window, no tick executed yet — defensively redirect to the first scheduled tick.
+                    _logger?.ZLogDebug($"[InputCollector] Bootstrap redirect: tick={tick} -> {FIRST_SCHEDULED_TICK}, playerId={playerId}, cmd={command.GetType().Name}");
+                    tick = FIRST_SCHEDULED_TICK;
+                }
+                else
+                {
+                    _rejectedPastTickCount++;
+                    _logger?.ZLogWarning($"[InputCollector] Rejected (past tick): tick={tick}, lastExec={_lastExecutedTick}, playerId={playerId}, cmd={command.GetType().Name}");
+                    OnCommandRejected?.Invoke(peerId, tick, command.CommandTypeId, RejectionReason.PastTick);
+                    return false;
+                }
             }
 
             // 3. Hard Tolerance exceeded
@@ -113,7 +154,9 @@ namespace xpTURN.Klotho.Network
             {
                 if (_nowMs() > deadline)
                 {
+                    _rejectedToleranceExceededCount++;
                     _logger?.ZLogWarning($"[InputCollector] Rejected (tolerance exceeded): tick={tick}, playerId={playerId}, cmd={command.GetType().Name}");
+                    OnCommandRejected?.Invoke(peerId, tick, command.CommandTypeId, RejectionReason.ToleranceExceeded);
                     return false;
                 }
             }
@@ -127,8 +170,26 @@ namespace xpTURN.Klotho.Network
 
             bool overwrite = tickInputs.ContainsKey(playerId);
             tickInputs[playerId] = command;
+            if (!overwrite)
+                _acceptedCount++;
             _logger?.ZLogDebug($"[Server][DIAG] Accept: tick={tick}, lastExec={_lastExecutedTick}, pid={playerId}, cmd={command.GetType().Name}, overwrite={overwrite}, slotCount={tickInputs.Count}");
             return true;
+        }
+
+        /// <summary>
+        /// Snapshot and reset rejection/acceptance counters for phase-tagged monitoring.
+        /// </summary>
+        public void GetAndResetStats(out int accepted, out int rejectedPastTick, out int rejectedPeerMismatch, out int rejectedToleranceExceeded)
+        {
+            accepted = _acceptedCount;
+            rejectedPastTick = _rejectedPastTickCount;
+            rejectedPeerMismatch = _rejectedPeerMismatchCount;
+            rejectedToleranceExceeded = _rejectedToleranceExceededCount;
+
+            _acceptedCount = 0;
+            _rejectedPastTickCount = 0;
+            _rejectedPeerMismatchCount = 0;
+            _rejectedToleranceExceededCount = 0;
         }
 
         /// <summary>
@@ -233,6 +294,12 @@ namespace xpTURN.Klotho.Network
             _deadlines.Clear();
             _activePlayerIds.Clear();
             _lastExecutedTick = -1;
+            _bootstrapPending = false;
+
+            _acceptedCount = 0;
+            _rejectedPastTickCount = 0;
+            _rejectedPeerMismatchCount = 0;
+            _rejectedToleranceExceededCount = 0;
         }
     }
 }

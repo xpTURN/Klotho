@@ -271,7 +271,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     Mode = NetworkMode.ServerDriven,
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 200,
                 },
                 new SessionConfig());
@@ -304,7 +304,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     Mode = NetworkMode.ServerDriven,
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                 },
                 new SessionConfig());
             peer.Engine.Initialize(peer.Simulation, clientService, _logger);

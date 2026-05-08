@@ -58,6 +58,9 @@ namespace xpTURN.Klotho.Network
         VerifiedState = 81,
         InputAck = 82,
         ClientInputBundle = 83,
+        PlayerBootstrapReady = 84,
+        BootstrapBegin = 85,
+        CommandRejected = 86,
 
         // Config layer
         SimulationConfig = 90,

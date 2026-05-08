@@ -10,7 +10,7 @@ using xpTURN.Klotho.Helper.Tests;
 namespace xpTURN.Klotho.Network.Tests
 {
     /// <summary>
-    /// Stage 3b (§4.5) — client-side ZLogWarning on malformed payloads.
+    /// Client-side ZLogWarning on malformed payloads.
     /// Verifies the trace log fires for the 3 client wire-input sites
     /// (ServerDrivenClientService / SpectatorService / KlothoConnection)
     /// without changing the disconnect policy.

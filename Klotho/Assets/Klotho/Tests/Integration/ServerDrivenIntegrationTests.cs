@@ -59,12 +59,18 @@ namespace xpTURN.Klotho.Tests.Integration
             _commandFactory = new CommandFactory();
             _clients.Clear();
             _server = null;
+#if KLOTHO_FAULT_INJECTION
+            xpTURN.Klotho.Diagnostics.FaultInjection.Reset();
+#endif
         }
 
         [TearDown]
         public void TearDown()
         {
             TestTransport.Reset();
+#if KLOTHO_FAULT_INJECTION
+            xpTURN.Klotho.Diagnostics.FaultInjection.Reset();
+#endif
         }
 
         // ── Helpers ───────────────────────────────────────────
@@ -89,7 +95,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
                     UsePrediction = false,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 200,
                 },
                 new SessionConfig
@@ -128,7 +134,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
                     UsePrediction = true,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 0,
                 },
                 new SessionConfig
@@ -623,10 +629,10 @@ namespace xpTURN.Klotho.Tests.Integration
             }
         }
 
-        // ── #3 PredictionCorrection ─────────────────────────
+        // ── PredictionCorrection ────────────────────────────
 
         /// <summary>
-        /// #3 ServerDriven.PredictionCorrection (section 7.2.3)
+        /// ServerDriven.PredictionCorrection
         /// When client prediction and server-confirmed input differ: local snapshot restoration + resimulation + hash match.
         /// Verifies that server/client hashes are identical in UseDeterministicHash mode.
         /// </summary>
@@ -661,10 +667,10 @@ namespace xpTURN.Klotho.Tests.Integration
             Assert.AreNotEqual(0, serverHash, "Server hash should not be zero (deterministic mode)");
         }
 
-        // ── #4 InputLoss ────────────────────────────────────
+        // ── InputLoss ───────────────────────────────────────
 
         /// <summary>
-        /// #4 ServerDriven.InputLoss (section 7.2.4)
+        /// ServerDriven.InputLoss
         /// Under packet loss, server substitutes EmptyCommand and continues normally.
         /// </summary>
         [Test]
@@ -703,7 +709,7 @@ namespace xpTURN.Klotho.Tests.Integration
         }
 
         /// <summary>
-        /// #4 InputLoss — Verifies recovery via resend after packet drop.
+        /// InputLoss — Verifies recovery via resend after packet drop.
         /// </summary>
         [Test]
         public void InputLoss_ResendRecoversDroppedInput()
@@ -1002,7 +1008,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     Mode = NetworkMode.ServerDriven,
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 200,
                 },
                 new SessionConfig
@@ -1121,7 +1127,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
                     UsePrediction = false,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 200,
                 },
                 new SessionConfig
@@ -1159,7 +1165,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
                     UsePrediction = true,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 0,
                 },
                 new SessionConfig
@@ -1371,5 +1377,230 @@ namespace xpTURN.Klotho.Tests.Integration
             peer.Simulation.UseDeterministicHash = true;
             return peer;
         }
+
+        // ── Bootstrap lifecycle integration ──────────────────────────
+
+        /// <summary>
+        /// Bootstrap-acked-players set must clear when the server transitions Phase = Disconnected,
+        /// otherwise a reused single-room session would treat match-2 as already pre-acked.
+        /// Mirrors the IMP36 single-room reuse regression guard and ServerNetworkService Phase setter
+        /// clear branch (Phase = Disconnected / Lobby).
+        /// </summary>
+        [Test]
+        public void Bootstrap_LeaveRoom_ClearsAckedPlayers()
+        {
+            CreateServer();
+            AddClient();
+            AddClient();
+            StartPlaying();
+
+            // After StartPlaying: server reached Playing → BootstrapPending → all clients ack'd →
+            // CompleteBootstrap → State = Running. _bootstrapAckedPlayers is populated until the next
+            // Phase = Disconnected/Lobby transition.
+            Assert.AreEqual(KlothoState.Running, _server.Engine.State,
+                "Server engine must reach Running after both clients ack");
+
+            var serverService = (ServerNetworkService)_server.NetworkService;
+            var ackField = typeof(ServerNetworkService).GetField(
+                "_bootstrapAckedPlayers", BindingFlags.NonPublic | BindingFlags.Instance);
+            var ackedSet = (HashSet<int>)ackField.GetValue(serverService);
+
+            Assert.AreEqual(2, ackedSet.Count,
+                "After CompleteBootstrap, ack set retains entries until Phase transitions out of Playing");
+
+            // Simulate match-end → Phase = Disconnected setter clear branch.
+            serverService.LeaveRoom();
+
+            Assert.AreEqual(0, ackedSet.Count,
+                "LeaveRoom (Phase = Disconnected) must clear _bootstrapAckedPlayers so a reused " +
+                "single-room session cannot inherit match-1 acks into match-2 bootstrap");
+        }
+
+        /// <summary>
+        /// PlayerBootstrapReadyMessage that arrives after engine.State has already flipped to Running
+        /// (e.g. delayed Reconnect ack, retry from a momentarily disconnected client) must be silently
+        /// dropped — never re-trigger CompleteBootstrap or mutate _bootstrapAckedPlayers.
+        /// HandlePlayerBootstrapReady's `engine.State != BootstrapPending` guard.
+        /// </summary>
+        [Test]
+        public void Bootstrap_PostCompleteAck_DroppedSilently()
+        {
+            CreateServer();
+            var client1 = AddClient();
+            AddClient();
+            StartPlaying();
+
+            Assert.AreEqual(KlothoState.Running, _server.Engine.State,
+                "Engine must already be Running before exercising the post-complete drop guard");
+
+            var serverService = (ServerNetworkService)_server.NetworkService;
+            var ackField = typeof(ServerNetworkService).GetField(
+                "_bootstrapAckedPlayers", BindingFlags.NonPublic | BindingFlags.Instance);
+            var ackedSet = (HashSet<int>)ackField.GetValue(serverService);
+            int ackCountBefore = ackedSet.Count;
+
+            // Manually craft a late ack from client1 — same wire format the real client emits, but
+            // arriving when bootstrap has already closed.
+            var serializer = new MessageSerializer();
+            var lateAck = new PlayerBootstrapReadyMessage { PlayerId = client1.NetworkService.LocalPlayerId };
+            byte[] lateAckBytes = serializer.Serialize(lateAck);
+
+            client1.Transport.Send(0, lateAckBytes, DeliveryMethod.ReliableOrdered);
+            PumpMessages(3);
+
+            Assert.AreEqual(KlothoState.Running, _server.Engine.State,
+                "Engine state must stay Running — late ack must not re-flip the BootstrapPending → Running edge");
+            Assert.AreEqual(ackCountBefore, ackedSet.Count,
+                "Late ack must not mutate _bootstrapAckedPlayers (engineState != BootstrapPending guard)");
+        }
+
+#if KLOTHO_FAULT_INJECTION
+        // ── Fault-injection scenario regression ───────────────────────
+        // Compiled only with KLOTHO_FAULT_INJECTION (Editor scripting define).
+
+        /// <summary>
+        /// Pumps both sides (PollEvents + NetworkService.Update) with periodic short sleeps until
+        /// the predicate becomes true or maxWaitMs elapses. Required under EmulatedRttMs > 0 because
+        /// TestTransport's delayed-message queue only releases on PollEvents past a wall-clock timestamp,
+        /// so handshake/VerifiedState exchanges need multiple round-trips of real-time waits to drain.
+        /// </summary>
+        private bool PumpUntil(System.Func<bool> condition, int maxWaitMs = 4000)
+        {
+            int half = xpTURN.Klotho.Diagnostics.FaultInjection.EmulatedRttMs / 2;
+            int sleepMs = System.Math.Max(half + 20, 10);
+            int start = System.Environment.TickCount;
+            while (true)
+            {
+                if (condition()) return true;
+                if (System.Environment.TickCount - start >= maxWaitMs) return false;
+                System.Threading.Thread.Sleep(sleepMs);
+                _server?.Transport.PollEvents();
+                _server?.NetworkService.Update();
+                foreach (var c in _clients)
+                {
+                    if (c.Transport.IsConnected)
+                    {
+                        c.Transport.PollEvents();
+                        c.NetworkService.Update();
+                    }
+                }
+            }
+        }
+
+        private bool AllClientsAtPhase(SessionPhase phase)
+        {
+            foreach (var c in _clients)
+                if (c.Phase != phase) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// RTT 200ms — bootstrap handshake + VerifiedState progression must keep determinism
+        /// under emulated round-trip delay. Sets FaultInjection.EmulatedRttMs before any message is sent
+        /// so the TestTransport receive-delay queue gates every direction symmetrically.
+        /// </summary>
+        [Test]
+        public void FaultInjection_Scenario1_RTT200ms_HashMatchAfterTicks()
+        {
+            xpTURN.Klotho.Diagnostics.FaultInjection.EmulatedRttMs = 200;
+
+            CreateServer();
+            AddClient();
+            AddClient();
+
+            // Drain RTT-delayed handshake (clock sync needs several round-trips × 100ms one-way).
+            bool synced = PumpUntil(() => AllClientsAtPhase(SessionPhase.Synchronized));
+            Assert.IsTrue(synced,
+                "Clients must reach Synchronized within 4s under RTT 200ms");
+
+            foreach (var c in _clients)
+                c.NetworkService.SetReady(true);
+
+            bool playing = PumpUntil(() =>
+                _server.Phase == SessionPhase.Playing && AllClientsAtPhase(SessionPhase.Playing));
+            Assert.IsTrue(playing,
+                "Server + clients must reach Playing within 4s after Ready under RTT 200ms");
+
+            int targetTick = 30;
+            int maxIter = targetTick * 10;
+            for (int i = 0; i < maxIter; i++)
+            {
+                Tick();
+                // Periodic sleep so RTT-delayed VerifiedState messages release; the local accumulator
+                // advances without it but cross-peer messages stay in the delayed queue.
+                if (i % 2 == 0)
+                    System.Threading.Thread.Sleep(25);
+                if (_server.CurrentTick >= targetTick) break;
+            }
+
+            // Drain trailing VerifiedState/Ack messages so client hashes catch up.
+            for (int i = 0; i < 12; i++)
+            {
+                System.Threading.Thread.Sleep(30);
+                Tick();
+            }
+
+            Assert.GreaterOrEqual(_server.CurrentTick, targetTick,
+                $"Server should reach {targetTick} ticks under RTT 200ms");
+
+            long serverHash = _server.Simulation.GetStateHash();
+            foreach (var c in _clients)
+            {
+                Assert.AreEqual(serverHash, c.Simulation.GetStateHash(),
+                    "Client hash must match server hash under RTT 200ms");
+            }
+        }
+
+        /// <summary>
+        /// Bootstrap ack suppressed — server's BOOTSTRAP_TIMEOUT_MS path (1000ms) must trigger
+        /// FullState resync to the unacked peer and force CompleteBootstrap so the engine reaches Running.
+        /// Hook fires inside HandleInitialFullStateReceived, so SuppressBootstrapAckPlayerIds must be set
+        /// before the InitialFullState broadcast — i.e. before the Ready→Playing pump.
+        /// </summary>
+        [Test]
+        public void FaultInjection_Scenario4_BootstrapAckSuppressed_TimeoutRecovers()
+        {
+            CreateServer();
+            var client1 = AddClient();
+            var client2 = AddClient();
+
+            Assert.AreEqual(SessionPhase.Synchronized, client1.Phase);
+            Assert.AreEqual(SessionPhase.Synchronized, client2.Phase);
+
+            // Arm the suppress hook for client1 before any InitialFullState arrives.
+            xpTURN.Klotho.Diagnostics.FaultInjection.SuppressBootstrapAckPlayerIds.Add(
+                client1.NetworkService.LocalPlayerId);
+
+            client1.NetworkService.SetReady(true);
+            client2.NetworkService.SetReady(true);
+
+            // Pump until server transitions Playing → BootstrapPending → InitialFullState broadcast,
+            // and client2 acks normally while client1's hook fires (no ack).
+            PumpMessages();
+            PumpMessages();
+
+            Assert.AreEqual(SessionPhase.Playing, _server.Phase,
+                "Server should reach Playing phase even with suppressed ack");
+            Assert.AreEqual(KlothoState.BootstrapPending, _server.Engine.State,
+                "Server engine must remain BootstrapPending while one peer's ack is suppressed");
+
+            // Wait past BOOTSTRAP_TIMEOUT_MS (1000ms) + margin, then pump so CheckBootstrapTimeout
+            // fires inside ServerNetworkService.Update().
+            System.Threading.Thread.Sleep(1100);
+            PumpMessages();
+            PumpMessages();
+            PumpMessages();
+
+            Assert.AreEqual(KlothoState.Running, _server.Engine.State,
+                "Server should transition Running after BOOTSTRAP_TIMEOUT_MS via FullState resync");
+
+            // Client1 receives the timeout-driven FullState resync and recovers via the same path
+            // as a determinism-failure resync.
+            Assert.AreEqual(KlothoState.Running, client1.Engine.State,
+                "Client1 should recover via FullState resync after server timeout");
+            Assert.AreEqual(KlothoState.Running, client2.Engine.State,
+                "Client2 (acked normally) should also be Running");
+        }
+#endif
     }
 }

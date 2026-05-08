@@ -4,6 +4,7 @@ using UnityEngine;
 
 using Microsoft.Extensions.Logging;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
+using ZLogger;
 
 using xpTURN.Klotho.Core;
 using xpTURN.Klotho.ECS;
@@ -138,8 +139,13 @@ namespace Brawler
         public void RegisterCharacter(int playerId, CharacterView view)
         {
             if (view == null) return;
-            if (_characterViews.TryGetValue(playerId, out var existing) && existing == view) return;
+            if (_characterViews.TryGetValue(playerId, out var existing) && existing == view)
+            {
+                _logger?.ZLogDebug($"[ViewBind][Dedup] playerId={playerId}, viewIID={view.GetInstanceID()} (same instance, skip rebind)");
+                return;
+            }
 
+            int prevIID = existing != null ? existing.GetInstanceID() : 0;
             _characterViews[playerId] = view;
             _gameHUD?.RegisterCharacterView(playerId, view);
 
@@ -147,18 +153,38 @@ namespace Brawler
             {
                 _cameraController?.SetFollowTarget(view.transform);
                 OnLocalCharacterSpawned?.Invoke();
+                _logger?.ZLogDebug($"[ViewBind][New] playerId={playerId}, viewIID={view.GetInstanceID()}, prevIID={prevIID}, isLocal=true (OnLocalCharacterSpawned invoked)");
+            }
+            else
+            {
+                _logger?.ZLogDebug($"[ViewBind][New] playerId={playerId}, viewIID={view.GetInstanceID()}, prevIID={prevIID}, isLocal=false");
             }
         }
 
         /// <summary>Called when CharacterView is deactivated — releases camera follow / keeps HUD slot (e.g., shows stock 0).</summary>
-        public void UnregisterCharacter(int playerId)
+        public void UnregisterCharacter(int playerId, CharacterView view)
         {
-            if (!_characterViews.Remove(playerId)) return;
+            if (_characterViews.TryGetValue(playerId, out var current) && current != view)
+            {
+                _logger?.ZLogDebug($"[ViewBind][UnregSkip] playerId={playerId}, requesterIID={view?.GetInstanceID()}, currentIID={current.GetInstanceID()}");
+                return;
+            }
+
+            if (!_characterViews.Remove(playerId))
+            {
+                _logger?.ZLogDebug($"[ViewBind][UnregMiss] playerId={playerId} not in map");
+                return;
+            }
 
             if (_engine != null && playerId == _engine.LocalPlayerId)
             {
                 _cameraController?.ClearFollowTarget();
                 OnLocalCharacterDespawned?.Invoke();
+                _logger?.ZLogDebug($"[ViewBind][Unreg] playerId={playerId}, isLocal=true (OnLocalCharacterDespawned invoked)");
+            }
+            else
+            {
+                _logger?.ZLogDebug($"[ViewBind][Unreg] playerId={playerId}, isLocal=false");
             }
         }
 

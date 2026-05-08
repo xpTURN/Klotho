@@ -2,8 +2,8 @@
     "name": "Brawler.DataAssets",
     "rootNamespace": "",
     "references": [
-        "GUID:e54187357b07148a9ad4cf24f45837a7",
-        "GUID:169f113c81c3048f2956d785b2922ae9"
+        "xpTURN.Polyfill.Runtime",
+        "xpTURN.Klotho.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

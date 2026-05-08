@@ -45,6 +45,19 @@ namespace xpTURN.Klotho.Core
             Pools.Clear();
         }
 
+        // Diagnostic — total count of pooled command instances across all typeIds (current ThreadStatic pool).
+        public static int GetTotalPooledCount()
+        {
+            if (_pools == null) return 0;
+            int total = 0;
+            foreach (var stack in _pools.Values)
+                total += stack.Count;
+            return total;
+        }
+
+        // Diagnostic — count of distinct command typeIds currently held in the pool.
+        public static int GetPooledTypeCount() => _pools?.Count ?? 0;
+
         private static class CommandPoolTypeCache<T> where T : CommandBase, new()
         {
             public static readonly int TypeId = new T().CommandTypeId;

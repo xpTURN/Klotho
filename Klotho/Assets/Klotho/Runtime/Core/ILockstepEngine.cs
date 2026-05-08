@@ -10,10 +10,31 @@ namespace xpTURN.Klotho.Core
     /// </summary>
     public enum KlothoState
     {
+        /// <summary>
+        /// Initial state after construction. Initialize has not yet run.
+        /// </summary>
         Idle,
+        /// <summary>
+        /// Initialize completed; waiting for the network layer to issue OnGameStart (Start to be called).
+        /// </summary>
         WaitingForPlayers,
+        /// <summary>
+        /// SD-server only: awaiting all players' bootstrap-ready acks (or timeout) before first tick.
+        /// Blocks UpdateServerTick via the existing State == Running gate.
+        /// </summary>
+        BootstrapPending,
+        /// <summary>
+        /// Active simulation. Update advances ticks each frame and dispatches events.
+        /// </summary>
         Running,
+        /// <summary>
+        /// Lockstep client (prediction OFF) only: a player's input is missing for the current tick — halt and wait.
+        /// Returns to Running automatically once CanAdvanceTick() succeeds. Replay seek also uses this transiently.
+        /// </summary>
         Paused,
+        /// <summary>
+        /// Stop() invoked — engine has been torn down. Replay playback also lands here when finished.
+        /// </summary>
         Finished
     }
 
@@ -142,8 +163,11 @@ namespace xpTURN.Klotho.Core
 
         /// <summary>
         /// Adds a local command to the input buffer and sends it over the network.
+        /// extraDelay shifts cmd.Tick further into the future on top of InputDelayTicks.
+        /// Used by recovery paths (e.g. LateJoin spawn cmd PastTick reject loop) to add lead margin
+        /// for specific commands without changing the global InputDelayTicks.
         /// </summary>
-        void InputCommand(ICommand command);
+        void InputCommand(ICommand command, int extraDelay = 0);
 
         /// <summary>
         /// Stops the engine and unsubscribes from events.
@@ -236,6 +260,12 @@ namespace xpTURN.Klotho.Core
         /// Raised when full-state resync fails after the maximum retry count.
         /// </summary>
         event Action OnResyncFailed;
+
+        /// <summary>
+        /// Raised on a client when the server rejects one of this client's commands (tick, commandTypeId, reason).
+        /// Hint-only — game code may clear local latches or surface to UI; loss is tolerated by design.
+        /// </summary>
+        event Action<int, int, RejectionReason> OnCommandRejected;
 
         // ── Frame References ──
 

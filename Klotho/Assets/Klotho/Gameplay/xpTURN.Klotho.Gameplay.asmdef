@@ -2,8 +2,8 @@
     "name": "xpTURN.Klotho.Gameplay",
     "rootNamespace": "",
     "references": [
-        "GUID:169f113c81c3048f2956d785b2922ae9",
-        "GUID:e54187357b07148a9ad4cf24f45837a7"
+        "xpTURN.Klotho.Runtime",
+        "xpTURN.Polyfill.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

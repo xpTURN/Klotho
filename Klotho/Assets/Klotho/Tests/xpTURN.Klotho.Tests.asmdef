@@ -10,7 +10,8 @@
         "xpTURN.Klotho.Runtime.Unity",
         "xpTURN.Klotho.Gameplay",
         "Brawler.ECS",
-        "Brawler.DataAssets"
+        "Brawler.DataAssets",
+        "Brawler.Manager"
     ],
     "includePlatforms": [
         "Editor"

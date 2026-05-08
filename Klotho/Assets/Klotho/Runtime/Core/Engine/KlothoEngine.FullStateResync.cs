@@ -90,6 +90,17 @@ namespace xpTURN.Klotho.Core
         }
 
         /// <summary>
+        /// SD client only: arms the routing flag so the next FullState arrival is treated as the
+        /// initial-state broadcast (HandleInitialFullStateReceived path) rather than a determinism resync.
+        /// Called from the SD client transport layer when it learns the game is starting — works for both
+        /// countdown-enabled (covered by HandleCountdownStarted) and countdown-skip configurations.
+        /// </summary>
+        public void MarkExpectingInitialFullState()
+        {
+            _expectingInitialFullState = true;
+        }
+
+        /// <summary>
         /// Common full-state restoration for P2P/SD. The caller performs mode-specific post-processing.
         /// </summary>
         private void ApplyFullState(int tick, byte[] stateData, long stateHash)
@@ -99,9 +110,14 @@ namespace xpTURN.Klotho.Core
 
             // 1.5. Hash verification
             long localHash = _simulation.GetStateHash();
+            _logger?.ZLogInformation($"[KlothoEngine][FullStateResync] hash check: tick={tick} local=0x{localHash:X16} remote=0x{stateHash:X16} match={(localHash == stateHash)}");
             if (localHash != stateHash)
             {
                 _logger?.ZLogError($"[KlothoEngine][FullStateResync] hash mismatch: local=0x{localHash:X16}, remote=0x{stateHash:X16}. Deserialization may be non-deterministic - resync state unreliable");
+
+                // Diagnostic — per-component hash to identify which component(s) diverged.
+                if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimDiag)
+                    ecsSimDiag.LogComponentHashes(_logger, "ClientApplyMismatch");
             }
 
             // 2. Reset snapshot manager

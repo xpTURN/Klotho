@@ -40,6 +40,9 @@ namespace xpTURN.Klotho.Network
         private const int NUM_SYNC_PACKETS = 5;
         private const int SYNC_TIMEOUT_MS = 5000;
         private const int PING_INTERVAL_MS = 1000;
+        private const int BOOTSTRAP_TIMEOUT_MS = 1000;
+        private const int REJECT_TOKENS_PER_SEC = 10;
+        private const int REJECT_BUCKET_CAPACITY = 10;
 
         private ILogger _logger;
         private INetworkTransport _transport;
@@ -93,6 +96,16 @@ namespace xpTURN.Klotho.Network
         private bool _gameStarted;
         private int _assignedPlayerIdCount;
 
+        // Bootstrap window (SD-server, post Phase=Playing). Tracks per-player ack reception so
+        // the server can defer first tick until all clients have applied Initial FullState.
+        private readonly HashSet<int> _bootstrapAckedPlayers = new HashSet<int>();
+        private long _bootstrapWindowOpenedTimeMs;
+        private bool _bootstrapTimedOut;
+
+        // Per-peer token bucket throttling outgoing CommandRejected hints.
+        private struct RejectTokenState { public int Tokens; public long LastRefillMs; }
+        private readonly Dictionary<int, RejectTokenState> _rejectTokens = new Dictionary<int, RejectTokenState>();
+
         // Message cache (GC avoidance)
         private readonly PingMessage _pingMessageCache = new PingMessage();
         private readonly PongMessage _pongMessageCache = new PongMessage();
@@ -125,6 +138,18 @@ namespace xpTURN.Klotho.Network
             get => _phase;
             private set
             {
+                var prevPhase = _phase;
+
+                // Snapshot input collector counters per phase (monitoring).
+                if (_inputCollector != null && prevPhase != value)
+                {
+                    _inputCollector.GetAndResetStats(out int accepted, out int pastTick, out int peerMismatch, out int tolerance);
+                    if (accepted > 0 || pastTick > 0 || peerMismatch > 0 || tolerance > 0)
+                    {
+                        _logger?.ZLogInformation($"[InputCollector] Phase {prevPhase} stats: accepted={accepted}, rejectedPastTick={pastTick}, rejectedPeerMismatch={peerMismatch}, rejectedToleranceExceeded={tolerance}");
+                    }
+                }
+
                 _phase = value;
                 if (value == SessionPhase.Disconnected || value == SessionPhase.Lobby)
                 {
@@ -134,6 +159,20 @@ namespace xpTURN.Klotho.Network
                     _gameStarted = false;
                     _assignedPlayerIdCount = 0;
                     _nextPlayerId = 1;
+
+                    // Bootstrap window state — primary clear point against single-room reuse leak.
+                    _bootstrapAckedPlayers.Clear();
+                    _bootstrapTimedOut = false;
+                    _inputCollector?.SetBootstrapPending(false);
+                }
+                else if (value == SessionPhase.Playing && prevPhase != SessionPhase.Playing)
+                {
+                    // Open the bootstrap ack window before the engine broadcasts Initial FullState
+                    // so early-arriving acks aren't dropped. Defensive Clear() — primary site has already cleared.
+                    _bootstrapAckedPlayers.Clear();
+                    _bootstrapTimedOut = false;
+                    _bootstrapWindowOpenedTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    _inputCollector?.SetBootstrapPending(true);
                 }
                 _logger?.ZLogInformation($"[ServerNetworkService] Session phase: {_phase}, SharedClock: {SharedClock.SharedNow}ms");
             }
@@ -176,6 +215,8 @@ namespace xpTURN.Klotho.Network
         public event Action<int, IReadOnlyList<ICommand>, long> OnVerifiedStateReceived;
         public event Action<int> OnInputAckReceived;
         public event Action<int, byte[], long> OnServerFullStateReceived;
+        public event Action<int, long> OnBootstrapBegin;
+        public event Action<int, int, RejectionReason> OnCommandRejected;
 
         // ── Input collector access (used by engine) ────────────────────
 
@@ -201,9 +242,17 @@ namespace xpTURN.Klotho.Network
             _inputCollector.Configure(0, _peerToPlayer);
             _inputCollector.SetLogger(logger);
 
+            // Layer 1: transport-level rejects originate here — peerId is already in scope, no lookup needed.
+            _inputCollector.OnCommandRejected += HandleInputCollectorRejected;
+
             _transport.OnDataReceived += HandleDataReceived;
             _transport.OnPeerConnected += HandlePeerConnected;
             _transport.OnPeerDisconnected += HandlePeerDisconnected;
+        }
+
+        private void HandleInputCollectorRejected(int peerId, int tick, int cmdTypeId, RejectionReason reason)
+        {
+            TryUnicastReject(peerId, tick, cmdTypeId, reason);
         }
 
         public void SubscribeEngine(IKlothoEngine engine)
@@ -211,6 +260,10 @@ namespace xpTURN.Klotho.Network
             _engine = engine;
             _simConfig = engine.SimulationConfig;
             _sessionConfig = engine.SessionConfig;
+
+            // Layer 2: game-layer rejects flow through engine's generic OnSyncedEvent. Server keeps the
+            // typecheck local so the engine itself stays agnostic of game-layer SimulationEvent types.
+            _engine.OnSyncedEvent += HandleEngineSyncedEvent;
 
             // Set initial Hard Tolerance. RTT is unknown, so use 60ms (assuming RTT/2) + 20ms (jitter margin).
             // tickBase = (leadTicks + delayTicks + 1) × T — symmetric with the CompletePeerSync formula.
@@ -274,6 +327,7 @@ namespace xpTURN.Klotho.Network
             _pendingPeers.Clear();
             _spectators.Clear();
             _playerConfigBytes.Clear();
+            _rejectTokens.Clear();
             _inputCollector.Reset();
             _sessionMagic = 0;
             _gameStartTime = 0;
@@ -334,6 +388,11 @@ namespace xpTURN.Klotho.Network
         public void SendClientInput(int tick, ICommand command)
         {
             throw new NotSupportedException("The server cannot call SendClientInput.");
+        }
+
+        public void SendBootstrapReady(int playerId)
+        {
+            throw new NotSupportedException("The server cannot call SendBootstrapReady.");
         }
 
         public void SendFullStateRequest(int currentTick)
@@ -420,6 +479,9 @@ namespace xpTURN.Klotho.Network
 
             // Reconnect timeout check
             CheckDisconnectedPlayerTimeout();
+
+            // Bootstrap ack-window timeout (SD server only).
+            CheckBootstrapTimeout(now);
 
             // Countdown expiry check
             if (Phase == SessionPhase.Countdown && _sharedClock.IsValid && _sharedClock.SharedNow >= _gameStartTime)
@@ -681,7 +743,165 @@ namespace xpTURN.Klotho.Network
                 case PlayerConfigMessage playerConfigMsg:
                     HandlePlayerConfigMessage(playerConfigMsg);
                     break;
+
+                case PlayerBootstrapReadyMessage bootReady:
+                    HandlePlayerBootstrapReady(peerId, bootReady);
+                    break;
             }
+        }
+
+        private void HandlePlayerBootstrapReady(int peerId, PlayerBootstrapReadyMessage msg)
+        {
+            // Validate peerId-PlayerId pairing (mirrors InputCollector's first-line check).
+            if (!_peerToPlayer.TryGetValue(peerId, out int expectedPlayerId)
+                || expectedPlayerId != msg.PlayerId)
+            {
+                _logger?.ZLogWarning($"[ServerNetworkService] BootstrapReady peer/player mismatch: peerId={peerId}, msg.PlayerId={msg.PlayerId}, expected={expectedPlayerId}");
+                return;
+            }
+
+            // Drop late acks (post-CompleteBootstrap) to protect Reconnect / retry paths.
+            if (_engine == null || _engine.State != KlothoState.BootstrapPending)
+            {
+                _logger?.ZLogWarning($"[ServerNetworkService] BootstrapReady dropped (engineState={_engine?.State}): peerId={peerId}, playerId={msg.PlayerId}");
+                return;
+            }
+
+            if (!_bootstrapAckedPlayers.Add(msg.PlayerId))
+                return;
+
+            _logger?.ZLogInformation($"[ServerNetworkService] BootstrapReady ack: playerId={msg.PlayerId}, acked={_bootstrapAckedPlayers.Count}/{_players.Count}");
+
+            if (_bootstrapAckedPlayers.Count >= _players.Count)
+                CompleteBootstrap();
+        }
+
+        // Closes the bootstrap window — called from ack-complete and timeout paths.
+        // Order: clear pending flag → broadcast first-tick alignment → flip engine state.
+        private void CompleteBootstrap()
+        {
+            _inputCollector?.SetBootstrapPending(false);
+            BroadcastBootstrapBegin();
+            (_engine as KlothoEngine)?.MarkBootstrapComplete();
+        }
+
+        private void BroadcastBootstrapBegin()
+        {
+            // firstTick mirrors engine CurrentTick (= 0 while BootstrapPending blocks UpdateServerTick).
+            // tickStartTimeMs anchors client _accumulator to the server's actual tick start.
+            int firstTick = _engine?.CurrentTick ?? 0;
+            long tickStartTimeMs = _sharedClock.IsValid ? _sharedClock.SharedNow : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            var msg = new BootstrapBeginMessage
+            {
+                FirstTick = firstTick,
+                TickStartTimeMs = tickStartTimeMs,
+            };
+            using (var serialized = _messageSerializer.SerializePooled(msg))
+            {
+                foreach (var kvp in _peerToPlayer)
+                    _transport.Send(kvp.Key, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
+                for (int i = 0; i < _spectators.Count; i++)
+                    _transport.Send(_spectators[i].PeerId, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
+            }
+            _logger?.ZLogInformation($"[ServerNetworkService] BootstrapBegin broadcast: firstTick={firstTick}, tickStartTimeMs={tickStartTimeMs}");
+        }
+
+        // Bootstrap timeout — falls back to FullState resync for unacked peers, then completes.
+        private void CheckBootstrapTimeout(long now)
+        {
+            if (_bootstrapTimedOut) return;
+            if (_engine == null || _engine.State != KlothoState.BootstrapPending) return;
+            if (now - _bootstrapWindowOpenedTimeMs < BOOTSTRAP_TIMEOUT_MS) return;
+
+            _bootstrapTimedOut = true;
+            int unackedCount = 0;
+
+            // Unicast FullState resync to each unacked peer; they recover via the determinism-failure path.
+            foreach (var kvp in _peerToPlayer)
+            {
+                if (_bootstrapAckedPlayers.Contains(kvp.Value)) continue;
+                unackedCount++;
+                (_engine as KlothoEngine)?.SendBootstrapTimeoutResync(kvp.Key);
+            }
+
+            _logger?.ZLogWarning($"[ServerNetworkService] Bootstrap timeout: acked={_bootstrapAckedPlayers.Count}/{_players.Count}, unacked={unackedCount} — completing with FullState resync");
+            CompleteBootstrap();
+        }
+
+        // ── Command rejection feedback (transport + game-layer unicast) ─────
+
+        private void HandleEngineSyncedEvent(int tick, SimulationEvent evt)
+        {
+            if (evt is CommandRejectedSimEvent rejectEvt)
+            {
+                if (!TryGetPeerId(rejectEvt.PlayerId, out int peerId))
+                {
+                    _logger?.ZLogWarning($"[ServerNetworkService] Reject feedback skip: playerId={rejectEvt.PlayerId} not in peer map");
+                    return;
+                }
+                TryUnicastReject(peerId, rejectEvt.Tick, rejectEvt.CommandTypeId, rejectEvt.ReasonEnum);
+            }
+            // Future game-layer reject types: add additional case branches here. Engine stays agnostic.
+        }
+
+        private bool TryGetPeerId(int playerId, out int peerId)
+        {
+            foreach (var kvp in _peerToPlayer)
+            {
+                if (kvp.Value == playerId)
+                {
+                    peerId = kvp.Key;
+                    return true;
+                }
+            }
+            peerId = -1;
+            return false;
+        }
+
+        private void TryUnicastReject(int peerId, int tick, int cmdTypeId, RejectionReason reason)
+        {
+            if (!ConsumeRejectToken(peerId)) return;
+
+            var msg = new CommandRejectedMessage
+            {
+                Tick = tick,
+                CommandTypeId = cmdTypeId,
+            };
+            msg.ReasonEnum = reason;
+            using (var serialized = _messageSerializer.SerializePooled(msg))
+            {
+                _transport.Send(peerId, serialized.Data, serialized.Length, DeliveryMethod.Unreliable);
+            }
+        }
+
+        // Token bucket — drops surplus rejects (bug / abusive client) while preserving normal feedback rate.
+        private bool ConsumeRejectToken(int peerId)
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (!_rejectTokens.TryGetValue(peerId, out var s))
+                s = new RejectTokenState { Tokens = REJECT_BUCKET_CAPACITY, LastRefillMs = now };
+
+            long elapsed = now - s.LastRefillMs;
+            if (elapsed > 0)
+            {
+                int refill = (int)(elapsed * REJECT_TOKENS_PER_SEC / 1000);
+                if (refill > 0)
+                {
+                    s.Tokens = Math.Min(REJECT_BUCKET_CAPACITY, s.Tokens + refill);
+                    s.LastRefillMs = now;
+                }
+            }
+
+            if (s.Tokens <= 0)
+            {
+                _rejectTokens[peerId] = s;
+                return false;
+            }
+
+            s.Tokens--;
+            _rejectTokens[peerId] = s;
+            return true;
         }
 
         private void HandlePlayerConfigMessage(PlayerConfigMessage msg)
@@ -890,6 +1110,7 @@ namespace xpTURN.Klotho.Network
             _peerStates.Remove(peerId);
             _peerSyncStates.Remove(peerId);
             _peerDeviceIds.Remove(peerId);
+            _rejectTokens.Remove(peerId);
 
             for (int i = _spectators.Count - 1; i >= 0; i--)
             {
@@ -1041,7 +1262,7 @@ namespace xpTURN.Klotho.Network
                 int delayTicks = _simConfig.InputDelayTicks;
                 int tickBase = _simConfig.TickIntervalMs * (leadTicks + delayTicks + 1);
                 int rttBased = tickBase + avgRtt / 2 + 20;
-                _logger?.ZLogInformation($"[ServerNetworkService][CompletePeerSync] HardTolerance recalculated: peerId={peerId}, avgRtt={avgRtt}ms, tolerance={rttBased}ms (lead={leadTicks} delay={delayTicks} tickBase={tickBase} + rtt/2={avgRtt / 2} + 20)");
+                _logger?.ZLogInformation($"[ServerNetworkService][CompletePeerSync] HardTolerance recalculated: peerId={peerId}, avgRtt={avgRtt}ms, tolerance={rttBased}ms (lead={leadTicks} delay={delayTicks} tickBase={tickBase} + avgRtt({avgRtt})/2 + 20)");
 
                 _inputCollector.Configure(rttBased, _peerToPlayer);
             }
@@ -1177,6 +1398,8 @@ namespace xpTURN.Klotho.Network
             OnVerifiedStateReceived?.Invoke(0, null, 0);
             OnInputAckReceived?.Invoke(0);
             OnServerFullStateReceived?.Invoke(0, null, 0);
+            OnBootstrapBegin?.Invoke(0, 0);
+            OnCommandRejected?.Invoke(0, 0, default);
         }
 
         private readonly JoinRejectMessage _joinRejectCache = new JoinRejectMessage();

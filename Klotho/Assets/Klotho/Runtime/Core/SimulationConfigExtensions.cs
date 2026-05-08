@@ -49,6 +49,11 @@ namespace xpTURN.Klotho.Core
             // SD only
             if (config.Mode == NetworkMode.ServerDriven)
             {
+                // Structural past-tick race in SD mode requires at least 1 input-delay tick.
+                if (config.InputDelayTicks < 1)
+                    throw new ArgumentException(
+                        $"InputDelayTicks={config.InputDelayTicks} is unsafe in ServerDriven mode (must be >= 1)");
+
                 if (config.SDInputLeadTicks < 0)
                     throw new ArgumentException("SDInputLeadTicks must be >= 0");
 
@@ -64,6 +69,16 @@ namespace xpTURN.Klotho.Core
                 if (config.ServerSnapshotRetentionTicks < 0)
                     throw new ArgumentException("ServerSnapshotRetentionTicks must be >= 0");
             }
+        }
+
+        /// <summary>
+        /// Non-throwing variant of <see cref="Validate"/>. Returns false with the error message on violation.
+        /// Use from non-authoritative callers (SD client / P2P guest) that should log and proceed instead of failing.
+        /// </summary>
+        public static bool TryValidate(this ISimulationConfig config, out string error)
+        {
+            try { config.Validate(); error = null; return true; }
+            catch (ArgumentException ex) { error = ex.Message; return false; }
         }
     }
 }

@@ -403,6 +403,10 @@ namespace xpTURN.Klotho.Core
                     _logger?.ZLogError(
                         $"[KlothoEngine][SD] Determinism failure: tick={entry.Tick}, local=0x{resimHash:X16}, server=0x{entry.StateHash:X16}");
 
+                    // Diagnostic — per-component hash to identify which component(s) diverged.
+                    if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimDiag)
+                        ecsSimDiag.LogComponentHashes(_logger, "DesyncLocal");
+
                     if (!_fullStateRequestPending)
                     {
                         _serverDrivenNetwork.SendFullStateRequest(entry.Tick);
@@ -769,6 +773,61 @@ namespace xpTURN.Klotho.Core
             ApplySDWarmUpLead();
             _logger?.ZLogInformation(
                 $"[KlothoEngine][SD] Initial FullState applied: tick={tick}, size={stateData.Length}");
+
+            // Signal bootstrap-ready so the server can proceed to first tick once all peers have ack'd.
+#if KLOTHO_FAULT_INJECTION
+            // Suppress this client's bootstrap-ready ack to exercise the server-side
+            // BOOTSTRAP_TIMEOUT_MS path (FullState resync).
+            if (xpTURN.Klotho.Diagnostics.FaultInjection.SuppressBootstrapAckPlayerIds.Contains(LocalPlayerId))
+            {
+                _logger?.ZLogWarning($"[FaultInjection][SD] Bootstrap ack suppressed: playerId={LocalPlayerId}, tick={tick}");
+                return;
+            }
+#endif
+            _serverDrivenNetwork.SendBootstrapReady(LocalPlayerId);
+        }
+
+        /// <summary>
+        /// SD Client BootstrapBegin handler. Aligns _accumulator to the server's actual tick start
+        /// time so the warm-up lead is preserved through the bootstrap window — matters most on the timeout path
+        /// where the server may have been waiting up to BOOTSTRAP_TIMEOUT_MS before broadcasting.
+        /// </summary>
+        private void HandleBootstrapBegin(int firstTick, long tickStartTimeMs)
+        {
+            // Defensive guard. Under BootstrapPending + the CompleteBootstrap → broadcast → first tick
+            // send order, server CurrentTick is 0 at broadcast time
+            // regardless of timeout policy, so mismatch is not expected in normal flow. The guard
+            // protects against implementation regression / cross-version skew / future timeout policy
+            // changes — wait for a follow-up FullState resync to realign.
+            if (firstTick != _lastServerVerifiedTick)
+            {
+                _logger?.ZLogWarning(
+                    $"[KlothoEngine][SD] BootstrapBegin tick mismatch: firstTick={firstTick}, _lastServerVerifiedTick={_lastServerVerifiedTick} — awaiting FullState resync");
+                return;
+            }
+
+            // Re-anchor _accumulator to the server's actual tick start. SharedTimeClock is an immutable
+            // struct; reading SharedNow gives the current shared clock value comparable to the broadcast's
+            // tickStartTimeMs.
+            long elapsedSinceStart = _serverDrivenNetwork.SharedClock.SharedNow - tickStartTimeMs;
+            if (elapsedSinceStart > 0)
+            {
+                long maxAccumMs = (long)_simConfig.TickIntervalMs * MAX_TICKS_PER_UPDATE;
+                long clamped = Math.Min(elapsedSinceStart, maxAccumMs);
+                _accumulator = (float)clamped;
+            }
+            // Re-establish the warm-up lead (ApplySDWarmUpLead is idempotent — only adds when deficit > 0).
+            ApplySDWarmUpLead();
+
+            _logger?.ZLogInformation(
+                $"[KlothoEngine][SD] BootstrapBegin applied: firstTick={firstTick}, tickStartTimeMs={tickStartTimeMs}, elapsed={elapsedSinceStart}ms, accumulator={_accumulator:F1}ms");
+        }
+
+        // Forwards transport-level rejection notifications to the engine-public event so game code can react.
+        private void HandleCommandRejected(int tick, int cmdTypeId, RejectionReason reason)
+        {
+            _logger?.ZLogInformation($"[KlothoEngine][SD] CommandRejected: tick={tick}, cmdTypeId={cmdTypeId}, reason={reason}");
+            OnCommandRejected?.Invoke(tick, cmdTypeId, reason);
         }
     }
 }

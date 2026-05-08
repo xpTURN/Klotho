@@ -44,6 +44,10 @@ namespace xpTURN.Klotho.Network
         public int StragglerCount { get; set; }
         public bool IsStraggler { get; set; }
 
+        // Lifetime / drain metrics (set by RoomManager.CreateRoomAt; phase captured at drain transition)
+        public long CreatedAtMs { get; set; }
+        public SessionPhase DrainPhase { get; private set; }
+
         private readonly ILogger _logger;
 
         public Room(
@@ -83,8 +87,9 @@ namespace xpTURN.Klotho.Network
 
             if (State == RoomState.Active && ShouldDrain())
             {
+                DrainPhase = NetworkService.Phase;
                 State = RoomState.Draining;
-                _logger?.ZLogInformation($"[Room {RoomId}] → Draining (all connections gone)");
+                _logger?.ZLogInformation($"[Room {RoomId}] → Draining (all connections gone, phase={DrainPhase})");
             }
         }
 
@@ -142,6 +147,12 @@ namespace xpTURN.Klotho.Network
         /// </summary>
         public void Dispose()
         {
+            // Diagnostic — pre-dispose dump of per-room ECS storage and static pools.
+            // Summary line stays at Information; per-component breakdown demoted to Debug.
+            _logger?.ZLogInformation($"[Room {RoomId}] Dispose pre-dump: commandPoolTotal={CommandPool.GetTotalPooledCount()} commandPoolTypes={CommandPool.GetPooledTypeCount()}");
+            if (Simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimDiag)
+                ecsSimDiag.LogComponentHashes(_logger, $"RoomDispose:{RoomId}", atDebugLevel: true);
+
             NetworkService.LeaveRoom();
 
             // Clear any leftover queue entries (safety guard)

@@ -25,6 +25,10 @@ using xpTURN.Klotho.Network;
 using xpTURN.Klotho.Samples.Brawler;
 using xpTURN.Klotho.Unity;
 
+#if KLOTHO_FAULT_INJECTION
+using xpTURN.Klotho.Diagnostics;
+#endif
+
 namespace Brawler
 {
     [Serializable]
@@ -134,7 +138,7 @@ namespace Brawler
                 // Output to yyyy-MM-dd_*.log; roll over when exceeding 1MB or when the date changes
                 builder.AddZLoggerRollingFile(options =>
                 {
-                    options.FilePathSelector = (dt, index) => $"Logs/Client_{dt:yyyy-MM-dd-HH-mm-ss}_{index:000}.log";
+                    options.FilePathSelector = (dt, index) => $"Logs/Client_{dt:yyyy-MM-dd-HH-mm-ss-fff}_{index:000}.log";
                     options.RollingInterval = RollingInterval.Day;
                     options.RollingSizeKB = 1024 * 1024;
                     options.UsePlainTextFormatter(formatter =>
@@ -191,6 +195,10 @@ namespace Brawler
                 return;
             _gameMenu.SetActionType(_brawlerSettings._isHost ? GameMenu.ActionType.CreateRoom : GameMenu.ActionType.JoinRoom);
 
+#if KLOTHO_FAULT_INJECTION
+            ApplyFaultInjection();
+#endif
+
             bool TryAutoReconnect()
             {
                 var creds = _credentialsStore.Load();
@@ -208,6 +216,14 @@ namespace Brawler
                 return true;
             }
         }
+
+#if KLOTHO_FAULT_INJECTION
+        private void ApplyFaultInjection()
+        {
+            var path = System.IO.Path.Combine(Application.streamingAssetsPath, "faultinjectionconfig.json");
+            FaultInjectionLoader.TryLoadAndApply(path, _logger);
+        }
+#endif
 
         private void OnEnable()
         {
@@ -427,11 +443,11 @@ namespace Brawler
 
             try
             {
-                // For SD multi-room, send RoomHandshake before PlayerJoinMessage
+                // For SD (single/multi room), send RoomHandshake before PlayerJoinMessage.
+                // RoomId=0 for single room, N for multi-room slot.
                 NetworkMessageBase preJoin = null;
                 int roomId = -1;
-                if (_brawlerSettings._mode == NetworkMode.ServerDriven &&
-                     _brawlerSettings._roomId != -1)
+                if (_brawlerSettings._mode == NetworkMode.ServerDriven)
                 {
                     roomId = _brawlerSettings._roomId;
                     preJoin = new RoomHandshakeMessage { RoomId = roomId };
@@ -461,7 +477,7 @@ namespace Brawler
                     SimulationCallbacks = _simCallbacks,
                     ViewCallbacks = _viewCallbacks,
                     AssetRegistry = _assetRegistry,
-                    RoomId = roomId,  // SD multi-room identifier (-1 for single room)
+                    RoomId = roomId,  // SD: 0 for single room, N for multi-room slot. -1 for P2P.
                     // Transport / SimulationConfig are acquired automatically from Connection
                 });
                 _simCallbacks.SetNetworkService(_session.NetworkService);
@@ -600,6 +616,8 @@ namespace Brawler
 
             // Restore SimulationConfig.
             var simConfig = replayData.Metadata.ToSimulationConfig();
+            // Replay file is self-contained — fail fast on corrupt/incompatible metadata.
+            simConfig.Validate();
 
             // For the replay path, maxPlayers/botCount are meaningless to inject into BrawlerSimulationCallbacks
             // because bot entities are already included via InitialStateSnapshot restoration.
@@ -769,18 +787,11 @@ namespace Brawler
         private void OnLocalCharacterSpawned()
         {
             _logger?.ZLogInformation($"[Brawler] Local Character Spawned");
-
-            if (_simCallbacks != null)
-                _simCallbacks.Spawned = true;
         }
 
         private void OnLocalCharacterDespawned()
         {
             _logger?.ZLogInformation($"[Brawler] Local Character Despawned");
-
-            if (_simCallbacks == null || _session?.Engine == null) return;
-            _simCallbacks.Spawned = false;
-            _viewCallbacks.Respawn(_session.Engine);
         }
 
         private void StopGame()
@@ -800,9 +811,6 @@ namespace Brawler
 
             // Unsubscribe EVU's engine subscription and clean up active views.
             _entityViewUpdater?.Cleanup();
-
-            if (_simCallbacks != null)
-                _simCallbacks.Spawned = false;
 
             if (_session != null)
             {
@@ -949,6 +957,9 @@ namespace Brawler
         private void OnResyncCompleted(int tick)
         {
             _logger?.ZLogInformation($"[Brawler] Resync completed at tick={tick}");
+
+            // Realign game-layer state with the post-resync ECS truth.
+            _simCallbacks?.OnResyncCompleted(tick);
         }
 
         // Inject the initial state snapshot for replay recording — StartRecording is already complete by OnGameStart.

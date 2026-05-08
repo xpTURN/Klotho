@@ -71,6 +71,7 @@ namespace xpTURN.Klotho.Core
         public event Action<int, SimulationEvent> OnSyncedEvent;
         public event Action<int> OnResyncCompleted;
         public event Action OnResyncFailed;
+        public event Action<int, int, RejectionReason> OnCommandRejected;
         public event Action<int, int, byte[], int> OnVerifiedInputBatchReady;
 
         /// <summary>
@@ -425,12 +426,28 @@ namespace xpTURN.Klotho.Core
 
         public void Initialize(ISimulation simulation, IKlothoNetworkService networkService, ILogger logger)
         {
-            _simConfig.Validate();
+            // Authoritative callers (server / P2P host) fail fast on invalid config;
+            // non-authoritative callers (SD client / P2P guest) log and proceed to tolerate cross-version skew.
+            bool isAuthoritative = networkService.IsHost
+                || (networkService is IServerDrivenNetworkService sdn && sdn.IsServer);
+            if (isAuthoritative)
+            {
+                _simConfig.Validate();
+            }
+            else if (!_simConfig.TryValidate(out string validateError))
+            {
+                logger?.ZLogError(
+                    $"[KlothoEngine] Config validation failed from authoritative source — proceeding with deviation: {validateError}");
+            }
 
             _simulation = simulation;
             _networkService = networkService;
             _logger = logger;
             _dispatcher = new EventDispatcher(logger, _simConfig.EventDispatchWarnMs);
+
+            if (_simConfig.Mode == NetworkMode.ServerDriven && _simConfig.InputDelayTicks < 2)
+                _logger?.ZLogWarning(
+                    $"[KlothoEngine] InputDelayTicks={_simConfig.InputDelayTicks} below recommended minimum of 2 — increased jitter risk under network spikes.");
             (_inputBuffer as InputBuffer)?.SetLogger(logger);
 
             _activePlayerIds.Clear();
@@ -472,6 +489,12 @@ namespace xpTURN.Klotho.Core
                 _serverDrivenNetwork.OnVerifiedStateReceived += HandleVerifiedStateReceived;
                 _serverDrivenNetwork.OnInputAckReceived += HandleInputAckReceived;
                 _serverDrivenNetwork.OnServerFullStateReceived += HandleServerDrivenFullStateReceived;
+
+                if (!_serverDrivenNetwork.IsServer)
+                {
+                    _serverDrivenNetwork.OnBootstrapBegin += HandleBootstrapBegin;
+                    _serverDrivenNetwork.OnCommandRejected += HandleCommandRejected;
+                }
             }
             else
             {
@@ -489,10 +512,12 @@ namespace xpTURN.Klotho.Core
             _simulation.OnPlayerJoinedNotification += HandlePlayerJoinedNotification;
             _simulation.Initialize();
 
-            // Event system. SD server does not collect events, so substitute a null implementation.
+            // Event system. SD server collects only Synced events (e.g. CommandRejectedSimEvent) for
+            // network-layer unicast feedback; Regular events have no server-side subscribers and are
+            // dropped at RaiseEvent to avoid GC churn. Other modes use the full collector.
             _eventBuffer = new EventBuffer(SnapshotCapacity);
             if (_simConfig.Mode == NetworkMode.ServerDriven && _serverDrivenNetwork != null && _serverDrivenNetwork.IsServer)
-                _eventCollector = NullEventCollector.Instance;
+                _eventCollector = new SyncedOnlyEventCollector();
             else
                 _eventCollector = new EventCollector();
             if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSim)
@@ -557,7 +582,13 @@ namespace xpTURN.Klotho.Core
             }
 
             // Initial entity creation must run before SaveSnapshot(0) so it is included in the snapshot.
-            _simulationCallbacks?.OnInitializeWorld(this);
+            // Skipped on SD client: the authoritative initial state arrives via Initial FullState
+            // broadcast and is applied through HandleInitialFullStateReceived -> ApplyFullState.
+            // Calling it here would create entities that overlap the restored state (race-dependent
+            // double-init).
+            bool isSdClient = _simConfig.Mode == NetworkMode.ServerDriven && !IsServer;
+            if (!isSdClient)
+                _simulationCallbacks?.OnInitializeWorld(this);
 
             SaveSnapshot(0);
 
@@ -566,7 +597,38 @@ namespace xpTURN.Klotho.Core
                 _replaySystem.StartRecording(_activePlayerIds.Count, _simConfig, _randomSeed);
             }
 
+            // SD server defers Running until all players ack initial FullState (or timeout) — see MarkBootstrapComplete.
+            // The existing State == Running gate in Update naturally blocks UpdateServerTick during BootstrapPending.
+            bool isSdServer = _simConfig.Mode == NetworkMode.ServerDriven && IsServer;
+            State = isSdServer ? KlothoState.BootstrapPending : KlothoState.Running;
+        }
+
+        /// <summary>
+        /// SD server only: flips BootstrapPending → Running once all players have ack'd Initial FullState
+        /// (ack-complete path) or the bootstrap timeout has elapsed (timeout path).
+        /// No-op + warn outside BootstrapPending to protect against duplicate / late callers (e.g. post-Reconnect ack).
+        /// </summary>
+        public void MarkBootstrapComplete()
+        {
+            if (State != KlothoState.BootstrapPending)
+            {
+                _logger?.ZLogWarning($"[KlothoEngine] MarkBootstrapComplete ignored (State={State})");
+                return;
+            }
             State = KlothoState.Running;
+            _logger?.ZLogInformation($"[KlothoEngine] BootstrapPending -> Running");
+        }
+
+        /// <summary>
+        /// SD server only: unicast cached Initial FullState to a single peer that missed the bootstrap ack window.
+        /// Recipient recovers via the determinism-failure FullState path. No-op outside SD-server / before the cache is populated.
+        /// </summary>
+        public void SendBootstrapTimeoutResync(int peerId)
+        {
+            if (_simConfig.Mode != NetworkMode.ServerDriven || !IsServer) return;
+            if (_cachedFullState == null) return;
+            _networkService.SendFullStateResponse(peerId, _cachedFullStateTick, _cachedFullState, _cachedFullStateHash);
+            _logger?.ZLogInformation($"[KlothoEngine][SD] Bootstrap timeout resync: peerId={peerId}, tick={_cachedFullStateTick}, size={_cachedFullState.Length}");
         }
 
         public void Update(float deltaTime)
@@ -743,15 +805,29 @@ namespace xpTURN.Klotho.Core
 #endif
         }
 
-        public void InputCommand(ICommand command)
+        public void InputCommand(ICommand command, int extraDelay = 0)
         {
-            // Target tick reflecting input delay.
-            int targetTick = CurrentTick + _simConfig.InputDelayTicks;
+            // Target tick reflecting input delay. extraDelay adds per-command lead margin
+            // (used by recovery paths — e.g. spawn cmd PastTick reject escalation).
+            int targetTick = CurrentTick + _simConfig.InputDelayTicks + extraDelay;
 
             if (command is CommandBase cmdBase)
             {
                 cmdBase.Tick = targetTick;
                 cmdBase.PlayerId = LocalPlayerId;
+                
+#if KLOTHO_FAULT_INJECTION
+                // PastTick path: shift cmd.Tick to trigger ServerInputCollector's
+                // `tick <= _lastExecutedTick` reject branch. Negative delta = past.
+                int tickDelta = xpTURN.Klotho.Diagnostics.FaultInjection.ForceTickOffsetDelta;
+                if (tickDelta != 0)
+                {
+                    int shifted = targetTick + tickDelta;
+                    _logger?.ZLogWarning($"[FaultInjection][SD] ForceTickOffset: cmd.Tick {targetTick} → {shifted} (delta={tickDelta}, type={cmdBase.GetType().Name})");
+                    cmdBase.Tick = shifted;
+                    targetTick = shifted;
+                }
+#endif
             }
 
             // ServerDriven mode places it in the local buffer and then sends to the server.
@@ -792,6 +868,12 @@ namespace xpTURN.Klotho.Core
                         _serverDrivenNetwork.OnVerifiedStateReceived -= HandleVerifiedStateReceived;
                         _serverDrivenNetwork.OnInputAckReceived -= HandleInputAckReceived;
                         _serverDrivenNetwork.OnServerFullStateReceived -= HandleServerDrivenFullStateReceived;
+
+                        if (!_serverDrivenNetwork.IsServer)
+                        {
+                            _serverDrivenNetwork.OnBootstrapBegin -= HandleBootstrapBegin;
+                            _serverDrivenNetwork.OnCommandRejected -= HandleCommandRejected;
+                        }
                     }
                 }
                 else
@@ -1104,9 +1186,11 @@ namespace xpTURN.Klotho.Core
             // SD Server broadcasts the authoritative tick-0 state to all remote SD Clients as a bootstrap.
             if (_simConfig.Mode == NetworkMode.ServerDriven && _serverDrivenNetwork.IsServer)
             {
-                if (_cachedFullStateTick != 0)
+                // Always re-serialize: pre-game late-join (e.g. spectator joining during Lobby/Sync)
+                // may have populated _cachedFullState with the empty pre-OnInitializeWorld state via
+                // HandleFullStateRequested, leaving _cachedFullStateTick=0. The post-OnInitializeWorld
+                // state is the authoritative tick-0 broadcast.
                 {
-                    // Fallback re-serialization for the exceptional path where subscribers did not populate the cache.
                     var (data, hash) = _simulation.SerializeFullStateWithHash();
                     _cachedFullState = data;
                     _cachedFullStateHash = hash;
@@ -1114,6 +1198,11 @@ namespace xpTURN.Klotho.Core
                 }
                 _serverDrivenNetwork.BroadcastFullState(0, _cachedFullState, _cachedFullStateHash);
                 _logger?.ZLogInformation($"[KlothoEngine][SD] Initial FullState broadcast: size={_cachedFullState.Length}, hash=0x{_cachedFullStateHash:X16}");
+
+                // Diagnostic — per-component hash breakdown for desync root-cause analysis.
+                // Debug level: steady-state, not surfaced in normal logs.
+                if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimDiag)
+                    ecsSimDiag.LogComponentHashes(_logger, "ServerInit", atDebugLevel: true);
             }
         }
 

@@ -1,4 +1,5 @@
 using UnityEngine;
+using ZLogger;
 
 using xpTURN.Klotho;
 using xpTURN.Klotho.Core;
@@ -21,6 +22,8 @@ namespace Brawler
 
         public int PlayerId => _playerId;
 
+        public override bool OwnerMatches(int ownerId) => _playerId == ownerId;
+
         // Latest ECS state cache read by external code (GameHUD, etc.)
         public int KnockbackPower { get; private set; }
         public int StockCount     { get; private set; }
@@ -32,6 +35,10 @@ namespace Brawler
         private bool _wasDead;
         private BrawlerViewSync _viewSync;
 
+        // Rollback view re-bind diagnostic counters.
+        private int _activateCount;
+        private int _deactivateCount;
+
         public override void OnActivate(FrameRef frame)
         {
             base.OnActivate(frame);
@@ -42,6 +49,9 @@ namespace Brawler
             if (f != null && f.Has<OwnerComponent>(EntityRef))
                 _playerId = f.GetReadOnly<OwnerComponent>(EntityRef).OwnerId;
 
+            _activateCount++;
+            Engine?.Logger?.ZLogDebug($"[ViewLife][Activate] playerId={_playerId}, entity={EntityRef.Index}, viewIID={GetInstanceID()}, activateCount={_activateCount}");
+
             // Wire camera follow / GameHUD.
             if (_viewSync == null)
                 _viewSync = FindFirstObjectByType<BrawlerViewSync>();
@@ -51,7 +61,9 @@ namespace Brawler
         public override void OnDeactivate()
         {
             base.OnDeactivate();
-            _viewSync?.UnregisterCharacter(_playerId);
+            _deactivateCount++;
+            Engine?.Logger?.ZLogDebug($"[ViewLife][Deactivate] playerId={_playerId}, entity={EntityRef.Index}, viewIID={GetInstanceID()}, deactivateCount={_deactivateCount}");
+            _viewSync?.UnregisterCharacter(_playerId, this);
         }
 
         /// <summary>

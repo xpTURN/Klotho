@@ -163,9 +163,9 @@ namespace xpTURN.Klotho.Core
             // cold-start Reconnect path: present persisted credentials directly.
             if (_reconnectCreds != null)
             {
-                // SD multi-room: the server's RoomRouter requires RoomHandshakeMessage as the first
-                // message and disconnects when it is missing. For single-room SD / P2P
-                // (creds.RoomId == -1), no handshake is sent — same convention as Connect's preJoinMessage.
+                // SD (single/multi room): the server's RoomRouter requires RoomHandshakeMessage as the first
+                // message and disconnects when it is missing. For P2P (creds.RoomId == -1), no handshake is sent —
+                // same convention as Connect's preJoinMessage.
                 if (_reconnectCreds.RoomId >= 0)
                 {
                     var hs = new RoomHandshakeMessage { RoomId = _reconnectCreds.RoomId };
@@ -420,15 +420,36 @@ namespace xpTURN.Klotho.Core
             switch (_result.Kind)
             {
                 case JoinKind.LateJoin:
-                    _logger?.ZLogInformation($"[KlothoConnection] Late Join connected: playerId={_result.LocalPlayerId}, fullStateTick={_result.LateJoinPayload.FullStateTick}, tickInterval={_result.SimulationConfig.TickIntervalMs}");
+                    _logger?.ZLogInformation($"[KlothoConnection] Late Join connected: playerId={_result.LocalPlayerId}, fullStateTick={_result.LateJoinPayload.FullStateTick}");
                     break;
                 case JoinKind.Reconnect:
-                    _logger?.ZLogInformation($"[KlothoConnection] Cold-start Reconnect: playerId={_result.LocalPlayerId}, fullStateTick={_result.ReconnectPayload.FullStateTick}, tickInterval={_result.SimulationConfig.TickIntervalMs}");
+                    _logger?.ZLogInformation($"[KlothoConnection] Cold-start Reconnect: playerId={_result.LocalPlayerId}, fullStateTick={_result.ReconnectPayload.FullStateTick}");
                     break;
                 default:
-                    _logger?.ZLogInformation($"[KlothoConnection] Connected: playerId={_result.LocalPlayerId}, tickInterval={_result.SimulationConfig.TickIntervalMs}");
+                    _logger?.ZLogInformation($"[KlothoConnection] Connected: playerId={_result.LocalPlayerId}");
                     break;
             }
+
+            var sc = _result.SimulationConfig;
+            _logger?.ZLogInformation(
+                $"[KlothoConnection] SimulationConfig: " +
+                $"TickIntervalMs={sc.TickIntervalMs}, " +
+                $"InputDelayTicks={sc.InputDelayTicks}, " +
+                $"MaxRollbackTicks={sc.MaxRollbackTicks}, " +
+                $"SyncCheckInterval={sc.SyncCheckInterval}, " +
+                $"UsePrediction={sc.UsePrediction}, " +
+                $"MaxEntities={sc.MaxEntities}, " +
+                $"Mode={sc.Mode}, " +
+                $"HardToleranceMs={sc.HardToleranceMs}, " +
+                $"InputResendIntervalMs={sc.InputResendIntervalMs}, " +
+                $"MaxUnackedInputs={sc.MaxUnackedInputs}, " +
+                $"ServerSnapshotRetentionTicks={sc.ServerSnapshotRetentionTicks}, " +
+                $"SDInputLeadTicks={sc.SDInputLeadTicks}, " +
+                $"EnableErrorCorrection={sc.EnableErrorCorrection}, " +
+                $"InterpolationDelayTicks={sc.InterpolationDelayTicks}, " +
+                $"EventDispatchWarnMs={sc.EventDispatchWarnMs}, " +
+                $"TickDriftWarnMultiplier={sc.TickDriftWarnMultiplier}");
+
             _onCompleted?.Invoke(_result);
         }
     }

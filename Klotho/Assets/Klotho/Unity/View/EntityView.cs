@@ -36,6 +36,19 @@ namespace xpTURN.Klotho
         internal void SetBindBehaviour(BindBehaviour value) => _bindBehaviour = value;
         internal void SetViewFlags(ViewFlags value)         => _viewFlags = value;
 
+        /// <summary>
+        /// Returns true if this view's cached owner identity matches the given OwnerId.
+        /// Override required for any view bound to an entity that has OwnerComponent — without override,
+        /// the default returns false to make missing overrides fail loudly (EVU will Rebind every Reconcile,
+        /// surfacing as continuous churn in profiler / [ViewLife][Rebind] logs). This prevents silent
+        /// regression of the entity-slot reuse with owner swap bug when new Owner-bearing entity types are added.
+        ///
+        /// EVU's helper short-circuits with `return true` for entities lacking OwnerComponent, so this
+        /// virtual method is only invoked for Owner-bearing entities — Owner-agnostic view types do not
+        /// need to override.
+        /// </summary>
+        public virtual bool OwnerMatches(int ownerId) => false;
+
         // Array of child EntityViewComponents. Collected once in Awake; lifecycle callbacks are forwarded to each component.
         private EntityViewComponent[] _components;
 

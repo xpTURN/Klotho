@@ -146,6 +146,7 @@ namespace xpTURN.Klotho.Network.Tests
             public event Action<int, SimulationEvent> OnSyncedEvent;
             public event Action<int> OnResyncCompleted;
             public event Action OnResyncFailed;
+            public event Action<int, int, RejectionReason> OnCommandRejected;
             public event Action<int, int, byte[], int> OnVerifiedInputBatchReady;
             public event Action<int> OnDisconnectedInputNeeded;
 
@@ -154,7 +155,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void Initialize(ISimulation simulation, ILogger logger) { }
             public void Start() { }
             public void Update(float deltaTime) { }
-            public void InputCommand(ICommand command) { }
+            public void InputCommand(ICommand command, int extraDelay = 0) { }
             public void Stop() { }
 
             public void StartSpectator(SpectatorStartInfo info)
@@ -209,6 +210,7 @@ namespace xpTURN.Klotho.Network.Tests
                 OnSyncedEvent?.Invoke(0, null);
                 OnResyncCompleted?.Invoke(0);
                 OnResyncFailed?.Invoke();
+                OnCommandRejected?.Invoke(0, 0, default);
                 OnVerifiedInputBatchReady?.Invoke(0, 0, null, 0);
             }
         }

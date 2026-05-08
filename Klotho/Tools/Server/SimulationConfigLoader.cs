@@ -40,6 +40,10 @@ namespace xpTURN.Klotho.Core
                 logger.ZLogInformation(
                     $"[SimulationConfigLoader] Mode={config.Mode}, TickIntervalMs={config.TickIntervalMs}, MaxRollbackTicks={config.MaxRollbackTicks}");
 
+                if (config.Mode == NetworkMode.ServerDriven && config.InputDelayTicks < 2)
+                    logger.ZLogWarning(
+                        $"[SimulationConfigLoader] InputDelayTicks={config.InputDelayTicks} below recommended minimum of 2 — increased jitter risk.");
+
                 return config;
             }
             catch (JsonException ex)

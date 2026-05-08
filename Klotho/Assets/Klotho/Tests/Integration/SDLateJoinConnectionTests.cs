@@ -164,7 +164,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
                     UsePrediction = true,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 0,
                 },
                 new SessionConfig());
@@ -266,7 +266,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
                     UsePrediction = false,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 200,
                 },
                 new SessionConfig
@@ -311,7 +311,7 @@ namespace xpTURN.Klotho.Tests.Integration
                     TickIntervalMs = 50,
                     MaxRollbackTicks = 50,
                     UsePrediction = true,
-                    InputDelayTicks = 0,
+                    InputDelayTicks = 1,
                     HardToleranceMs = 0,
                 },
                 new SessionConfig { CountdownDurationMs = 0 });

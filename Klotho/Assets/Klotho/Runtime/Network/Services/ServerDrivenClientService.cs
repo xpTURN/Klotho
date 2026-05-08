@@ -110,6 +110,8 @@ namespace xpTURN.Klotho.Network
         public event Action<int, IReadOnlyList<ICommand>, long> OnVerifiedStateReceived;
         public event Action<int> OnInputAckReceived;
         public event Action<int, byte[], long> OnServerFullStateReceived;
+        public event Action<int, long> OnBootstrapBegin;
+        public event Action<int, int, RejectionReason> OnCommandRejected;
 
         // ── Initialization ─────────────────────────────────────────
 
@@ -369,6 +371,15 @@ namespace xpTURN.Klotho.Network
             }
         }
 
+        public void SendBootstrapReady(int playerId)
+        {
+            var msg = new PlayerBootstrapReadyMessage { PlayerId = playerId };
+            using (var serialized = _messageSerializer.SerializePooled(msg))
+            {
+                _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
+            }
+        }
+
         public void SendFullStateResponse(int peerId, int tick, byte[] stateData, long stateHash)
         {
             throw new NotSupportedException("The client cannot call SendFullStateResponse.");
@@ -467,6 +478,15 @@ namespace xpTURN.Klotho.Network
                 case PlayerConfigMessage playerConfigMsg:
                     HandlePlayerConfigMessage(playerConfigMsg);
                     break;
+
+                case BootstrapBeginMessage bootBegin:
+                    OnBootstrapBegin?.Invoke(bootBegin.FirstTick, bootBegin.TickStartTimeMs);
+                    break;
+
+                case CommandRejectedMessage rejectMsg:
+                    _logger?.ZLogInformation($"[SDClientService] CommandRejected received: tick={rejectMsg.Tick}, cmdTypeId={rejectMsg.CommandTypeId}, reason={rejectMsg.ReasonEnum}");
+                    OnCommandRejected?.Invoke(rejectMsg.Tick, rejectMsg.CommandTypeId, rejectMsg.ReasonEnum);
+                    break;
             }
         }
 
@@ -535,6 +555,10 @@ namespace xpTURN.Klotho.Network
             }
             else
             {
+                // No countdown: arm the initial-FullState routing flag now so the upcoming broadcast is
+                // routed through HandleInitialFullStateReceived (the bootstrap-ready ack site). The
+                // countdown path achieves the same via HandleCountdownStarted.
+                (_engine as KlothoEngine)?.MarkExpectingInitialFullState();
                 Phase = SessionPhase.Playing;
                 SaveReconnectCredentialsIfApplicable();
                 OnGameStart?.Invoke();

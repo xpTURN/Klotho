@@ -1637,10 +1637,6 @@ PrefabInstance:
       value: 
       objectReference: {fileID: 292827643}
     - target: {fileID: 3384708139685548805, guid: 64d516c5d045e400eb1e0cc8dca83919, type: 3}
-      propertyPath: _logLevel
-      value: 2
-      objectReference: {fileID: 0}
-    - target: {fileID: 3384708139685548805, guid: 64d516c5d045e400eb1e0cc8dca83919, type: 3}
       propertyPath: _viewSync
       value: 
       objectReference: {fileID: 1832613399}
@@ -1648,14 +1644,6 @@ PrefabInstance:
       propertyPath: _entityViewUpdater
       value: 
       objectReference: {fileID: 2070650682}
-    - target: {fileID: 3384708139685548805, guid: 64d516c5d045e400eb1e0cc8dca83919, type: 3}
-      propertyPath: _brawlerSettings._mode
-      value: 1
-      objectReference: {fileID: 0}
-    - target: {fileID: 3384708139685548805, guid: 64d516c5d045e400eb1e0cc8dca83919, type: 3}
-      propertyPath: _brawlerSettings._roomId
-      value: 0
-      objectReference: {fileID: 0}
     - target: {fileID: 7928493984336075052, guid: 64d516c5d045e400eb1e0cc8dca83919, type: 3}
       propertyPath: m_LocalPosition.x
       value: 0

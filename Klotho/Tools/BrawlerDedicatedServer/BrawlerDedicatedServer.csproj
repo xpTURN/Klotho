@@ -8,6 +8,7 @@
     <Nullable>disable</Nullable>
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <PublishReadyToRun>true</PublishReadyToRun>
+    <DefineConstants>$(DefineConstants);</DefineConstants>
   </PropertyGroup>
 
   <!-- Tier 1+2+3: server framework shared sources -->
@@ -34,6 +35,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="sessionconfig.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="faultinjectionconfig.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

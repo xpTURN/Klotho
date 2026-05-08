@@ -36,12 +36,5 @@ namespace Brawler
             _sim.SetEngine(engine);
             _sim.SendSpawnCommand(engine);
         }
-
-        public void Respawn(IKlothoEngine engine)
-        {
-            _logger?.ZLogInformation($"[Brawler] Respawn: playerId={engine.LocalPlayerId}, tick={engine.CurrentTick}");
-
-            _sim.SendSpawnCommand(engine);
-        }
     }
 }

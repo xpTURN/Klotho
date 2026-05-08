@@ -1,7 +1,7 @@
 {
   "Mode": "ServerDriven",
   "TickIntervalMs": 25,
-  "InputDelayTicks": 0,
+  "InputDelayTicks": 4,
   "MaxRollbackTicks": 50,
   "SyncCheckInterval": 30,
   "UsePrediction": false,
@@ -17,5 +17,5 @@
   "InterpolationDelayTicks": 2,
 
   "EventDispatchWarnMs": 5,
-  "TickDriftWarnMultiplier": 2
+  "TickDriftWarnMultiplier": 3
 }

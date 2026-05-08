@@ -89,7 +89,7 @@ Three-layer separation:
 
 ## Tech Stack
 
-- **Unity 2022.3+**, URP, Input System
+- **Unity 2022.3+**
 - **C# 8.0** (some assemblies opt into newer C# language features via the `xpTURN.Polyfill` package, which supplies the runtime-attribute shims required by C# 11)
 - **UniTask** — async (Cysharp)
 - **ZLogger + Microsoft.Extensions.Logging** — structured logging

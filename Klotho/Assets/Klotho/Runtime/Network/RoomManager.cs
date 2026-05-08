@@ -55,9 +55,24 @@ namespace xpTURN.Klotho.Network
         private readonly Room[] _rooms;
         private int _activeRoomCount;
 
+        // Drain metrics — indexed by (int)SessionPhase (size = SessionPhase enum value count + safety margin)
+        private const int DRAIN_PHASE_BUCKETS = 8;
+        private readonly long[] _drainTotals = new long[DRAIN_PHASE_BUCKETS];
+        private long _lastDrainLifetimeMs;
+
         public RoomRouter Router => _router;
         public int ActiveRoomCount => _activeRoomCount;
         public int MaxRooms => _config.MaxRooms;
+
+        /// <summary>
+        /// Total number of rooms drained while in the given phase.
+        /// </summary>
+        public long GetDrainTotal(SessionPhase phase) => _drainTotals[(int)phase];
+
+        /// <summary>
+        /// Lifetime of the most recently disposed room, in ms.
+        /// </summary>
+        public long LastDrainLifetimeMs => _lastDrainLifetimeMs;
 
         public RoomManager(
             INetworkTransport sharedTransport,
@@ -149,6 +164,7 @@ namespace xpTURN.Klotho.Network
                 roomId, simConfig, sessionConfig, sim, commandFactory,
                 transport, networkService, engine, callbacks, roomLogger);
 
+            room.CreatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             room.State = RoomState.Active;
             _rooms[roomId] = room;
             _activeRoomCount++;
@@ -171,12 +187,18 @@ namespace xpTURN.Klotho.Network
                 if (room == null || room.State != RoomState.Disposing)
                     continue;
 
+                long lifetimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - room.CreatedAtMs;
+                int phaseIdx = (int)room.DrainPhase;
+                if ((uint)phaseIdx < (uint)DRAIN_PHASE_BUCKETS)
+                    _drainTotals[phaseIdx]++;
+                _lastDrainLifetimeMs = lifetimeMs;
+
                 _router.UnregisterRoom(room.RoomId);
                 _router.RemoveRoomPeers(room.RoomId);
                 room.Dispose();
                 _activeRoomCount--;
 
-                _logger?.ZLogInformation($"[RoomManager] Room {room.RoomId} disposed (active={_activeRoomCount})");
+                _logger?.ZLogInformation($"[RoomManager] Room {room.RoomId} disposed (active={_activeRoomCount}, drain_phase={room.DrainPhase}, lifetime_ms={lifetimeMs})");
             }
         }
 

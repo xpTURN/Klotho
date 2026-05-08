@@ -131,6 +131,10 @@ public void Initialize()
             _frame.DeltaTimeMs = _deltaTimeMs;
         }
 
+        // Diagnostic — delegates to Frame for per-component hash dump.
+        public void LogComponentHashes(ILogger logger, string label, bool atDebugLevel = false)
+            => _frame.LogComponentHashes(logger, label, atDebugLevel);
+
         public void RestoreFromFullState(byte[] stateData)
         {
             if (_snapshotParticipants.Count == 0)

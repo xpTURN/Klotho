@@ -16,6 +16,11 @@ namespace xpTURN.Klotho.Helper.Tests
         private static HashSet<int> _blockedPeers = new HashSet<int>();
 
         private Queue<(int peerId, byte[] data)> _incomingMessages = new Queue<(int, byte[])>();
+#if KLOTHO_FAULT_INJECTION
+        // RTT emulation: messages held until releaseAtMs has elapsed.
+        private List<(long releaseAtMs, int peerId, byte[] data)> _delayedMessages = new List<(long, int, byte[])>();
+        private static bool _rttLogged;
+#endif
         private bool _isHost;
         private bool _isConnected;
         private int _peerId;
@@ -109,6 +114,23 @@ namespace xpTURN.Klotho.Helper.Tests
 
         public void PollEvents()
         {
+#if KLOTHO_FAULT_INJECTION
+            if (_delayedMessages.Count > 0)
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                int write = 0;
+                for (int read = 0; read < _delayedMessages.Count; read++)
+                {
+                    var entry = _delayedMessages[read];
+                    if (entry.releaseAtMs <= now)
+                        _incomingMessages.Enqueue((entry.peerId, entry.data));
+                    else
+                        _delayedMessages[write++] = entry;
+                }
+                if (write != _delayedMessages.Count)
+                    _delayedMessages.RemoveRange(write, _delayedMessages.Count - write);
+            }
+#endif
             while (_incomingMessages.Count > 0)
             {
                 var (peerId, data) = _incomingMessages.Dequeue();
@@ -186,6 +208,20 @@ namespace xpTURN.Klotho.Helper.Tests
                 return;
             if (PacketDropRate > 0f && _dropRng.NextDouble() < PacketDropRate)
                 return; // Packet dropped
+#if KLOTHO_FAULT_INJECTION
+            int rtt = xpTURN.Klotho.Diagnostics.FaultInjection.EmulatedRttMs;
+            if (rtt > 0)
+            {
+                if (!_rttLogged)
+                {
+                    _rttLogged = true;
+                    System.Console.WriteLine($"[FaultInjection] TestTransport: RTT emulation active ({rtt}ms round-trip)");
+                }
+                long releaseAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (rtt / 2);
+                _delayedMessages.Add((releaseAt, fromPeerId, data));
+                return;
+            }
+#endif
             _incomingMessages.Enqueue((fromPeerId, data));
         }
 
@@ -234,6 +270,9 @@ namespace xpTURN.Klotho.Helper.Tests
             _peers.Clear();
             _nextPeerId = 1;
             _blockedPeers.Clear();
+#if KLOTHO_FAULT_INJECTION
+            _rttLogged = false;
+#endif
         }
 
         /// <summary>

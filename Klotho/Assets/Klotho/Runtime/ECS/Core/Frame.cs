@@ -235,6 +235,48 @@ namespace xpTURN.Klotho.ECS
             return hash;
         }
 
+        // Diagnostic — per-typeId hash and count breakdown for desync investigation.
+        // atDebugLevel=true emits at Debug level for steady-state monitoring (filtered out in normal logs).
+        // Default Information level is intended for error events (mismatch / determinism failure).
+        public void LogComponentHashes(ILogger logger, string label, bool atDebugLevel = false)
+        {
+            if (logger == null) return;
+
+            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            if (atDebugLevel)
+            {
+                logger.ZLogDebug($"[CompHash][{label}] tick={Tick} entityCount={Entities.Count} ---");
+                for (int i = 0; i < typeIds.Length; i++)
+                {
+                    int typeId = typeIds[i];
+                    ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                    int count = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
+
+                    ulong hash = FPHash.FNV_OFFSET;
+                    ComponentStorageRegistry.GetHashDispatch(typeId)(_heap, in layout, Entities, ref hash);
+
+                    var typeName = ComponentStorageRegistry.GetType(typeId)?.Name ?? "?";
+                    logger.ZLogDebug($"[CompHash][{label}] typeId={typeId} type={typeName} count={count} hash=0x{hash:X16}");
+                }
+            }
+            else
+            {
+                logger.ZLogInformation($"[CompHash][{label}] tick={Tick} entityCount={Entities.Count} ---");
+                for (int i = 0; i < typeIds.Length; i++)
+                {
+                    int typeId = typeIds[i];
+                    ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                    int count = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
+
+                    ulong hash = FPHash.FNV_OFFSET;
+                    ComponentStorageRegistry.GetHashDispatch(typeId)(_heap, in layout, Entities, ref hash);
+
+                    var typeName = ComponentStorageRegistry.GetType(typeId)?.Name ?? "?";
+                    logger.ZLogInformation($"[CompHash][{label}] typeId={typeId} type={typeName} count={count} hash=0x{hash:X16}");
+                }
+            }
+        }
+
         // --- Snapshot / Rollback ---
 
         public void CopyFrom(Frame source)

@@ -28,6 +28,12 @@ namespace xpTURN.Klotho.Network
         /// </summary>
         void SendClientInput(int tick, ICommand command);
 
+        /// <summary>
+        /// Client → server: signal that Initial FullState has been applied and the client is ready
+        /// for the first server tick. ReliableOrdered. Server side throws NotSupportedException.
+        /// </summary>
+        void SendBootstrapReady(int playerId);
+
         // SendFullStateRequest(int) — inherited from IKlothoNetworkService, no need to redeclare
 
         /// <summary>
@@ -35,6 +41,19 @@ namespace xpTURN.Klotho.Network
         /// Separated into the SD-specific handler path — wire only this event in Initialize() instead of OnFullStateReceived.
         /// </summary>
         event Action<int, byte[], long> OnServerFullStateReceived;
+
+        /// <summary>
+        /// Server → client: bootstrap window closed (firstTick, tickStartTimeMs).
+        /// Sent right before the server starts its first tick. Carries the server's actual tick-start
+        /// wall-clock so the client can align its accumulator (matters most under timeout paths).
+        /// </summary>
+        event Action<int, long> OnBootstrapBegin;
+
+        /// <summary>
+        /// Server → client: command rejection notification (tick, commandTypeId, reason).
+        /// Hint-only — receiver decides whether to clear local latches / surface to UI.
+        /// </summary>
+        event Action<int, int, RejectionReason> OnCommandRejected;
 
         /// <summary>
         /// Server only: the slowest client's confirmed-progress tick.

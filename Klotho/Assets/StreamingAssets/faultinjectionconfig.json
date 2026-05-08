@@ -1,0 +1,11 @@
+{
+  "_comment": "Fault injection toggles for IMP38 ISS-04 / scenario matrix. All fields optional — missing = leave default. Empty arrays clear the corresponding HashSet. Active only when KLOTHO_FAULT_INJECTION is defined.",
+
+  "EmulatedRttMs": 0,
+  "ServerGcPauseMs": 0,
+  "ServerGcPauseAtTick": -1,
+  "DropSpawnCommandPlayerIds": [],
+  "SuppressBootstrapAckPlayerIds": [],
+  "ForceSpawnRetryPlayerIds": [],
+  "ForceTickOffsetDelta": 0
+}

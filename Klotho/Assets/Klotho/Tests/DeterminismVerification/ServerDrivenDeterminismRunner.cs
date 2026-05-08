@@ -68,7 +68,7 @@ public class ServerDrivenDeterminismRunner : MonoBehaviour
                 Mode = NetworkMode.ServerDriven,
                 TickIntervalMs = config.TickIntervalMs,
                 MaxRollbackTicks = config.MaxRollbackTicks,
-                InputDelayTicks = 0
+                InputDelayTicks = 1
             },
             new SessionConfig());
         _engine.Initialize(simulation, _clientService, logger);

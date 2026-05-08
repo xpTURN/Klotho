@@ -56,6 +56,20 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         private void ExecuteServerTick()
         {
+#if KLOTHO_FAULT_INJECTION
+            // Server GC pause emulation. Fires once at the armed tick, then disarms.
+            if (xpTURN.Klotho.Diagnostics.FaultInjection.ServerGcPauseAtTick == CurrentTick)
+            {
+                int pauseMs = xpTURN.Klotho.Diagnostics.FaultInjection.ServerGcPauseMs;
+                xpTURN.Klotho.Diagnostics.FaultInjection.ServerGcPauseAtTick = -1;
+                if (pauseMs > 0)
+                {
+                    _logger?.ZLogWarning($"[FaultInjection][SD] Server GC pause: tick={CurrentTick}, sleep={pauseMs}ms");
+                    System.Threading.Thread.Sleep(pauseMs);
+                }
+            }
+#endif
+
             var inputCollector = _serverNetwork.InputCollector;
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
@@ -108,8 +122,10 @@ namespace xpTURN.Klotho.Core
             _viewCallbacks?.OnTickExecuted(executedTick);
             OnTickExecutedWithState?.Invoke(executedTick, FrameState.Verified);
 
-            // Server does not need event dispatch (NullEventCollector).
-            // DispatchTickEvents(executedTick, FrameState.Verified);
+            // Dispatch verified-tick events. Synced events (e.g. CommandRejectedSimEvent) reach
+            // ServerNetworkService.HandleEngineSyncedEvent → unicast CommandRejectedMessage.
+            // Regular events have no server-side subscribers, so this is a no-op cost for them.
+            DispatchTickEvents(executedTick, FrameState.Verified);
 
             // 7. Post-processing: CleanupOldData (server-mode-specific cleanup criteria).
             CleanupServerData();

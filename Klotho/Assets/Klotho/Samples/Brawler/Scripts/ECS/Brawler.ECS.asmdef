@@ -2,12 +2,12 @@
     "name": "Brawler.ECS",
     "rootNamespace": "",
     "references": [
-        "GUID:dfc9cb4389e9946ddb75956d57d62d7e",
-        "GUID:e54187357b07148a9ad4cf24f45837a7",
-        "GUID:169f113c81c3048f2956d785b2922ae9",
-        "GUID:3c45e43da10b64a12aaeb40d4fae61d1",
-        "GUID:9dd49314b0f384594a8936d5e432f42c",
-        "GUID:eb642c3d49f2c45998ea8a093a5a135c"
+        "LiteNetLib",
+        "xpTURN.Polyfill.Runtime",
+        "xpTURN.Klotho.Runtime",
+        "xpTURN.Klotho.LiteNetLib",
+        "xpTURN.Klotho.Gameplay",
+        "Brawler.DataAssets"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

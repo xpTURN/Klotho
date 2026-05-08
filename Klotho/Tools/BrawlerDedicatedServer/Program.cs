@@ -26,20 +26,36 @@ bool isTest = args.Length > 0 && args[0] == "--test";
 bool multiRoom = args.Length > 0 && args[0] == "--multi";
 
 if (isTest)
-    return MultiRoomTests.RunAll();
+{
+    int failures = 0;
+    failures += SafeRunSuite("MultiRoomTests", MultiRoomTests.RunAll);
+    failures += SafeRunSuite("SingleRoomLifecycleTests", SingleRoomLifecycleTests.RunAll);
+    return failures;
+}
 else if (multiRoom)
     RunMultiRoom(args);
 else
     RunSingleRoom(args);
 return 0;
 
+static int SafeRunSuite(string name, Func<int> run)
+{
+    try { return run(); }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[{name}] crashed: {ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
+}
+
 // ═══════════════════════════════════════════════════════════
-// Single room (Phase 1)
+// Single room — RoomManager-based (MaxRooms=1, lazy CreateRoom via RoomRouter)
 // ═══════════════════════════════════════════════════════════
 static void RunSingleRoom(string[] args)
 {
     int port = args.Length > 0 ? int.Parse(args[0]) : 7777;
     int botCount = args.Length > 1 ? int.Parse(args[1]) : 0;
+    const int maxRooms = 1;
 
     var staticColliderPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.StaticColliders.bytes");
     var navMeshPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerScene.NavMeshData.bytes");
@@ -52,65 +68,65 @@ static void RunSingleRoom(string[] args)
     // Load config
     var simConfig = SimulationConfigLoader.Load(args, logger);
     var sessionConfig = SessionConfigLoader.Load(args, logger);
+#if KLOTHO_FAULT_INJECTION
+    xpTURN.Klotho.Diagnostics.FaultInjectionLoader.TryLoadAndApply(
+        ConfigPathResolver.Resolve(xpTURN.Klotho.Diagnostics.FaultInjectionLoader.DefaultFileName, args), logger);
+#endif
     int tickIntervalMs = simConfig.TickIntervalMs;
-    var maxPlayers = sessionConfig.MaxPlayers;
-    var maxSpectators = sessionConfig.MaxSpectators;
+    var maxPlayersPerRoom = sessionConfig.MaxPlayers;
+    var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
 
     // Pre-load data
     var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);
-    var navMesh = FPNavMeshSerializer.Deserialize(navMeshPath);
+    var navMeshBytes = File.ReadAllBytes(navMeshPath);
     var dataAssets = DataAssetReader.LoadMixedCollectionFromBytes(assetPath);
 
     IDataAssetRegistryBuilder registryBuilder = new DataAssetRegistry();
     registryBuilder.RegisterRange(dataAssets);
-    var assetRegistry = registryBuilder.Build();
+    var sharedRegistry = registryBuilder.Build();
 
+    // Single Transport
     var transport = new LiteNetLibTransport(logger, connectionKey: KLOTHO_CONNECTION_KEY);
-
-    var sim = new EcsSimulation(
-        maxEntities: 256,
-        maxRollbackTicks: 1,
-        deltaTimeMs: tickIntervalMs,
-        assetRegistry: assetRegistry);
-
-    var callbacks = new BrawlerServerCallbacks(logger,
-                                                staticColliders,
-                                                navMesh,
-                                                maxPlayers,
-                                                botCount);
-
-    callbacks.RegisterSystems(sim);
-    sim.LockAssetRegistry();
-
-    var commandFactory = new CommandFactory();
-    var networkService = new ServerNetworkService();
-    networkService.Initialize(transport, commandFactory, logger);
-
-    var engine = new KlothoEngine(simConfig, sessionConfig);
-    engine.Initialize(sim, networkService, logger, callbacks);
-    networkService.SubscribeEngine(engine);
-
-    networkService.CreateRoom("default", maxPlayers);
-    networkService.MaxSpectatorsPerRoom = maxSpectators;
-    if (!networkService.Listen("0.0.0.0", port, maxPlayers + maxSpectators))
+    if (!transport.Listen("0.0.0.0", port, maxRooms * (maxPlayersPerRoom + maxSpectatorsPerRoom)))
     {
         logger.ZLogError($"[BrawlerDedicatedServer] Failed to bind port {port} — exiting.");
         Environment.Exit(1);
     }
 
-    logger.ZLogInformation($"[BrawlerDedicatedServer] Server listening on port {port}, maxPlayers={maxPlayers}, maxSpectators={maxSpectators}, botCount={botCount}, tickInterval={tickIntervalMs}ms");
+    // RoomRouter + RoomManager (MaxRooms=1, room is created lazily on first RoomHandshakeMessage)
+    var router = new RoomRouter(transport, logger);
+    var roomManager = new RoomManager(transport, router, loggerFactory, new RoomManagerConfig
+    {
+        MaxRooms = maxRooms,
+        MaxPlayersPerRoom = maxPlayersPerRoom,
+        MaxSpectatorsPerRoom = maxSpectatorsPerRoom,
+        SimulationFactory = () => new EcsSimulation(
+            maxEntities: simConfig.MaxEntities,
+            maxRollbackTicks: 1,
+            deltaTimeMs: tickIntervalMs,
+            logger: logger,
+            assetRegistry: sharedRegistry),
+        SimulationConfigFactory = () => simConfig,
+        SessionConfigFactory = () => sessionConfig,
+        CallbacksFactory = (roomLogger) => new BrawlerServerCallbacks(roomLogger,
+            staticColliders,
+            FPNavMeshSerializer.Deserialize(navMeshBytes),
+            maxPlayersPerRoom,
+            botCount),
+    });
 
-    var loop = new DedicatedServerLoop(engine, transport, tickIntervalMs, logger);
+    logger.ZLogInformation(
+        $"[BrawlerDedicatedServer] Server listening on port {port}, maxPlayers={maxPlayersPerRoom}, maxSpectators={maxSpectatorsPerRoom}, botCount={botCount}, tickInterval={tickIntervalMs}ms");
+
+    // Main loop (includes Graceful Shutdown)
+    var loop = new ServerLoop(transport, roomManager, tickIntervalMs, logger);
     loop.Run();
-
-    networkService.LeaveRoom();
-    transport.Disconnect();
 
     logger.ZLogInformation($"[BrawlerDedicatedServer] Server stopped.");
 }
 
 // ═══════════════════════════════════════════════════════════
-// Multi-room (Phase 2)
+// Multi-room
 // ═══════════════════════════════════════════════════════════
 static void RunMultiRoom(string[] args)
 {
@@ -130,6 +146,10 @@ static void RunMultiRoom(string[] args)
     // Load config
     var simConfig = SimulationConfigLoader.Load(args, logger);
     var sessionConfig = SessionConfigLoader.Load(args, logger);
+#if KLOTHO_FAULT_INJECTION
+    xpTURN.Klotho.Diagnostics.FaultInjectionLoader.TryLoadAndApply(
+        ConfigPathResolver.Resolve(xpTURN.Klotho.Diagnostics.FaultInjectionLoader.DefaultFileName, args), logger);
+#endif
     int tickIntervalMs = simConfig.TickIntervalMs;
     var maxPlayersPerRoom = sessionConfig.MaxPlayers;
     var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
@@ -143,7 +163,7 @@ static void RunMultiRoom(string[] args)
     registryBuilder.RegisterRange(dataAssets);
     var sharedRegistry = registryBuilder.Build();
 
-    // Guarantee ThreadPool minimum threads (§2.3)
+    // Guarantee ThreadPool minimum threads
     int minWorker = Math.Max(Environment.ProcessorCount, maxRooms + 2);
     ThreadPool.SetMinThreads(minWorker, Environment.ProcessorCount);
 
@@ -166,6 +186,7 @@ static void RunMultiRoom(string[] args)
             maxEntities: simConfig.MaxEntities,
             maxRollbackTicks: 1,
             deltaTimeMs: tickIntervalMs,
+            logger: logger,
             assetRegistry: sharedRegistry),
         SimulationConfigFactory = () => simConfig,
         SessionConfigFactory = () => sessionConfig,
