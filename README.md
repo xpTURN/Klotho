@@ -106,11 +106,13 @@ Details: [Docs/BaseLibraries.md](Docs/BaseLibraries.md)
 ```
 Assets/Klotho/
 ├── Runtime/
-│   ├── Core/            KlothoEngine · KlothoSession · ISimulationCallbacks · IViewCallbacks
-│   │                    · ISimulationConfig · ISessionConfig · Command/Event/Pool families
+│   ├── Core/            KlothoEngine · KlothoSession · ISimulationCallbacks
+│   │                    · IViewCallbacks · ISimulationConfig · ISessionConfig
+│   │                    · Command/Event/Pool families
 │   ├── Input/           InputBuffer · SimpleInputPredictor
-│   ├── Network/         IKlothoNetworkService · ServerDrivenClientService · ServerNetworkService
-│   │                    · Spectator/Reconnect/LateJoin · Messages
+│   ├── Network/         IKlothoNetworkService · ServerDrivenClientService
+│   │                    · ServerNetworkService · Spectator/Reconnect/LateJoin
+│   │                    · Messages
 │   ├── State/           RingSnapshotManager
 │   ├── Serialization/   SpanWriter/Reader · SerializationBuffer
 │   ├── Replay/          IReplaySystem · ReplayRecorder · ReplayPlayer · LZ4 compression
@@ -167,9 +169,18 @@ public class HeroSystem : ISystem
 ```csharp
 public class MySimulationCallbacks : ISimulationCallbacks
 {
-    public void RegisterSystems(EcsSimulation sim) { /* AddSystem registrations */ }
-    public void OnInitializeWorld(IKlothoEngine engine) { /* spawn initial world */ }
-    public void OnPollInput(int playerId, int tick, ICommandSender sender) { /* send commands */ }
+    public void RegisterSystems(EcsSimulation sim) 
+    {
+         /* AddSystem registrations */
+    }
+    public void OnInitializeWorld(IKlothoEngine engine)
+    {
+        /* spawn initial world */
+    }
+    public void OnPollInput(int playerId, int tick, ICommandSender sender)
+    {
+        /* send commands */
+    }
 }
 
 public class MyViewCallbacks : IViewCallbacks
