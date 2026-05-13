@@ -78,6 +78,15 @@ namespace xpTURN.Klotho.Diagnostics
         public static int EmulatedRttMs;
 
         /// <summary>
+        /// RTT spike injection schedule. Entry = (atSecondsFromMatchStart, newRttMs).
+        /// Driver polls anchor-elapsed time once Phase == Playing and overwrites EmulatedRttMs
+        /// at each entry's atSec. Empty list = disabled (static EmulatedRttMs only).
+        /// Config-replicated: each client loads the same schedule from faultinjectionconfig.json
+        /// so all clients trigger spikes at the same anchor offset (drift = match-start receive jitter).
+        /// </summary>
+        public static readonly List<(float atSec, int rttMs)> EmulatedRttSchedule = new List<(float, int)>();
+
+        /// <summary>
         /// Server GC pause: blocks the server tick once when CurrentTick == ServerGcPauseAtTick,
         /// then auto-resets the trigger so it fires only once per arming.
         /// </summary>
@@ -120,6 +129,7 @@ namespace xpTURN.Klotho.Diagnostics
         public static void Reset()
         {
             EmulatedRttMs = 0;
+            EmulatedRttSchedule.Clear();
             ServerGcPauseMs = 0;
             ServerGcPauseAtTick = -1;
             DropSpawnCommandPlayerIds.Clear();

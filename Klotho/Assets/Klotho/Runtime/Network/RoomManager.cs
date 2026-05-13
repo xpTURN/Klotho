@@ -158,6 +158,7 @@ namespace xpTURN.Klotho.Network
             networkService.SubscribeEngine(engine);
 
             networkService.CreateRoom($"room-{roomId}", _config.MaxPlayersPerRoom);
+            networkService.SetRoomId(roomId);
             networkService.MaxSpectatorsPerRoom = _config.MaxSpectatorsPerRoom;
 
             var room = new Room(

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace xpTURN.Klotho.Network
 {
@@ -40,6 +41,13 @@ namespace xpTURN.Klotho.Network
         /// Disconnect a specific peer
         /// </summary>
         void DisconnectPeer(int peerId);
+
+        /// <summary>
+        /// Enumerate transport-level connected peer IDs. Used by zombie cleanup to find
+        /// peers that exist at the transport layer but are not tracked in service-level
+        /// state. Implementations may return an empty sequence if not supported.
+        /// </summary>
+        IEnumerable<int> GetConnectedPeerIds();
 
         /// <summary>
         /// Send data to a specific peer

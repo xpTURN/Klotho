@@ -11,7 +11,7 @@
 
 - A `.NET 8` console executable that runs **only the simulation** — no Unity, MonoBehaviour, scene, or rendering
 - The **authoritative server** for ServerDriven mode (`Mode = ServerDriven`) — clients send only input commands after `Connect`
-- Three execution modes: single-room (Phase 1) / multi-room (Phase 2) / E2E tests (`--test`)
+- Three execution modes: single-room (`MaxRooms = 1` over the same RoomManager infrastructure) / multi-room (`--multi`, `MaxRooms = N`) / E2E test runner (`--test`)
 - Uses **the same system set** (`BrawlerSimSetup.RegisterSystems`) as the Brawler client → determinism is guaranteed automatically
 - Logging is `ZLogger` console + daily rolling file (`Logs/Server_*.log`)
 
@@ -27,9 +27,11 @@ Tools/BrawlerDedicatedServer/
 ├── BrawlerDedicatedServer.sln
 ├── Program.cs                      — CLI entry (single-room · multi-room · test branches)
 ├── BrawlerServerCallbacks.cs       — ISimulationCallbacks impl (no view callbacks)
-├── MultiRoomTests.cs               — MockTransport-based E2E tests (#8–#15, 8 tests)
+├── MultiRoomTests.cs               — MockTransport-based E2E tests (Test08–Test15, 8 tests)
+├── SingleRoomLifecycleTests.cs     — MockTransport-based single-room lifecycle tests (SR1–SR4, 4 tests)
 ├── simulationconfig.json           — Mode/TickIntervalMs/MaxRollback/Prediction/etc.
 ├── sessionconfig.json              — AllowLateJoin/ReconnectTimeoutMs/MinPlayers/etc.
+├── faultinjectionconfig.json       — FaultInjectionLoader schema (KLOTHO_FAULT_INJECTION builds only)
 ├── build.sh                        — dotnet build -c Debug
 ├── publish.sh                      — dotnet publish -c Release -r osx-arm64 --self-contained
 └── Logs/                           — created at runtime
@@ -86,8 +88,8 @@ The actual file, verbatim:
 ```json
 {
   "Mode": "ServerDriven",
-  "TickIntervalMs": 50,
-  "InputDelayTicks": 0,
+  "TickIntervalMs": 25,
+  "InputDelayTicks": 4,
   "MaxRollbackTicks": 50,
   "SyncCheckInterval": 30,
   "UsePrediction": false,
@@ -98,19 +100,24 @@ The actual file, verbatim:
   "MaxUnackedInputs": 30,
   "ServerSnapshotRetentionTicks": 0,
   "SDInputLeadTicks": 4,
+  "LateJoinDelaySafety": 2,
+  "RttSanityMaxMs": 240,
 
   "EnableErrorCorrection": true,
+  "InterpolationDelayTicks": 2,
 
   "EventDispatchWarnMs": 5,
-  "TickDriftWarnMultiplier": 2
+  "TickDriftWarnMultiplier": 3
 }
 ```
 
 Key choices:
 - `Mode = ServerDriven` — the server collects, orders, and redistributes input
-- `TickIntervalMs = 50` → 20 Hz. **The host (server) propagates this value to guests via `SimulationConfigMessage`**, so clients simulate at the same tick rate using the server's value regardless of their local `USimulationConfig` ([SimulationConfigMessage.cs](../../Assets/Klotho/Runtime/Network/Messages/SimulationConfigMessage.cs); for spectators, `SimulationConfig` + `SessionConfig` ride along in [SpectatorAcceptMessage.cs](../../Assets/Klotho/Runtime/Network/Messages/SpectatorAcceptMessage.cs) so spectators enter with the same simulation / session parameters).
+- `TickIntervalMs = 25` → 40 Hz. **The host (server) propagates this value to guests via `SimulationConfigMessage`**, so clients simulate at the same tick rate using the server's value regardless of their local `USimulationConfig` ([SimulationConfigMessage.cs](../../Assets/Klotho/Runtime/Network/Messages/SimulationConfigMessage.cs); for spectators, `SimulationConfig` + `SessionConfig` ride along in [SpectatorAcceptMessage.cs](../../Assets/Klotho/Runtime/Network/Messages/SpectatorAcceptMessage.cs) so spectators enter with the same simulation / session parameters).
 - `UsePrediction = false` — the server doesn't need prediction
 - `SDInputLeadTicks = 4` — server-relative lead ticks; the buffer that absorbs client input latency
+- `LateJoinDelaySafety = 2`, `RttSanityMaxMs = 240` — feed the server-side `RecommendedExtraDelayCalculator` (Sync / LateJoin / Reconnect seed + mid-match push). See Specification.md §2.2.
+- `InterpolationDelayTicks = 2` — SD clients use this as the upper bound for the AdaptiveRenderClock
 
 ### H-3-2. sessionconfig.json
 
@@ -202,74 +209,89 @@ Key points:
 
 # Run (port=7777, botCount=0, logLevel=Warning)
 dotnet run --project BrawlerDedicatedServer.csproj -- 7777 0
+
+# With RTT metrics (match-identification telemetry)
+dotnet run --project BrawlerDedicatedServer.csproj -- 7777 0 --rtt-metrics
 ```
 
 Argument order: `<port> <botCount> [logLevel]`. Defaults when omitted: `7777 / 0 / Warning`.
 
-### H-5-2. Bootstrap Flow — `RunSingleRoom(args)`
+Optional flag — `--rtt-metrics`: toggles `ServerNetworkService.RttMetricsEnabled`, enabling per-sample `[Metrics][RttSample]` and per-match `[Metrics][RttMatch]` JSON-line emit. Off by default (zero overhead).
+
+### H-5-2. Bootstrap Flow — `RunSingleRoom(args, rttMetricsEnabled)`
+
+Single-room now reuses the same `RoomManager` + `RoomRouter` infrastructure as multi-room with `MaxRooms = 1`. The room is created lazily on the first `RoomHandshakeMessage` (`RoomId=0`).
 
 ```csharp
 // Excerpt from Program.cs RunSingleRoom (comments are explanatory)
+const int maxRooms = 1;
 
 var simConfig     = SimulationConfigLoader.Load(args, logger);
 var sessionConfig = SessionConfigLoader.Load(args, logger);
-var maxPlayers    = sessionConfig.MaxPlayers;
-var maxSpectators = sessionConfig.MaxSpectators;
+#if KLOTHO_FAULT_INJECTION
+FaultInjectionLoader.TryLoadAndApply(
+    ConfigPathResolver.Resolve(FaultInjectionLoader.DefaultFileName, args), logger);
+#endif
+var maxPlayersPerRoom    = sessionConfig.MaxPlayers;
+var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
 
-// 1. Pre-load data
+ServerNetworkService.RttMetricsEnabled = rttMetricsEnabled;
+
+// 1. Pre-load data — shared across rooms
 var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);
-var navMesh         = FPNavMeshSerializer.Deserialize(navMeshPath);
+var navMeshBytes    = File.ReadAllBytes(navMeshPath);              // deserialize fresh per room
 var dataAssets      = DataAssetReader.LoadMixedCollectionFromBytes(assetPath);
 
-// 2. Build AssetRegistry
 IDataAssetRegistryBuilder builder = new DataAssetRegistry();
 builder.RegisterRange(dataAssets);
-var assetRegistry = builder.Build();
+var sharedRegistry = builder.Build();
 
-// 3. Transport / Simulation / Callbacks
-var transport = new LiteNetLibTransport(logger);
-var sim = new EcsSimulation(
-    maxEntities: 256,
-    maxRollbackTicks: 1,
-    deltaTimeMs: simConfig.TickIntervalMs,
-    assetRegistry: assetRegistry);
+// 2. Single Transport
+var transport = new LiteNetLibTransport(logger, connectionKey: KLOTHO_CONNECTION_KEY);
+transport.Listen("0.0.0.0", port, maxRooms * (maxPlayersPerRoom + maxSpectatorsPerRoom));
 
-var callbacks = new BrawlerServerCallbacks(
-    logger, staticColliders, navMesh, maxPlayers, botCount);
-callbacks.RegisterSystems(sim);
-sim.LockAssetRegistry();     // finalize the DataAsset registry
+// 3. RoomRouter + RoomManager (MaxRooms=1, lazy CreateRoom on first RoomHandshakeMessage)
+var router = new RoomRouter(transport, logger);
+var roomManager = new RoomManager(transport, router, loggerFactory, new RoomManagerConfig
+{
+    MaxRooms             = maxRooms,
+    MaxPlayersPerRoom    = maxPlayersPerRoom,
+    MaxSpectatorsPerRoom = maxSpectatorsPerRoom,
+    SimulationFactory    = () => new EcsSimulation(
+        maxEntities: simConfig.MaxEntities,
+        maxRollbackTicks: 1,
+        deltaTimeMs: simConfig.TickIntervalMs,
+        logger: logger,
+        assetRegistry: sharedRegistry),
+    SimulationConfigFactory = () => simConfig,
+    SessionConfigFactory    = () => sessionConfig,
+    CallbacksFactory        = (roomLogger) => new BrawlerServerCallbacks(
+        roomLogger,
+        staticColliders,
+        FPNavMeshSerializer.Deserialize(navMeshBytes),
+        maxPlayersPerRoom,
+        botCount),
+});
 
-// 4. Network + Engine
-var commandFactory  = new CommandFactory();
-var networkService  = new ServerNetworkService();
-networkService.Initialize(transport, commandFactory, logger);
-
-var engine = new KlothoEngine(simConfig, sessionConfig);
-engine.Initialize(sim, networkService, logger, callbacks);
-networkService.SubscribeEngine(engine);
-
-// 5. Create the room + listen
-networkService.CreateRoom("default", maxPlayers);
-networkService.MaxSpectatorsPerRoom = maxSpectators;
-networkService.Listen("0.0.0.0", port, maxPlayers + maxSpectators);
-
-// 6. Main loop
-var loop = new DedicatedServerLoop(engine, transport, simConfig.TickIntervalMs, logger);
+// 4. Main loop (graceful shutdown included)
+var loop = new ServerLoop(transport, roomManager, simConfig.TickIntervalMs, logger);
 loop.Run();          // Ctrl+C (SIGINT) → graceful shutdown
-
-networkService.LeaveRoom();
-transport.Disconnect();
 ```
 
-A single-room server creates exactly **one each** of `ServerNetworkService`, `KlothoEngine`, and `LiteNetLibTransport`. The difference from Unity is creating, initializing, and subscribing the `KlothoEngine` directly — without `UKlothoBehaviour`.
+Notes:
+- The legacy direct path (`new ServerNetworkService()` + `new KlothoEngine()` constructed inline) has been removed. Per-room instances are produced by `RoomManager` via the injected factories — single-room is just the `MaxRooms = 1` case of the same path.
+- The client must send `RoomHandshakeMessage` with `RoomId = 0` for single-room (vs `1..maxRooms-1` for multi-room slots).
+- `#if KLOTHO_FAULT_INJECTION` block loads `faultinjectionconfig.json` from the configured config dir before `ServerNetworkService.RttMetricsEnabled` is set.
 
-### H-5-3. The Main Loop — `DedicatedServerLoop`
+### H-5-3. The Main Loop — `ServerLoop`
 
-Defined in `Assets/Klotho/Runtime/Core/Server/DedicatedServerLoop.cs`. In one iteration it handles:
+Defined in `Assets/Klotho/Runtime/Core/Server/ServerLoop.cs`. Per iteration:
 
-- `transport.PollEvents()` — socket receive
-- `engine.Update(dt)` — accumulate / execute ticks
-- SIGINT (`Ctrl+C`) detection → set the loop-exit flag → `loop.Run()` returns
+- `transport.PollEvents()` — socket receive (single port, all rooms)
+- `roomManager.Tick(dt)` — accumulate / execute ticks per room
+- SIGINT (`Ctrl+C`) detection → drain in-flight ticks → graceful shutdown → `loop.Run()` returns
+
+The previous `DedicatedServerLoop` (single-engine variant) has been retired in favor of `ServerLoop`, which works uniformly for `MaxRooms = 1` and multi-room configurations.
 
 ---
 
@@ -280,9 +302,12 @@ Defined in `Assets/Klotho/Runtime/Core/Server/DedicatedServerLoop.cs`. In one it
 ```bash
 # Single port, maxRooms=4, 0 bots
 dotnet run --project BrawlerDedicatedServer.csproj -- --multi 7777 4 0
+
+# With RTT metrics
+dotnet run --project BrawlerDedicatedServer.csproj -- --multi 7777 4 0 --rtt-metrics
 ```
 
-Argument order: `--multi <port> <maxRooms> <botCount> [logLevel]`
+Argument order: `--multi <port> <maxRooms> <botCount> [logLevel]`. The `--rtt-metrics` flag (position-independent) is the same toggle as in single-room mode.
 
 ### H-6-2. Key Difference — `RoomManager` + `RoomRouter`
 
@@ -316,6 +341,7 @@ var roomManager = new RoomManager(transport, router, loggerFactory, new RoomMana
         maxEntities: simConfig.MaxEntities,
         maxRollbackTicks: 1,
         deltaTimeMs: simConfig.TickIntervalMs,
+        logger: logger,
         assetRegistry: sharedRegistry),
     SimulationConfigFactory = () => simConfig,
     SessionConfigFactory    = () => sessionConfig,
@@ -346,7 +372,9 @@ Key points:
 dotnet run --project BrawlerDedicatedServer.csproj -- --test
 ```
 
-Runs `MultiRoomTests.RunAll()` — verifies the server components only, with **MockTransport**, no real network or game logic.
+Runs both `MultiRoomTests.RunAll()` and `SingleRoomLifecycleTests.RunAll()` — verifies the server components only, with **MockTransport**, no real network or game logic. Each suite is wrapped by a `SafeRunSuite` shim that catches and reports crashes independently, so one suite's blow-up does not mask failures in the other. The exit code is the sum of failures across suites.
+
+**MultiRoomTests** — multi-room behavior under `MaxRooms > 1`.
 
 | # | Name | Verifies |
 |---|---|---|
@@ -359,7 +387,16 @@ Runs `MultiRoomTests.RunAll()` — verifies the server components only, with **M
 | #14 | GracefulShutdown | Blocks new connections during shutdown; in-flight rooms run to completion |
 | #15 | ThreadSafety | Concurrent `RoomManager` operations from multiple threads |
 
-The exit code is the `failed` count — CI can use the `exit status` directly to determine pass/fail.
+**SingleRoomLifecycleTests** — single-room (MaxRooms=1) lazy-create / drain / recreate cycle.
+
+| # | Name | Verifies |
+|---|---|---|
+| SR1 | LazyCreateOnFirstHandshake | Room is created on the first `RoomHandshakeMessage`, not at server boot |
+| SR2 | LobbyDrainAndRecreate | After all peers leave during Lobby → Draining → Disposing → fresh recreate on next handshake |
+| SR3 | ShouldDrainTriggerCondition | Drain triggers only when the configured condition is satisfied |
+| SR4 | DrainPhaseCapturedAtTransition | The phase captured at the drain-trigger boundary is the one that owns the transition |
+
+The exit code is the sum of `failed` counts across both suites — CI can use the `exit status` directly to determine pass/fail. Each suite is independently wrapped by `SafeRunSuite` so an exception in one suite does not mask failures in the other.
 
 ---
 
@@ -395,7 +432,7 @@ Changing `publish.sh` to a different RID (e.g., `linux-x64`, `win-x64`) produces
 | View / UI | `EntityViewUpdater` + `CharacterView`, etc. | None |
 | NavMesh / StaticCollider | Editor export loaded via Addressables / TextAsset | Editor export shipped alongside as `.bytes` |
 | DataAsset loading | `USimulationConfig` · `DataAssetRegistry.Build` (Unity bootstrap) | `DataAssetReader.LoadMixedCollectionFromBytes` → `DataAssetRegistry` |
-| Network | `KlothoSession.Create` + `JoinGame` | `ServerNetworkService` (single) / `RoomManager + RoomRouter` (multi) directly |
+| Network | `KlothoSession.Create` + `JoinGame` | `RoomManager + RoomRouter` directly — single-room is `MaxRooms = 1`, multi-room is `MaxRooms = N`. Per-room `ServerNetworkService` is built by `RoomManager` via the injected factories |
 
 The core of determinism is **"do not configure the system set differently"**. Both client and server go through `BrawlerSimSetup`, so as long as that contract is preserved, DesyncDetector and SyncTest work correctly.
 
@@ -407,7 +444,7 @@ The core of determinism is **"do not configure the system set differently"**. Bo
 - **No view callbacks** — if the server needs `OnTickExecuted` / `OnGameStart`, those are not part of `ISimulationCallbacks`, so a separate subscription is required (the current Brawler server doesn't use them).
 - **Single shared port (multi-room)** — convenient from a firewall / NAT / port-scan perspective, but to isolate a particular room, running multiple single-room server processes is simpler.
 - **`MaxRollbackTicks = 1`** — the server is its own authority, so the rollback buffer is minimized. Increasing this only wastes memory.
-- **Default log level `Warning`** — during development, pass `Information` / `Debug` as the 4th CLI argument. E.g., `dotnet run -- 7777 0 Information`.
+- **Default log level `Warning`** — during development, pass `Information` / `Debug` as the 3rd positional argument (`args[2]`). E.g., `dotnet run -- 7777 0 Information`. The `--rtt-metrics` flag is position-independent and parsed separately.
 
 ---
 
@@ -422,4 +459,4 @@ When building **a dedicated server for your own game** modeled after Brawler:
 5. Author `MyGameServerCallbacks : ISimulationCallbacks` mirroring `BrawlerServerCallbacks` (call `MyGameSimSetup.RegisterSystems` from `RegisterSystems`).
 6. `Program.cs` is mostly reusable — adjust only game-specific parameters (botCount, etc.).
 7. Copy `sessionconfig.json` / `simulationconfig.json` and tune `Mode` · `TickIntervalMs` · `MaxEntities` to your game.
-8. To activate the `dotnet run -- --test` test suite, copy `MultiRoomTests.cs` and add game-specific assertions.
+8. To activate the `dotnet run -- --test` test suites, copy both `MultiRoomTests.cs` (multi-room behavior) and `SingleRoomLifecycleTests.cs` (single-room lazy-create / drain / recreate). Each suite is independently wrapped by `SafeRunSuite` in `Program.cs`, so a crash in one does not mask failures in the other.

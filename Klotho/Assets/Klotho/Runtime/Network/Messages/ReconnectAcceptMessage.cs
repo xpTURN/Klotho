@@ -27,5 +27,8 @@ namespace xpTURN.Klotho.Network
         [KlothoOrder] public int DesyncThresholdForResync;
         [KlothoOrder] public int CountdownDurationMs;
         [KlothoOrder] public int CatchupMaxTicksPerFrame;
+
+        // Server-recommended extra InputDelay ticks for catchup-gap compensation.
+        [KlothoOrder] public int RecommendedExtraDelay;
     }
 }

@@ -100,8 +100,15 @@ Supports client-side prediction, rollback, and frame synchronization.
 - **IServerDrivenNetworkService / ServerDrivenClientService** — server-driven-mode client service
 - **ServerNetworkService** — server-side network service (input collection, frame verification, state broadcast)
 - **Handshake protocol** — SyncRequest → SyncReply → SyncComplete → Ready → GameStart
+- **Bootstrap handshake (SD)** — server-driven first-tick alignment: BootstrapBegin → PlayerBootstrapReady (replaces implicit start tick)
 - **Reconnect protocol** — ReconnectRequest → ReconnectAccept/Reject
 - **Late-join protocol** — FullStateRequest → FullStateResponse → LateJoinAccept
+- **Dynamic InputDelay / RecommendedExtraDelay** — RTT-driven extra InputDelay seeded on Sync / LateJoin / Reconnect (via `RecommendedExtraDelayCalculator`) and pushed mid-match (`RecommendedExtraDelayUpdate`, asymmetric UP/DOWN threshold, rate-limited per peer); applied via engine `ApplyExtraDelay` / `EscalateExtraDelay` / `OnExtraDelayChanged`
+- **Quorum-miss watchdog (P2P)** — presumed-drop a peer whose input is missing at the verified head for `QuorumMissDropTicks`; reactive empty-fill activates before transport DisconnectTimeout. False-positive rollback on late real input
+- **InputBuffer seal (P2P relay)** — sealed `(tick, playerId)` placeholders suppress relay of late real packets after the chain has advanced, preventing host↔guest divergence
+- **PlayerRttSmoother** — 5-sample sliding median per player (≈5s window) feeding the dynamic-delay push decision
+- **Command rejection feedback (SD)** — server unicast `CommandRejected` (PeerMismatch / PastTick / ToleranceExceeded / Duplicate) surfaced as engine `OnCommandRejected`
+- **Match-end metrics** — JSON-line emit (`[Metrics][RttMatch]`, `[Metrics][BurstDuration]`, `[Metrics][PresumedDrop]`, `[Metrics][DynamicDelay]`, `[Metrics][LateJoin/Reconnect/Sync]`, `[Metrics][LagReductionLatency]`)
 - **Spectator protocol** — SpectatorJoin → SpectatorAccept → SpectatorInput/Leave
 - **ISpectatorService / SpectatorService** — spectator-entry / state-sync management
 - **Message types**
@@ -109,8 +116,9 @@ Supports client-side prediction, rollback, and frame synchronization.
   - Handshake: SyncRequest, SyncReply, SyncComplete, PlayerJoin, RoomHandshake
   - Reconnect: ReconnectRequest, ReconnectAccept, ReconnectReject
   - Late join: LateJoinAccept
+  - Dynamic delay: RecommendedExtraDelayUpdate
   - Spectator: SpectatorJoin, SpectatorAccept, SpectatorInput, SpectatorLeave
-  - Server-driven: ClientInput, ClientInputBundle, VerifiedState, InputAck
+  - Server-driven: ClientInput, ClientInputBundle, VerifiedState, InputAck, PlayerBootstrapReady, BootstrapBegin, CommandRejected
 - **Multi-room server** — Room, RoomManager, RoomManagerConfig, RoomRouter, RoomScopedTransport
   - ServerLoop — server main loop coordinating multiple rooms
   - ServerInputCollector — server-side input collector

@@ -77,6 +77,13 @@ namespace xpTURN.Klotho.Network
             {
                 _reconnectState = ReconnectState.None;
                 Phase = SessionPhase.Playing;
+                // Reconnect path bypasses the cold-start LateJoin transition chain
+                // (WaitingForFullState → CatchingUp → Active), leaving _lateJoinState at None.
+                // HandleCatchupInputMessage's state guard then silent-drops the host's catchup
+                // batch for FullStateTick, leaving _inputBuffer[FullStateTick] empty for other
+                // players and stalling chain advance permanently. Set to Active here so the
+                // batch passes the guard and normal P2P broadcast also flows in.
+                _lateJoinState = LateJoinState.Active;
                 OnReconnected?.Invoke();
                 _logger?.ZLogInformation($"[KlothoNetworkService][Reconnect] Reconnect complete: tick={msg.Tick}");
             }

@@ -118,6 +118,29 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         int InterpolationDelayTicks { get; }
 
+        /// <summary>
+        /// Safety margin (ticks) added to RTT-based extra-delay computation for LateJoin/Reconnect.
+        /// Also used as the standalone fallback value when the server-side avgRtt is unavailable or out of sane range.
+        /// </summary>
+        int LateJoinDelaySafety { get; }
+
+        /// <summary>
+        /// Upper bound (ms) for accepting avgRtt as a sane RTT measurement.
+        /// Values exceeding this fall back to <see cref="LateJoinDelaySafety"/> only.
+        /// </summary>
+        int RttSanityMaxMs { get; }
+
+        /// <summary>
+        /// P2P quorum-miss watchdog threshold (ticks). If a remote peer's input is missing at
+        /// _lastVerifiedTick + 1 for at least this many ticks (CurrentTick - _lastVerifiedTick),
+        /// the peer is presumed-dropped and reactive empty-fill is activated before the
+        /// transport-level DisconnectTimeout fires.
+        /// Range: 0 or greater. 0 disables the watchdog. Typically 20 (1s @ 50ms tick).
+        /// Tuning: too low causes false-positive rollback thrash on normal jitter; too high
+        /// delays recovery. Safe range 10~80, sweet spot 20~40.
+        /// </summary>
+        int QuorumMissDropTicks { get; }
+
         // --- Diagnostics (DEVELOPMENT_BUILD / UNITY_EDITOR only) ---
 
         /// <summary>

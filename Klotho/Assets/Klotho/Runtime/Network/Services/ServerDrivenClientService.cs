@@ -22,6 +22,10 @@ namespace xpTURN.Klotho.Network
         private MessageSerializer _messageSerializer;
 
         private IKlothoEngine _engine;
+        // Buffered extra-delay value when handshake handlers (Sync/LateJoin/Reconnect) fire before
+        // SubscribeEngine is called. Applied on SubscribeEngine. Cleared after apply.
+        private int? _pendingExtraDelayApply;
+        private ExtraDelaySource _pendingExtraDelaySource;
         private ISimulationConfig _simConfig;
         private ISessionConfig _sessionConfig;
         private IReconnectCredentialsStore _reconnectCredentialsStore;
@@ -60,6 +64,7 @@ namespace xpTURN.Klotho.Network
         private readonly ClientInputBundleMessage _bundleCache = new ClientInputBundleMessage();
         private readonly PlayerReadyMessage _playerReadyCache = new PlayerReadyMessage();
         private readonly RoomHandshakeMessage _roomHandshakeCache = new RoomHandshakeMessage();
+        private readonly PongMessage _pongMessageCache = new PongMessage();
 
         // ── IKlothoNetworkService properties ────────────────────
 
@@ -185,6 +190,28 @@ namespace xpTURN.Klotho.Network
             _sharedClock = new SharedTimeClock(result.SharedEpoch, result.ClockOffset);
             Phase = SessionPhase.Synchronized;
 
+            // KlothoConnection consumes the handshake messages before this service is wired up, so the
+            // per-kind handlers below never run in the guest path. Forward the server-recommended
+            // extra delay explicitly per JoinKind (buffered until SubscribeEngine).
+            int seedExtraDelay;
+            ExtraDelaySource seedSource;
+            switch (result.Kind)
+            {
+                case JoinKind.LateJoin:
+                    seedExtraDelay = result.LateJoinPayload.AcceptMessage.RecommendedExtraDelay;
+                    seedSource = ExtraDelaySource.LateJoin;
+                    break;
+                case JoinKind.Reconnect:
+                    seedExtraDelay = result.ReconnectPayload.AcceptMessage.RecommendedExtraDelay;
+                    seedSource = ExtraDelaySource.Reconnect;
+                    break;
+                default:
+                    seedExtraDelay = result.RecommendedExtraDelay;
+                    seedSource = ExtraDelaySource.Sync;
+                    break;
+            }
+            ApplyOrPendExtraDelay(seedExtraDelay, seedSource);
+
             _transport.OnDataReceived += HandleDataReceived;
             _transport.OnConnected += HandleConnected;
             _transport.OnDisconnected += HandleDisconnected;
@@ -195,7 +222,31 @@ namespace xpTURN.Klotho.Network
             _engine = engine;
             _simConfig = engine.SimulationConfig;
             _sessionConfig = engine.SessionConfig;
+            // Drain any extra-delay value buffered before the engine was ready (Sync/LateJoin/Reconnect
+            // handshake handlers fire before SubscribeEngine in the SD client setup sequence).
+            if (_pendingExtraDelayApply.HasValue)
+            {
+                engine.ApplyExtraDelay(_pendingExtraDelayApply.Value, _pendingExtraDelaySource);
+                _pendingExtraDelayApply = null;
+            }
             engine.OnCatchupComplete += HandleCatchupComplete;
+        }
+
+        // Applies the value immediately if the engine is ready, otherwise buffers it for SubscribeEngine.
+        // Called from handshake handlers (Sync/LateJoin/Reconnect) where the engine may not yet exist.
+        // Mid-match RecommendedExtraDelayUpdate handler does not use this — engine is guaranteed ready
+        // when that message is received (server gates push on Phase == Playing).
+        internal void ApplyOrPendExtraDelay(int delay, ExtraDelaySource source)
+        {
+            if (_engine != null)
+            {
+                _engine.ApplyExtraDelay(delay, source);
+            }
+            else
+            {
+                _pendingExtraDelayApply = delay;
+                _pendingExtraDelaySource = source;
+            }
         }
 
         /// <summary>
@@ -487,6 +538,25 @@ namespace xpTURN.Klotho.Network
                     _logger?.ZLogInformation($"[SDClientService] CommandRejected received: tick={rejectMsg.Tick}, cmdTypeId={rejectMsg.CommandTypeId}, reason={rejectMsg.ReasonEnum}");
                     OnCommandRejected?.Invoke(rejectMsg.Tick, rejectMsg.CommandTypeId, rejectMsg.ReasonEnum);
                     break;
+
+                case RecommendedExtraDelayUpdateMessage extraDelayMsg:
+                    HandleRecommendedExtraDelayUpdate(extraDelayMsg);
+                    break;
+
+                case PingMessage pingMsg:
+                    HandlePingMessage(peerId, pingMsg);
+                    break;
+            }
+        }
+
+        private void HandlePingMessage(int peerId, PingMessage msg)
+        {
+            var pong = _pongMessageCache;
+            pong.Timestamp = msg.Timestamp;
+            pong.Sequence = msg.Sequence;
+            using (var serialized = _messageSerializer.SerializePooled(pong))
+            {
+                _transport.Send(peerId, serialized.Data, serialized.Length, DeliveryMethod.Unreliable);
             }
         }
 
@@ -527,8 +597,16 @@ namespace xpTURN.Klotho.Network
 
             _localPlayerId = msg.PlayerId;
             _sharedClock = new SharedTimeClock(msg.SharedEpoch, msg.ClockOffset);
+            ApplyOrPendExtraDelay(msg.RecommendedExtraDelay, ExtraDelaySource.Sync);
             Phase = SessionPhase.Synchronized;
             OnLocalPlayerIdAssigned?.Invoke(_localPlayerId);
+        }
+
+        private void HandleRecommendedExtraDelayUpdate(RecommendedExtraDelayUpdateMessage msg)
+        {
+            _engine?.ApplyExtraDelay(msg.RecommendedExtraDelay, ExtraDelaySource.DynamicPush);
+            _logger?.ZLogInformation(
+                $"[SDClientService][DynamicDelay] Update applied: newDelay={msg.RecommendedExtraDelay}, avgRtt={msg.AvgRttMs}ms");
         }
 
         private void HandleGameStartMessage(GameStartMessage msg)
@@ -612,6 +690,7 @@ namespace xpTURN.Klotho.Network
 
             OnLocalPlayerIdAssigned?.Invoke(_localPlayerId);
             _engine?.ExpectFullState();
+            ApplyOrPendExtraDelay(msg.RecommendedExtraDelay, ExtraDelaySource.LateJoin);
             _logger?.ZLogInformation(
                 $"[SDClientService] Late join accepted: playerId={msg.PlayerId}, playerCount={msg.PlayerCount}");
         }
@@ -690,6 +769,7 @@ namespace xpTURN.Klotho.Network
             }
 
             _reconnectState = ReconnectState.WaitingForFullState;
+            ApplyOrPendExtraDelay(msg.RecommendedExtraDelay, ExtraDelaySource.Reconnect);
             _logger?.ZLogInformation($"[SDClientService] Reconnect accepted: playerId={msg.PlayerId}");
         }
 

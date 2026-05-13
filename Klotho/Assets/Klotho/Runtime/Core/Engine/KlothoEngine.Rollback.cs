@@ -6,6 +6,10 @@ using ZLogger;
 using xpTURN.Klotho.Input;
 using xpTURN.Klotho.State;
 
+#if KLOTHO_FAULT_INJECTION
+using xpTURN.Klotho.Diagnostics;
+#endif
+
 namespace xpTURN.Klotho.Core
 {
     /// <summary>
@@ -206,6 +210,10 @@ namespace xpTURN.Klotho.Core
 
             _logger?.ZLogWarning($"[KlothoEngine][Rollback] complete: {resolvedTick} -> {CurrentTick}");
             OnRollbackExecuted?.Invoke(fromTick, resolvedTick);
+
+#if KLOTHO_FAULT_INJECTION
+            RttSpikeMetricsCollector.OnRollback(fromTick - resolvedTick);
+#endif
 
 #if DEBUG
             _rollbackStats.TotalRollbacks++;

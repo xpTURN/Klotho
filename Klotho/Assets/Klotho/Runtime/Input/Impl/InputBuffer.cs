@@ -27,6 +27,12 @@ namespace xpTURN.Klotho.Input
         private readonly List<ICommand> _commandListCache = new List<ICommand>();
         private readonly List<int> _ticksToRemoveCache = new List<int>();
 
+        // (tick << 32) | (uint)playerId — entries sealed by range fill. AddCommand skips any
+        // later real command arrival at a sealed (tick, playerId) to prevent InputBuffer ↔
+        // simulation state divergence (the empty placeholder has already been consumed by chain
+        // advance). Cleared by ClearBefore for collected ticks.
+        private readonly HashSet<long> _sealedTickPlayer = new HashSet<long>();
+
         private ILogger _logger;
 
         public void SetLogger(ILogger logger) => _logger = logger;
@@ -71,6 +77,16 @@ namespace xpTURN.Klotho.Input
             int tick = command.Tick;
             int playerId = command.PlayerId;
 
+            // Seal guard: if this (tick, playerId) was filled with an empty placeholder by the
+            // range fill path and chain has already advanced past it, silently drop the late
+            // real command to keep InputBuffer and simulation state consistent.
+            long sealKey = ((long)tick << 32) | (uint)playerId;
+            if (_sealedTickPlayer.Contains(sealKey))
+            {
+                CommandPool.Return(command);
+                return;
+            }
+
             if (!_commands.TryGetValue(tick, out var tickCommands))
             {
                 // Get from dictionary pool (GC prevention)
@@ -81,6 +97,25 @@ namespace xpTURN.Klotho.Input
             tickCommands[playerId] = command;
 
             UpdateBounds(tick);
+        }
+
+        // Mark (tick, playerId) as sealed by an empty range-fill placeholder. Any subsequent
+        // AddCommand for the same key (e.g. delayed real packet) is silently dropped — see
+        // AddCommand seal guard. Seals at ticks below cleanupTick are removed by ClearBefore
+        // in lockstep with the buffer entries.
+        public void SealEmpty(int tick, int playerId)
+        {
+            long sealKey = ((long)tick << 32) | (uint)playerId;
+            _sealedTickPlayer.Add(sealKey);
+        }
+
+        // Returns true if (tick, playerId) was previously sealed via SealEmpty and not yet
+        // cleared by ClearBefore. Used by the network layer to suppress relay of late real
+        // packets that would overwrite the empty placeholder on receiving peers.
+        public bool IsSealed(int tick, int playerId)
+        {
+            long sealKey = ((long)tick << 32) | (uint)playerId;
+            return _sealedTickPlayer.Contains(sealKey);
         }
 
         private void AddSystemCommand(ICommand command)
@@ -127,6 +162,58 @@ namespace xpTURN.Klotho.Input
         {
             return _commands.ContainsKey(tick) && _commands[tick].Count > 0;
         }
+
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+        public void DumpTickRange(int fromTick, int toTick)
+        {
+            if (_logger == null)
+                return;
+
+            var sb = new System.Text.StringBuilder();
+            for (int t = fromTick; t <= toTick; t++)
+            {
+                sb.Append("tick=").Append(t).Append(":[");
+                if (_commands.TryGetValue(t, out var tickCommands) && tickCommands.Count > 0)
+                {
+                    bool first = true;
+                    foreach (var kv in tickCommands)
+                    {
+                        if (!first) sb.Append(',');
+                        first = false;
+                        sb.Append("pid=").Append(kv.Key);
+                    }
+                }
+                sb.Append("] ");
+            }
+            _logger.ZLogWarning($"[InputBuffer][DumpTickRange] from={fromTick}, to={toTick}, oldest={OldestTick}, newest={NewestTick}, {sb}");
+        }
+
+        // Emits a warning for each tick in (verifiedTick, beforeTick) that still holds
+        // player commands at the moment of cleanup. Surfaces host self-wipe during P2P
+        // quorum stall — wiped commands past the verified horizon are unrecoverable.
+        public void LogPendingWipe(int beforeTick, int verifiedTick, int currentTick)
+        {
+            if (_logger == null)
+                return;
+
+            int from = System.Math.Max(0, verifiedTick + 1);
+            for (int t = from; t < beforeTick; t++)
+            {
+                if (!_commands.TryGetValue(t, out var tickCommands) || tickCommands.Count == 0)
+                    continue;
+
+                var sb = new System.Text.StringBuilder();
+                bool first = true;
+                foreach (var kv in tickCommands)
+                {
+                    if (!first) sb.Append(',');
+                    first = false;
+                    sb.Append("pid=").Append(kv.Key);
+                }
+                _logger.ZLogWarning($"[InputBuffer][Cleanup] Pending Input WIPED: tick={t}, commands=[{sb}], _lastVerifiedTick={verifiedTick}, CurrentTick={currentTick}, lag={currentTick - verifiedTick}");
+            }
+        }
+#endif
 
         public bool HasCommandForTick(int tick, int playerId)
         {
@@ -192,6 +279,12 @@ namespace xpTURN.Klotho.Input
                         CommandPool.Return(list[j]);
                 }
                 _systemCommands.Remove(t);
+            }
+
+            // Discard seals at ticks below cleanup horizon in lockstep with buffer.
+            if (_sealedTickPlayer.Count > 0)
+            {
+                _sealedTickPlayer.RemoveWhere(key => (int)(key >> 32) < tick);
             }
 
             // Recalculate bounds
@@ -261,6 +354,8 @@ namespace xpTURN.Klotho.Input
                     CommandPool.Return(list[i]);
             }
             _systemCommands.Clear();
+
+            _sealedTickPlayer.Clear();
 
             _oldestTick = int.MaxValue;
             _newestTick = int.MinValue;

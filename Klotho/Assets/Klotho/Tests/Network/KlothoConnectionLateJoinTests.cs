@@ -243,6 +243,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void FlushSendQueue() { }
             public void Disconnect() { IsConnected = false; }
             public void DisconnectPeer(int peerId) { }
+            public System.Collections.Generic.IEnumerable<int> GetConnectedPeerIds() => System.Linq.Enumerable.Empty<int>();
 
             public void FireConnected() => OnConnected?.Invoke();
             // Default reason simulates a non-local disconnect during handshake (typical test scenario).

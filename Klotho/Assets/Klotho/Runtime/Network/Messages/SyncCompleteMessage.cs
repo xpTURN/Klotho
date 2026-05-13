@@ -19,5 +19,10 @@ namespace xpTURN.Klotho.Network
 
         [KlothoOrder]
         public long ClockOffset;
+
+        // Server-recommended extra InputDelay ticks for normal-join player seed.
+        // Trailing field — backward-compat with older clients via deserialize underrun (server-first deploy assumption).
+        [KlothoOrder]
+        public int RecommendedExtraDelay;
     }
 }

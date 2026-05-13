@@ -56,6 +56,7 @@ namespace xpTURN.Klotho.Core
         public int LocalPlayerId => _networkService?.LocalPlayerId ?? 0;
         public int TickInterval => _simConfig.TickIntervalMs;
         public int InputDelay => _simConfig.InputDelayTicks;
+        public int RecommendedExtraDelay => _recommendedExtraDelay;
 
         public event Action OnGameStart;
         public event Action<int> OnPreTick;
@@ -65,6 +66,7 @@ namespace xpTURN.Klotho.Core
         public event Action<int, int> OnRollbackExecuted;
         public event Action<int, string> OnRollbackFailed;
         public event Action<int> OnFrameVerified;
+        public event Action OnChainAdvanceBreak;
         public event Action<int, SimulationEvent> OnEventPredicted;
         public event Action<int, SimulationEvent> OnEventConfirmed;
         public event Action<int, SimulationEvent> OnEventCanceled;
@@ -82,6 +84,24 @@ namespace xpTURN.Klotho.Core
         private ISimulationCallbacks _simulationCallbacks;
         private IViewCallbacks _viewCallbacks;
         private CommandSender _commandSender;
+
+        // Server-recommended extra InputDelay ticks. Seeded on LateJoin/Reconnect accept and updated by
+        // periodic server push (mid-match RTT shifts) and client-reactive escalation.
+        private int _recommendedExtraDelay;
+
+        // Last cmd.Tick sent — used for monotonic clamp on Reconnect-induced delay decreases.
+        // Sentinel int.MinValue: no prev cmd. First cmd trivially passes (targetTick > int.MinValue + 1).
+        private int _lastSentCmdTick = int.MinValue;
+
+        // [Metrics][LagReductionLatency] tracker — measures actual clamp resolution time after
+        // an ApplyExtraDelay decrease. Cleared after the first non-clamped InputCommand following the decrease.
+        private bool _lagReductionPending;
+        private int _lagReductionPrevDelay;
+        private int _lagReductionNewDelay;
+        private int _lagReductionStartTick;
+
+        // Test-only read-only accessor for _lagReductionPending. Production code must not depend on this.
+        internal bool LagReductionPendingForTest => _lagReductionPending;
 
         private sealed class CommandSender : ICommandSender
         {
@@ -133,6 +153,12 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         public bool IsServer => _serverDrivenNetwork?.IsServer ?? false;
 
+        /// <summary>
+        /// Whether the role is host in P2P mode. Returns false in SD mode or P2P guest.
+        /// Delegates to the underlying network service; orthogonal to IsServer.
+        /// </summary>
+        public bool IsHost => _networkService?.IsHost ?? false;
+
         // Simulation stage. Default is Forward.
         // Switches to Resimulate when entering re-simulation, and returns to Forward immediately after.
         public SimulationStage Stage { get; private set; } = SimulationStage.Forward;
@@ -172,8 +198,8 @@ namespace xpTURN.Klotho.Core
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
         private long _lastTickWallMs;
 
-        // Diagnostic — throttled chain-advance lag log.
-        private long _lastChainLagLogMs;
+        // Diagnostic — throttled chain-stall log.
+        private long _lastChainStallLogMs;
 #endif
 
         /// <summary>
@@ -786,36 +812,79 @@ namespace xpTURN.Klotho.Core
             FlushPendingRollback();
 
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
-            // Chain-advance lag warning (throttled 1s).
-            // If lag >= MaxRollbackTicks + CLEANUP_MARGIN_TICKS, pending Synced events at older
-            // ticks are at risk of permanent wipe by CleanupOldData. Indicates network/sim issue.
+            // Chain-stall warning (throttled 1s).
+            // After CleanupOldData cap on _lastVerifiedTick, wipe is prevented when lag is high,
+            // but the stall itself still indicates a network/sim issue worth surfacing.
             {
                 int lag = CurrentTick - _lastVerifiedTick;
-                int wipeThreshold = _simConfig.MaxRollbackTicks + CLEANUP_MARGIN_TICKS;
-                if (lag >= wipeThreshold)
+                int stallWarnThreshold = _simConfig.MaxRollbackTicks + CLEANUP_MARGIN_TICKS;
+                if (lag >= stallWarnThreshold)
                 {
                     long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    if (nowMs - _lastChainLagLogMs >= 1000)
+                    if (nowMs - _lastChainStallLogMs >= 1000)
                     {
-                        _lastChainLagLogMs = nowMs;
-                        _logger?.ZLogWarning($"[KlothoEngine][ChainLag] CRITICAL: lag={lag} >= wipeThreshold={wipeThreshold} (CurrentTick={CurrentTick}, _lastVerifiedTick={_lastVerifiedTick}) — Synced events at older ticks may be wiped");
+                        _lastChainStallLogMs = nowMs;
+                        _logger?.ZLogWarning($"[KlothoEngine][ChainStall] lag={lag} >= stallWarnThreshold={stallWarnThreshold} (CurrentTick={CurrentTick}, _lastVerifiedTick={_lastVerifiedTick}) — Chain stalled, awaiting quorum / reconnect");
                     }
                 }
             }
 #endif
         }
 
+        public event Action<int> OnExtraDelayChanged;
+
+        public void ApplyExtraDelay(int delay, ExtraDelaySource source)
+        {
+            int prev = _recommendedExtraDelay;
+            // LagReductionLatency tracker — measures mid-match natural clamp resolution time.
+            // Reconnect path is excluded because catchup advances CurrentTick in a jump, making
+            // actualTicks reflect catchup duration rather than clamp resolution.
+            if (source == ExtraDelaySource.Reconnect)
+            {
+                // Stale guard: a prior DynamicPush DOWN may have set pending; the first unclamped
+                // InputCommand after Reconnect catchup would emit stale prev/new with distorted
+                // actualTicks. Force-clear to suppress the false measurement.
+                _lagReductionPending = false;
+            }
+            else if (delay < prev)
+            {
+                _lagReductionPending = true;
+                _lagReductionPrevDelay = prev;
+                _lagReductionNewDelay = delay;
+                _lagReductionStartTick = CurrentTick;
+            }
+            _recommendedExtraDelay = delay;
+            // DynamicPush fires mid-match (rate-limited 500ms) — Debug to avoid prod noise.
+            // Sync/LateJoin/Reconnect are 1-shot accept events — Information for operational trace.
+            if (source == ExtraDelaySource.DynamicPush)
+                _logger?.ZLogDebug($"[KlothoEngine][{source}] Recommended extra delay applied: {delay} ticks (CurrentTick={CurrentTick}, prev={prev})");
+            else
+                _logger?.ZLogInformation($"[KlothoEngine][{source}] Recommended extra delay applied: {delay} ticks (CurrentTick={CurrentTick}, prev={prev})");
+            OnExtraDelayChanged?.Invoke(delay);
+        }
+
+        public void EscalateExtraDelay(int step, int max)
+        {
+            int newDelay = Math.Min(_recommendedExtraDelay + step, max);
+            if (newDelay > _recommendedExtraDelay)
+            {
+                _logger?.ZLogWarning($"[KlothoEngine][DynamicDelay] Reactive escalate: prev={_recommendedExtraDelay}, new={newDelay}");
+                _recommendedExtraDelay = newDelay;
+                OnExtraDelayChanged?.Invoke(newDelay);
+            }
+        }
+
         public void InputCommand(ICommand command, int extraDelay = 0)
         {
             // Target tick reflecting input delay. extraDelay adds per-command lead margin
             // (used by recovery paths — e.g. spawn cmd PastTick reject escalation).
-            int targetTick = CurrentTick + _simConfig.InputDelayTicks + extraDelay;
+            // _recommendedExtraDelay compensates LateJoin/Reconnect catchup gap and mid-match RTT shifts.
+            int targetTick = CurrentTick + _simConfig.InputDelayTicks + extraDelay + _recommendedExtraDelay;
 
             if (command is CommandBase cmdBase)
             {
-                cmdBase.Tick = targetTick;
                 cmdBase.PlayerId = LocalPlayerId;
-                
+
 #if KLOTHO_FAULT_INJECTION
                 // PastTick path: shift cmd.Tick to trigger ServerInputCollector's
                 // `tick <= _lastExecutedTick` reject branch. Negative delta = past.
@@ -824,10 +893,63 @@ namespace xpTURN.Klotho.Core
                 {
                     int shifted = targetTick + tickDelta;
                     _logger?.ZLogWarning($"[FaultInjection][SD] ForceTickOffset: cmd.Tick {targetTick} → {shifted} (delta={tickDelta}, type={cmdBase.GetType().Name})");
-                    cmdBase.Tick = shifted;
                     targetTick = shifted;
                 }
 #endif
+
+                // Prevent non-monotonic cmd.Tick when _recommendedExtraDelay decreases on Reconnect / mid-match.
+                // Applied after fault injection to keep production-ordering invariant in fault tests.
+                // Strict-less-than: same-tick multiple cmds are legal in lockstep, so equal targetTick passes through.
+                bool clampEngaged = targetTick < _lastSentCmdTick;
+                if (clampEngaged)
+                {
+                    int clamped = _lastSentCmdTick;
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                    _logger?.ZLogDebug($"[KlothoEngine] cmd.Tick monotonic clamp: computed={targetTick}, clamped={clamped}");
+#endif
+                    targetTick = clamped;
+                }
+
+                // Forward gap fill — when _recommendedExtraDelay increases mid-match, cmd.Tick jumps
+                // forward leaving the in-between ticks with no local cmd. Subsequent frames target
+                // later ticks and never revisit the gap, so the chain stalls at the first missing
+                // tick. Emit empty cmds across the gap to keep the chain unbroken. The per-call
+                // extraDelay margin is preserved (e.g., spawn cmd recovery lead).
+                if (_simConfig.Mode != NetworkMode.ServerDriven && _lastSentCmdTick >= 0)
+                {
+                    int fillEnd = targetTick - extraDelay - 1;
+                    int fillStart = _lastSentCmdTick + 1;
+                    if (fillStart <= fillEnd)
+                    {
+                        for (int t = fillStart; t <= fillEnd; t++)
+                        {
+                            var fillEmpty = CommandPool.Get<EmptyCommand>();
+                            fillEmpty.PlayerId = LocalPlayerId;
+                            fillEmpty.Tick = t;
+                            _networkService.SendCommand(fillEmpty);
+                            _lastSentCmdTick = t;
+                        }
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                        _logger?.ZLogInformation($"[KlothoEngine][GapFill] Forward gap filled: [{fillStart}, {fillEnd}], count={fillEnd - fillStart + 1}");
+#endif
+                    }
+                }
+
+                if (targetTick > _lastSentCmdTick)
+                    _lastSentCmdTick = targetTick;
+
+                // LagReductionLatency: first non-clamped InputCommand after an ApplyExtraDelay decrease
+                // marks the natural resolution. Emit one-shot, then clear pending state.
+                if (_lagReductionPending && !clampEngaged)
+                {
+                    int expectedTicks = _lagReductionPrevDelay - _lagReductionNewDelay;
+                    int actualTicks = CurrentTick - _lagReductionStartTick;
+                    _logger?.ZLogInformation(
+                        $"[Metrics][LagReductionLatency] {{\"prevDelay\":{_lagReductionPrevDelay},\"newDelay\":{_lagReductionNewDelay},\"expectedTicks\":{expectedTicks},\"actualTicks\":{actualTicks}}}");
+                    _lagReductionPending = false;
+                }
+
+                cmdBase.Tick = targetTick;
             }
 
             // ServerDriven mode places it in the local buffer and then sends to the server.
@@ -1208,9 +1330,20 @@ namespace xpTURN.Klotho.Core
 
         private void CleanupOldData()
         {
-            int cleanupTick = CurrentTick - _simConfig.MaxRollbackTicks - CLEANUP_MARGIN_TICKS;
+            // Never wipe data at ticks the chain has not advanced past — those entries are
+            // still required to resume chain advance. Stall recovery (reconnect / catchup)
+            // depends on inputs and pending events remaining intact through the stall window.
+            int rawCleanupTick = CurrentTick - _simConfig.MaxRollbackTicks - CLEANUP_MARGIN_TICKS;
+            int cleanupTick = System.Math.Min(rawCleanupTick, _lastVerifiedTick);
             if (cleanupTick > 0)
             {
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                // Diagnostic — log InputBuffer entries about to be wiped while still beyond
+                // chain advance reach (t > _lastVerifiedTick). Surfaces host self-wipe during
+                // P2P quorum stall — wiped player commands are unrecoverable.
+                _inputBuffer.LogPendingWipe(cleanupTick, _lastVerifiedTick, CurrentTick);
+#endif
+
                 _inputBuffer.ClearBefore(cleanupTick);
                 _networkService?.ClearOldData(cleanupTick);
                 int eventCleanFrom = System.Math.Max(0, cleanupTick - CLEANUP_MARGIN_TICKS);

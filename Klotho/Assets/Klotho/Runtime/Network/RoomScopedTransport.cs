@@ -88,6 +88,8 @@ namespace xpTURN.Klotho.Network
             _shared.DisconnectPeer(peerId);
         }
 
+        public IEnumerable<int> GetConnectedPeerIds() => _shared.GetConnectedPeerIds();
+
         // ── no-op: receive/connection lifetime is managed by RoomRouter/RoomManager ──
 
         public void PollEvents() { /* no-op */ }

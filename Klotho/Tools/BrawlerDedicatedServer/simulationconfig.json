@@ -12,6 +12,8 @@
   "MaxUnackedInputs": 30,
   "ServerSnapshotRetentionTicks": 0,
   "SDInputLeadTicks": 4,
+  "LateJoinDelaySafety": 2,
+  "RttSanityMaxMs": 240,
 
   "EnableErrorCorrection": true,
   "InterpolationDelayTicks": 2,

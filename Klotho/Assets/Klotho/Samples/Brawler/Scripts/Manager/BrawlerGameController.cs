@@ -111,6 +111,13 @@ namespace Brawler
         private long _lastTicks;
         private string _replayPath = Application.dataPath + "/../Replays/brawler.rply";
 
+#if KLOTHO_FAULT_INJECTION
+        // RTT spike schedule anchor: set on the first frame Phase enters Playing.
+        // Drift across clients = each client's GameStartMessage receive jitter.
+        private float _rttScheduleAnchorTime = -1f;
+        private int _rttScheduleNextIdx;
+#endif
+
         public bool IsHost => _brawlerSettings._isHost;
         public KlothoState State => _session?.State ?? (_spectatorEngine != null ? KlothoState.Running : KlothoState.Idle);
         public int CurrentTick => (_session?.Engine ?? _spectatorEngine)?.CurrentTick ?? 0;
@@ -223,6 +230,46 @@ namespace Brawler
             var path = System.IO.Path.Combine(Application.streamingAssetsPath, "faultinjectionconfig.json");
             FaultInjectionLoader.TryLoadAndApply(path, _logger);
         }
+
+        private void UpdateRttSchedule()
+        {
+            if (Phase != SessionPhase.Playing)
+            {
+                if (_rttScheduleAnchorTime >= 0f)
+                {
+                    RttSpikeMetricsCollector.EmitSummary(_logger);
+                    _rttScheduleAnchorTime = -1f;
+                    _rttScheduleNextIdx = 0;
+                }
+                return;
+            }
+
+            if (_rttScheduleAnchorTime < 0f)
+            {
+                _rttScheduleAnchorTime = Time.unscaledTime;
+                _rttScheduleNextIdx = 0;
+                int localId = ActiveEngine?.LocalPlayerId ?? -1;
+                RttSpikeMetricsCollector.OnMatchStart(IsHost ? "host" : "guest", localId);
+            }
+
+            // Metrics collection stays active even when the schedule is empty so per-peer
+            // asymmetry scenarios (only some clients carry a schedule) still get baseline
+            // chainBreak / rollback counts from the spike-free peers.
+            if (FaultInjection.EmulatedRttSchedule.Count == 0)
+                return;
+
+            float elapsedSec = Time.unscaledTime - _rttScheduleAnchorTime;
+            var schedule = FaultInjection.EmulatedRttSchedule;
+            while (_rttScheduleNextIdx < schedule.Count && elapsedSec >= schedule[_rttScheduleNextIdx].atSec)
+            {
+                var entry = schedule[_rttScheduleNextIdx];
+                int prevRtt = FaultInjection.EmulatedRttMs;
+                FaultInjection.EmulatedRttMs = entry.rttMs;
+                _logger?.ZLogInformation($"[FaultInjection] RTT spike: {prevRtt}ms -> {entry.rttMs}ms at anchorSec={entry.atSec:F1} (tick={CurrentTick})");
+                RttSpikeMetricsCollector.OnSpike(entry.atSec, entry.rttMs);
+                _rttScheduleNextIdx++;
+            }
+        }
 #endif
 
         private void OnEnable()
@@ -248,6 +295,10 @@ namespace Brawler
         private void Update()
         {
             UpdateStatus();
+
+#if KLOTHO_FAULT_INJECTION
+            UpdateRttSchedule();
+#endif
 
             var engine = ActiveEngine;
 

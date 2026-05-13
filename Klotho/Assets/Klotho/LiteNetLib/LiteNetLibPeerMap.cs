@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 
 using Microsoft.Extensions.Logging;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
@@ -69,5 +70,7 @@ namespace xpTURN.Klotho.LiteNetLib
             _idToPeer.Clear();
             _peerToId.Clear();
         }
+
+        internal IEnumerable<int> GetAllPeerIds() => _idToPeer.Keys;
     }
 }

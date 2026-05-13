@@ -27,6 +27,9 @@ namespace xpTURN.Klotho.Network
         [KlothoOrder] public int InterpolationDelayTicks;
         [KlothoOrder] public int EventDispatchWarnMs;
         [KlothoOrder] public int TickDriftWarnMultiplier;
+        [KlothoOrder] public int LateJoinDelaySafety;
+        [KlothoOrder] public int RttSanityMaxMs;
+        [KlothoOrder] public int QuorumMissDropTicks;
 
         /// <summary>
         /// Populates message fields from an ISimulationConfig.
@@ -49,6 +52,9 @@ namespace xpTURN.Klotho.Network
             InterpolationDelayTicks = config.InterpolationDelayTicks;
             EventDispatchWarnMs = config.EventDispatchWarnMs;
             TickDriftWarnMultiplier = config.TickDriftWarnMultiplier;
+            LateJoinDelaySafety = config.LateJoinDelaySafety;
+            RttSanityMaxMs = config.RttSanityMaxMs;
+            QuorumMissDropTicks = config.QuorumMissDropTicks;
         }
 
         /// <summary>
@@ -74,6 +80,9 @@ namespace xpTURN.Klotho.Network
                 InterpolationDelayTicks = InterpolationDelayTicks,
                 EventDispatchWarnMs = EventDispatchWarnMs,
                 TickDriftWarnMultiplier = TickDriftWarnMultiplier,
+                LateJoinDelaySafety = LateJoinDelaySafety,
+                RttSanityMaxMs = RttSanityMaxMs,
+                QuorumMissDropTicks = QuorumMissDropTicks,
             };
         }
     }

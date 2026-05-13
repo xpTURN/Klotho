@@ -86,22 +86,47 @@ namespace xpTURN.Klotho.Tests.Brawler
         }
 
         [Test]
-        public void HandleCommandRejected_SpawnButNotDuplicate_PreservesCooldown()
+        public void HandleCommandRejected_SpawnPastTick_ClearsCooldownAndEscalatesLead()
         {
             var callbacks = NewCallbacks();
             var field = GetLastAttemptField();
             field.SetValue(callbacks, SeedTick);
 
-            // Spawn rejected for a transport-level reason (PastTick / ToleranceExceeded).
-            // The cooldown must stay armed because the cmd never reached the dedup site —
-            // re-clearing here would burst-resend on every transport reject.
+            // ISS-06 policy: PastTick reject for spawn → clear cooldown + escalate _extraSpawnDelay
+            // (by SPAWN_DELAY_STEP) so the next OnPollInput re-issues with a larger lead margin.
+            // Burst-resend is bounded by the SPAWN_DELAY_MAX cap, not by preserving the cooldown.
             GetHandleCommandRejected().Invoke(callbacks, new object[]
             {
                 SeedTick + 1, SpawnCharacterCommand.TYPE_ID, RejectionReason.PastTick,
             });
 
+            Assert.AreEqual(-1, (int)field.GetValue(callbacks),
+                "PastTick-rejected spawn must clear cooldown so the next OnPollInput re-issues with the escalated lead");
+
+            var delayField = typeof(BrawlerSimulationCallbacks).GetField(
+                "_extraSpawnDelay", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.AreEqual(4 /* SPAWN_DELAY_STEP */, (int)delayField.GetValue(callbacks),
+                "PastTick-rejected spawn must escalate _extraSpawnDelay by SPAWN_DELAY_STEP");
+        }
+
+        [Test]
+        public void HandleCommandRejected_SpawnToleranceExceeded_PreservesCooldown()
+        {
+            var callbacks = NewCallbacks();
+            var field = GetLastAttemptField();
+            field.SetValue(callbacks, SeedTick);
+
+            // Non-PastTick transport reasons (e.g. ToleranceExceeded) fall through the handler
+            // without touching the cooldown — only PastTick (ISS-06) and Duplicate have explicit
+            // policies. Preserving the cooldown here avoids burst-resend on tolerance-window
+            // jitter where escalating the lead would not help.
+            GetHandleCommandRejected().Invoke(callbacks, new object[]
+            {
+                SeedTick + 1, SpawnCharacterCommand.TYPE_ID, RejectionReason.ToleranceExceeded,
+            });
+
             Assert.AreEqual(SeedTick, (int)field.GetValue(callbacks),
-                "Spawn rejection that is not a server-side Duplicate must keep cooldown armed");
+                "ToleranceExceeded-rejected spawn must keep cooldown armed (no policy branch)");
         }
 
     }

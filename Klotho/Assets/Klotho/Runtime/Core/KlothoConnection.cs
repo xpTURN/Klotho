@@ -292,6 +292,7 @@ namespace xpTURN.Klotho.Core
                 SessionMagic = msg.Magic,
                 SharedEpoch = msg.SharedEpoch,
                 ClockOffset = msg.ClockOffset,
+                RecommendedExtraDelay = msg.RecommendedExtraDelay,
             };
             _logger?.ZLogInformation($"[KlothoConnection] SyncComplete: playerId={msg.PlayerId}, waiting for SimulationConfig");
         }

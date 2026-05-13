@@ -22,12 +22,20 @@ namespace xpTURN.Klotho.Diagnostics
         private class Schema
         {
             [JsonProperty] public int? EmulatedRttMs { get; set; }
+            [JsonProperty] public List<RttScheduleEntry> EmulatedRttSchedule { get; set; }
             [JsonProperty] public int? ServerGcPauseMs { get; set; }
             [JsonProperty] public int? ServerGcPauseAtTick { get; set; }
             [JsonProperty] public List<int> DropSpawnCommandPlayerIds { get; set; }
             [JsonProperty] public List<int> SuppressBootstrapAckPlayerIds { get; set; }
             [JsonProperty] public List<int> ForceSpawnRetryPlayerIds { get; set; }
             [JsonProperty] public int? ForceTickOffsetDelta { get; set; }
+        }
+
+        [JsonObject(MemberSerialization.OptIn)]
+        private class RttScheduleEntry
+        {
+            [JsonProperty("atSec")] public float AtSec { get; set; }
+            [JsonProperty("rttMs")] public int RttMs { get; set; }
         }
 
         /// <summary>
@@ -65,6 +73,7 @@ namespace xpTURN.Klotho.Diagnostics
             ApplySchema(schema);
             logger?.ZLogWarning(
                 $"[FaultInjectionLoader] Applied: RTT={FaultInjection.EmulatedRttMs}ms, " +
+                $"rttSchedule=[{FormatRttSchedule()}], " +
                 $"GC={FaultInjection.ServerGcPauseMs}ms@tick{FaultInjection.ServerGcPauseAtTick}, " +
                 $"dropSpawn=[{string.Join(",", FaultInjection.DropSpawnCommandPlayerIds)}], " +
                 $"suppressAck=[{string.Join(",", FaultInjection.SuppressBootstrapAckPlayerIds)}], " +
@@ -73,12 +82,35 @@ namespace xpTURN.Klotho.Diagnostics
             return true;
         }
 
+        private static string FormatRttSchedule()
+        {
+            var schedule = FaultInjection.EmulatedRttSchedule;
+            if (schedule.Count == 0) return "";
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < schedule.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append('(').Append(schedule[i].atSec.ToString("F1")).Append("s,")
+                  .Append(schedule[i].rttMs).Append("ms)");
+            }
+            return sb.ToString();
+        }
+
         private static void ApplySchema(Schema s)
         {
             if (s.EmulatedRttMs.HasValue)        FaultInjection.EmulatedRttMs = s.EmulatedRttMs.Value;
             if (s.ServerGcPauseMs.HasValue)      FaultInjection.ServerGcPauseMs = s.ServerGcPauseMs.Value;
             if (s.ServerGcPauseAtTick.HasValue)  FaultInjection.ServerGcPauseAtTick = s.ServerGcPauseAtTick.Value;
             if (s.ForceTickOffsetDelta.HasValue) FaultInjection.ForceTickOffsetDelta = s.ForceTickOffsetDelta.Value;
+
+            if (s.EmulatedRttSchedule != null)
+            {
+                FaultInjection.EmulatedRttSchedule.Clear();
+                foreach (var entry in s.EmulatedRttSchedule)
+                    FaultInjection.EmulatedRttSchedule.Add((entry.AtSec, entry.RttMs));
+                // Driver consumes sequentially — enforce ascending atSec.
+                FaultInjection.EmulatedRttSchedule.Sort((a, b) => a.atSec.CompareTo(b.atSec));
+            }
 
             if (s.DropSpawnCommandPlayerIds != null)
             {

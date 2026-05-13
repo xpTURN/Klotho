@@ -6,6 +6,10 @@ using xpTURN.Klotho.Input;
 using ZLogger;
 #endif
 
+#if KLOTHO_FAULT_INJECTION
+using xpTURN.Klotho.Diagnostics;
+#endif
+
 namespace xpTURN.Klotho.Core
 {
     public partial class KlothoEngine
@@ -18,6 +22,8 @@ namespace xpTURN.Klotho.Core
         // Diagnostic — throttled break-cause log for chain advance stall.
         private long _lastChainBreakLogMs;
         private int _lastChainBreakLoggedTick = -1;
+        // Single-shot buffer dump on first chain-break to bound log volume.
+        private bool _chainBreakBufferDumped;
 #endif
 
         public bool IsFrameVerified(int tick)
@@ -37,6 +43,7 @@ namespace xpTURN.Klotho.Core
             {
                 if (!_inputBuffer.HasAllCommands(tick, _activePlayerIds.Count))
                 {
+                    OnChainAdvanceBreak?.Invoke();
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
                     LogChainAdvanceBreak(tick);
 #endif
@@ -85,7 +92,17 @@ namespace xpTURN.Klotho.Core
             }
             sb.Append(']');
 
-            _logger?.ZLogWarning($"[KlothoEngine][ChainBreak] stuck at tick={tick} (_lastVerifiedTick={_lastVerifiedTick}, CurrentTick={CurrentTick}, activeIds.Count={_activePlayerIds.Count}) {sb}");
+            _logger?.ZLogWarning($"[KlothoEngine][ChainBreak] stuck at tick={tick} (_lastVerifiedTick={_lastVerifiedTick}, CurrentTick={CurrentTick}, activeIds.Count={_activePlayerIds.Count}, recommendedExtraDelay={_recommendedExtraDelay}) {sb}");
+
+            if (!_chainBreakBufferDumped)
+            {
+                _chainBreakBufferDumped = true;
+                _inputBuffer.DumpTickRange(tick - 3, tick + 3);
+            }
+
+#if KLOTHO_FAULT_INJECTION
+            RttSpikeMetricsCollector.OnChainBreak();
+#endif
         }
 #endif
 

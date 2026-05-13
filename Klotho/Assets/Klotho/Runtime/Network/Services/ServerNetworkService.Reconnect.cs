@@ -68,6 +68,9 @@ namespace xpTURN.Klotho.Network
                 _transport.DisconnectPeer(stalePeerId);
             }
 
+            // Snapshot RTT sample before info.Reset() — used by RecommendedExtraDelay below.
+            int disconnectedAvgRtt = info.LastAvgRtt;
+
             // 5. Accept reconnect
             _peerToPlayer[peerId] = msg.PlayerId;
             info.Reset();
@@ -106,6 +109,19 @@ namespace xpTURN.Klotho.Network
             _reconnectAcceptCache.DesyncThresholdForResync = _sessionConfig.DesyncThresholdForResync;
             _reconnectAcceptCache.CountdownDurationMs = _sessionConfig.CountdownDurationMs;
             _reconnectAcceptCache.CatchupMaxTicksPerFrame = _sessionConfig.CatchupMaxTicksPerFrame;
+
+            // Reuse stale RTT sample. Reconnect identity is keyed on playerId (preserved across the
+            // disconnect/reconnect cycle), but RTT samples were keyed on the disconnected peerId.
+            // The new peerId is different, so consult disconnectedAvgRtt (snapshot of info.LastAvgRtt
+            // captured before info.Reset() above). Fallback to the new peerId's PeerSyncStates entry —
+            // populated only if a fresh handshake ran before this point, which is unusual for warm Reconnect.
+            int avgRtt = disconnectedAvgRtt;
+            if (avgRtt <= 0 && _peerSyncStates.TryGetValue(peerId, out var syncState))
+                syncState.GetBestSample(out avgRtt, out _);
+            int reconnectSeedExtraDelay = ComputeRecommendedExtraDelay(avgRtt, msg.PlayerId, peerId, "Reconnect");
+            _reconnectAcceptCache.RecommendedExtraDelay = reconnectSeedExtraDelay;
+            // Seed push baseline so the first mid-match recompute does not redundantly push the same value.
+            _lastPushedExtraDelay[peerId] = reconnectSeedExtraDelay;
 
             using (var serialized = _messageSerializer.SerializePooled(_reconnectAcceptCache))
                 _transport.Send(peerId, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);

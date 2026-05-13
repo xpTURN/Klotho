@@ -55,6 +55,15 @@ namespace xpTURN.Klotho.Core
         /// <inheritdoc />
         public int InterpolationDelayTicks { get; set; } = 3;
 
+        /// <inheritdoc />
+        public int LateJoinDelaySafety { get; set; } = 2;
+
+        /// <inheritdoc />
+        public int RttSanityMaxMs { get; set; } = 240;
+
+        /// <inheritdoc />
+        public int QuorumMissDropTicks { get; set; } = 20;
+
         // --- Diagnostics ---
 
         /// <inheritdoc />

@@ -46,5 +46,8 @@ namespace xpTURN.Klotho.Network
         /// List of per-entry lengths within PlayerConfigData.
         /// </summary>
         [KlothoOrder] public List<int> PlayerConfigLengths = new List<int>();
+
+        // Server-recommended extra InputDelay ticks for catchup-gap compensation.
+        [KlothoOrder] public int RecommendedExtraDelay;
     }
 }

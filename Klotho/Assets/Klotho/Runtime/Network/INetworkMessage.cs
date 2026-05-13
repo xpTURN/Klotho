@@ -53,6 +53,9 @@ namespace xpTURN.Klotho.Network
         // Late join
         LateJoinAccept = 73,
 
+        // Dynamic InputDelay — server→client push when smoothed RTT change crosses asymmetric threshold.
+        RecommendedExtraDelayUpdate = 74,
+
         // Server-driven
         ClientInput = 80,
         VerifiedState = 81,

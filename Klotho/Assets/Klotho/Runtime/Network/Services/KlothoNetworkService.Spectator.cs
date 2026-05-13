@@ -146,10 +146,6 @@ namespace xpTURN.Klotho.Network
                     _transport.Send(info.PeerId, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
                 }
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-                _logger?.ZLogTrace($"[KlothoNetworkService][LateJoinCatchup] Sent batch: peer={info.PeerId}, ticks=[{fromTick}..{toTick}], bytes={len}");
-#endif
-
                 System.Buffers.ArrayPool<byte>.Shared.Return(rangeData);
                 info.LastSentTick = toTick;
 

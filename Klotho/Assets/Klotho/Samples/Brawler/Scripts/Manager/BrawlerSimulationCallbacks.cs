@@ -40,6 +40,29 @@ namespace Brawler
         // Post-cap reject counter — diagnostic visibility for retry frequency after cap.
         private int _capHitRejectCount = 0;
 
+        // Client-reactive fallback state. Engine-tick-based sliding window + post-push grace —
+        // bumps EscalateExtraDelay only when server push is delayed/missed.
+        private int _lastServerPushTick = int.MinValue;
+        private int _reactiveWindowStartTick = int.MinValue;
+        private int _reactiveRejectCount = 0;
+        private const int SERVER_PUSH_GRACE_TICKS = 40;        // ~1s at 40Hz — ignore rejects within grace of latest server push
+        private const int REACTIVE_WINDOW_TICKS = 80;          // ~2s — reject-count reset interval (boundary-jitter carry-over guard)
+        private const int REACTIVE_ESCALATE_THRESHOLD = 3;     // count within window before escalating
+        private const int REACTIVE_STEP = 4;                   // ticks per escalation
+        private const int REACTIVE_MAX = 40;                   // cap — matches SPAWN_DELAY_MAX (~1s at 40Hz)
+
+        // Client-side rollback-amplitude reactive state. Primary path for P2P guests (which have
+        // no CommandRejectedMessage); supplementary on SD clients alongside the PastTick F-3 path
+        // above. Rollback amplitude is used instead of chain-advance break events because baseline
+        // matches produce 0 rollbacks while RTT-spike matches produce mean=4-7 depth — a clean
+        // signal that chainbreak burst lacks. Host is excluded by the IsHost guard.
+        private int _lastRollbackBurstWindowStartTick = int.MinValue;
+        private int _rollbackCountInWindow = 0;
+        private int _lastReactiveEscalateTick = int.MinValue;
+        private const int ROLLBACK_BURST_COUNT = 3;                    // rollback events within window before escalating; baseline matches measure 0, RTT-spike matches multiple per 5s
+        private const int ROLLBACK_WINDOW_TICKS = 200;                 // ~5s at 40Hz — fixed window
+        private const int REACTIVE_ESCALATE_COOLDOWN_TICKS = 80;       // ~2s — minimum gap between successive reactive escalations
+
         public FPNavMesh NavMesh { get { return _navMesh; } }
         public FPNavMeshQuery NavQuery { get; private set; }
         public BotFSMSystem BotFSMSystem { get; private set; }
@@ -178,6 +201,15 @@ namespace Brawler
         {
             _engine = engine;
             engine.OnCommandRejected += HandleCommandRejected;
+            // Grace-window anchor for the reactive fallback: refresh on every server-driven ExtraDelay update.
+            engine.OnExtraDelayChanged += HandleExtraDelayChanged;
+            // P2P guest fallback: rollback burst → reactive escalate.
+            engine.OnRollbackExecuted += HandleRollback;
+        }
+
+        private void HandleExtraDelayChanged(int newDelay)
+        {
+            _lastServerPushTick = _engine.CurrentTick;
         }
 
         // Receives only LocalPlayer's command rejections. CommandRejectedMessage is unicast from
@@ -185,7 +217,15 @@ namespace Brawler
         // so the playerId is implicitly _engine.LocalPlayerId.
         private void HandleCommandRejected(int tick, int cmdTypeId, RejectionReason reason)
         {
-            if (cmdTypeId != SpawnCharacterCommand.TYPE_ID) return;
+            // Client-reactive fallback: non-spawn PastTick rejects drive a server-push fallback path.
+            // Spawn falls through to the existing spawn-only escalation below — avoids double-bump
+            // (spawn lead = _extraSpawnDelay + _recommendedExtraDelay both rising simultaneously).
+            if (cmdTypeId != SpawnCharacterCommand.TYPE_ID)
+            {
+                if (reason == RejectionReason.PastTick)
+                    HandleReactivePastTick(tick);
+                return;
+            }
 
             // Spawn cmd duplicate-rejected: server already has the character. Clear the cooldown latch
             // so the next OnPollInput re-evaluates the state-driven query without waiting out the cooldown.
@@ -220,6 +260,69 @@ namespace Brawler
                     _capHitRejectCount++;
                     _logger?.ZLogDebug($"[Brawler] Spawn past-tick post-cap: count={_capHitRejectCount}, tick={tick}");
                 }
+            }
+        }
+
+        // Client-reactive fallback for non-spawn PastTick rejects. Engine-tick units only — Time.time
+        // is avoided so the same logic works under deterministic resim/rollback noise.
+        private void HandleReactivePastTick(int tick)
+        {
+            int currentTick = _engine.CurrentTick;
+
+            // Grace: skip rejects observed within SERVER_PUSH_GRACE_TICKS of the latest server push —
+            // the prior recommended value was just received and resim/in-flight cmds may still trail.
+            if (_lastServerPushTick != int.MinValue
+                && currentTick - _lastServerPushTick < SERVER_PUSH_GRACE_TICKS)
+                return;
+
+            // Sliding window reset — boundary-jitter rejects shouldn't carry over forever.
+            if (currentTick - _reactiveWindowStartTick > REACTIVE_WINDOW_TICKS)
+            {
+                _reactiveRejectCount = 0;
+                _reactiveWindowStartTick = currentTick;
+            }
+
+            _reactiveRejectCount++;
+            _logger?.ZLogDebug(
+                $"[Brawler][DynamicDelay] F-3 trigger: count={_reactiveRejectCount}, windowStart={_reactiveWindowStartTick}, currentTick={currentTick}");
+            if (_reactiveRejectCount < REACTIVE_ESCALATE_THRESHOLD)
+                return;
+
+            _engine.EscalateExtraDelay(REACTIVE_STEP, REACTIVE_MAX);
+            _reactiveRejectCount = 0;
+            _reactiveWindowStartTick = currentTick;
+        }
+
+        // Client-side rollback-amplitude reactive. Counts rollback events in a fixed engine-tick
+        // window and escalates extra InputDelay when the burst exceeds threshold and no recent
+        // server push covers the current tick. Host has direct push authority and is excluded.
+        // Fires on P2P guests (primary fallback) and SD clients (supplementary alongside PastTick
+        // F-3); both share REACTIVE_STEP/MAX and the OnExtraDelayChanged grace anchor, so the cap
+        // bounds total escalation regardless of which path triggers.
+        private void HandleRollback(int fromTick, int toTick)
+        {
+            if (_engine.IsHost) return;
+            // Cap reached — EscalateExtraDelay would be a no-op. Skip the bookkeeping and log spam.
+            if (_engine.RecommendedExtraDelay >= REACTIVE_MAX) return;
+
+            int now = _engine.CurrentTick;
+
+            if (_lastRollbackBurstWindowStartTick == int.MinValue
+                || now - _lastRollbackBurstWindowStartTick > ROLLBACK_WINDOW_TICKS)
+            {
+                _lastRollbackBurstWindowStartTick = now;
+                _rollbackCountInWindow = 0;
+            }
+            _rollbackCountInWindow++;
+
+            if (_rollbackCountInWindow >= ROLLBACK_BURST_COUNT
+                && (_lastReactiveEscalateTick == int.MinValue || now - _lastReactiveEscalateTick > REACTIVE_ESCALATE_COOLDOWN_TICKS)
+                && (_lastServerPushTick == int.MinValue || now - _lastServerPushTick > SERVER_PUSH_GRACE_TICKS))
+            {
+                _engine.EscalateExtraDelay(REACTIVE_STEP, REACTIVE_MAX);
+                _lastReactiveEscalateTick = now;
+                _logger?.ZLogWarning(
+                    $"[Brawler][DynamicDelay] Reactive escalate triggered: rollbackCount={_rollbackCountInWindow}, depth={fromTick - toTick}, windowTicks={ROLLBACK_WINDOW_TICKS}");
             }
         }
 

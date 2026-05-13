@@ -83,6 +83,7 @@ namespace xpTURN.Klotho.Network
             SendSimulationConfig(peerId);
 
             // 4. Send LateJoinAcceptMessage
+            int lateJoinSeedExtraDelay = ComputeRecommendedExtraDelay(avgRtt, newPlayerId, peerId, "LateJoin");
             var accept = new LateJoinAcceptMessage
             {
                 PlayerId = newPlayerId,
@@ -102,7 +103,10 @@ namespace xpTURN.Klotho.Network
                 DesyncThresholdForResync = _sessionConfig.DesyncThresholdForResync,
                 CountdownDurationMs = _sessionConfig.CountdownDurationMs,
                 CatchupMaxTicksPerFrame = _sessionConfig.CatchupMaxTicksPerFrame,
+                RecommendedExtraDelay = lateJoinSeedExtraDelay,
             };
+            // Seed push baseline so the first mid-match recompute does not redundantly push the same value.
+            _lastPushedExtraDelay[peerId] = lateJoinSeedExtraDelay;
             for (int i = 0; i < _players.Count; i++)
             {
                 accept.PlayerIds.Add(_players[i].PlayerId);
@@ -196,6 +200,35 @@ namespace xpTURN.Klotho.Network
                     count++;
             }
             return count;
+        }
+
+        // Instance wrapper — config injection + path-tagged logging + structured metrics emission.
+        // playerId = game-level player identifier (reported in metrics JSON for telemetry analysis).
+        // peerId = connection-level identifier (kept in operational logs for connection debugging).
+        // Pure computation lives in xpTURN.Klotho.Core.RecommendedExtraDelayCalculator (shared with P2P path).
+        private int ComputeRecommendedExtraDelay(int avgRtt, int playerId, int peerId, string pathTag)
+        {
+            var (extraDelay, fallback, rttTicks, raw, clamped) = RecommendedExtraDelayCalculator.Compute(
+                avgRtt,
+                _simConfig.TickIntervalMs,
+                _simConfig.LateJoinDelaySafety,
+                _simConfig.RttSanityMaxMs,
+                _simConfig.MaxRollbackTicks);
+
+            if (fallback)
+                _logger?.ZLogWarning($"[ServerNetworkService][{pathTag}] FallbackPath: avgRtt={avgRtt}ms invalid, peerId={peerId}, clamped={extraDelay}");
+            else
+                _logger?.ZLogDebug($"[ServerNetworkService][{pathTag}] RecommendedExtraDelay computed: peerId={peerId}, avgRtt={avgRtt}ms, clamped={extraDelay}");
+
+            // Structured JSON-line metrics — single source of truth for verification scripts and
+            // production telemetry. Bool literals lowercased for JSON validity. Path tag is controlled
+            // ("LateJoin" / "Reconnect" / "Sync") so no escaping needed.
+            string clampedStr = clamped ? "true" : "false";
+            string fallbackStr = fallback ? "true" : "false";
+            int safety = _simConfig.LateJoinDelaySafety;
+            _logger?.ZLogInformation($"[Metrics][{pathTag}] {{\"playerId\":{playerId},\"peerId\":{peerId},\"tag\":\"{pathTag}\",\"avgRtt\":{avgRtt},\"rttTicks\":{rttTicks},\"safety\":{safety},\"raw\":{raw},\"clamped\":{clampedStr},\"extraDelay\":{extraDelay},\"fallback\":{fallbackStr}}}");
+
+            return extraDelay;
         }
     }
 }

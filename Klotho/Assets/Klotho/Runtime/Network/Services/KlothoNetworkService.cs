@@ -42,6 +42,15 @@ namespace xpTURN.Klotho.Network
         public int LastConfirmedTick;
         public int PredictedTickCount;
         public string DeviceId;
+        // RTT sample captured at disconnect time. Used by SD Reconnect path
+        // (ServerNetworkService.HandleReconnectRequest) to seed RecommendedExtraDelay computation
+        // when no fresh handshake samples are available — the new connection's peerId differs from
+        // the disconnected one, so PeerSyncStates lookup misses. P2P does not consume this field;
+        // KlothoNetworkService's Reconnect path does not currently set RecommendedExtraDelay.
+        public int LastAvgRtt;
+        // True when this entry was added by the quorum-miss watchdog before transport-level
+        // detection. Cleared once transport disconnect confirms or real input arrival rolls back.
+        public bool IsPresumedDrop;
 
         public bool IsActive => PlayerId != 0;
 
@@ -53,6 +62,8 @@ namespace xpTURN.Klotho.Network
             LastConfirmedTick = 0;
             PredictedTickCount = 0;
             DeviceId = null;
+            LastAvgRtt = 0;
+            IsPresumedDrop = false;
         }
     }
 
@@ -117,6 +128,8 @@ namespace xpTURN.Klotho.Network
         private readonly Dictionary<(int tick, int playerId), long> _syncHashes = new Dictionary<(int tick, int playerId), long>();
         private readonly Dictionary<int, PeerSyncState> _peerSyncStates = new Dictionary<int, PeerSyncState>();
         private readonly HashSet<int> _pendingPeers = new HashSet<int>();
+        private readonly Dictionary<int, long> _peerConnectedAtMs = new Dictionary<int, long>();
+        private readonly List<int> _zombieScanSnapshot = new List<int>();
         private readonly List<SpectatorInfo> _spectators = new List<SpectatorInfo>();
         private int _nextSpectatorId = -1;
         private int _nextPlayerId;
@@ -127,10 +140,18 @@ namespace xpTURN.Klotho.Network
 
         private IKlothoEngine _engine;
         private ISessionConfig _sessionConfig;
+        private ISimulationConfig _simConfig;
         private IReconnectCredentialsStore _reconnectCredentialsStore;
         private string _appVersion;
         private IDeviceIdProvider _deviceIdProvider;
         private readonly Dictionary<int, string> _peerDeviceIds = new Dictionary<int, string>();
+
+        // Pending extra-delay seed buffered between InitializeFromConnection and SubscribeEngine.
+        // Guest path: _engine is wired only at SubscribeEngine, so the seed value forwarded by
+        // KlothoConnection (Sync scalar / LateJoin+Reconnect Payload.AcceptMessage) must be held here
+        // until the engine is available, then flushed exactly once via ApplyExtraDelay.
+        private int? _pendingExtraDelayValue;
+        private ExtraDelaySource _pendingExtraDelaySource;
 
         // Cached list (GC avoidance)
         private readonly List<(int tick, int playerId)> _hashKeysToRemoveCache = new List<(int tick, int playerId)>();
@@ -175,6 +196,7 @@ namespace xpTURN.Klotho.Network
 
             set
             {
+                var prev = _phase;
                 _phase = value;
                 if (value == SessionPhase.Disconnected || value == SessionPhase.Lobby)
                 {
@@ -184,6 +206,12 @@ namespace xpTURN.Klotho.Network
                     _gameStarted = false;
                     _assignedPlayerIdCount = 0;
                     _nextPlayerId = 1;
+
+                    // Emit PresumedDrop summary on match end transition (Playing → end).
+                    if (prev == SessionPhase.Playing)
+                    {
+                        EmitPresumedDropMetrics(IsHost ? "host" : "guest", LocalPlayerId);
+                    }
                 }
                 _logger?.ZLogInformation($"[KlothoNetworkService] Session phase: {_phase}, SharedClock: {SharedClock.SharedNow}ms");
             }
@@ -214,9 +242,18 @@ namespace xpTURN.Klotho.Network
         {
             _engine = engine;
             _sessionConfig = engine.SessionConfig;
+            _simConfig = engine.SimulationConfig;
             engine.OnVerifiedInputBatchReady += HandleVerifiedInputBatchReady;
             engine.OnDisconnectedInputNeeded += HandleDisconnectedInputNeeded;
             engine.OnCatchupComplete += HandleCatchupComplete;
+
+            // Flush any extra-delay seed buffered during InitializeFromConnection (guest path).
+            // Single-slot — re-entry (e.g. warm reconnect re-running InitializeFromConnection) refills with the new value.
+            if (_pendingExtraDelayValue.HasValue)
+            {
+                _engine.ApplyExtraDelay(_pendingExtraDelayValue.Value, _pendingExtraDelaySource);
+                _pendingExtraDelayValue = null;
+            }
         }
 
         public void Initialize(INetworkTransport transport, ICommandFactory commandFactory, ILogger logger)
@@ -227,6 +264,7 @@ namespace xpTURN.Klotho.Network
             _messageSerializer = new MessageSerializer();
             _emptyCommandCache = _commandFactory.CreateEmptyCommand();
             _sessionConfig = new SessionConfig();  // Default. Replaced in SubscribeEngine().
+            _simConfig = new SimulationConfig();   // Default. Replaced in SubscribeEngine().
 
             // Wire up network events
             _transport.OnDataReceived += HandleDataReceived;
@@ -285,6 +323,7 @@ namespace xpTURN.Klotho.Network
             _messageSerializer = new MessageSerializer();
             _emptyCommandCache = _commandFactory.CreateEmptyCommand();
             _sessionConfig = new SessionConfig();  // Default. Replaced in SubscribeEngine().
+            _simConfig = new SimulationConfig();   // Default. Replaced in SubscribeEngine().
 
             // Apply the handshake result directly (replaces the Initialize + JoinRoom + handshake path)
             IsHost = false;
@@ -293,6 +332,23 @@ namespace xpTURN.Klotho.Network
             _sharedClock = new SharedTimeClock(result.SharedEpoch, result.ClockOffset);
             Phase = SessionPhase.Synchronized;
 
+            // Buffer the server-recommended extra delay until SubscribeEngine wires the engine.
+            // Source differs per JoinKind:
+            //   - LateJoin / Reconnect: payload's AcceptMessage (KlothoConnection preserves the entire msg).
+            //   - Normal (Sync): scalar forwarded via ConnectionResult.RecommendedExtraDelay.
+            // Defensive ?. + ?? 0 guards a Kind/Payload invariant breach (theoretical) with graceful fallback.
+            int seedValue = result.Kind switch
+            {
+                JoinKind.LateJoin  => result.LateJoinPayload?.AcceptMessage?.RecommendedExtraDelay ?? 0,
+                JoinKind.Reconnect => result.ReconnectPayload?.AcceptMessage?.RecommendedExtraDelay ?? 0,
+                _                  => result.RecommendedExtraDelay,
+            };
+            if (seedValue > 0)
+            {
+                _pendingExtraDelayValue = seedValue;
+                _pendingExtraDelaySource = ResolveExtraDelaySource(result.Kind);
+            }
+
             // Wire up network events (same as Initialize)
             _transport.OnDataReceived += HandleDataReceived;
             _transport.OnPeerConnected += HandlePeerConnected;
@@ -300,6 +356,13 @@ namespace xpTURN.Klotho.Network
             _transport.OnConnected += HandleConnected;
             _transport.OnDisconnected += HandleDisconnected;
         }
+
+        private static ExtraDelaySource ResolveExtraDelaySource(JoinKind kind) => kind switch
+        {
+            JoinKind.LateJoin  => ExtraDelaySource.LateJoin,
+            JoinKind.Reconnect => ExtraDelaySource.Reconnect,
+            _                  => ExtraDelaySource.Sync,
+        };
 
         public void CreateRoom(string roomName, int maxPlayers)
         {
@@ -562,6 +625,7 @@ namespace xpTURN.Klotho.Network
             }
 
             // Reconnect: host — check timeout + inject empty inputs
+            CheckQuorumMissPresumedDrop();
             CheckDisconnectedPlayerTimeout();
             InjectDisconnectedPlayerInputs();
             InjectCatchupPlayerInputs();
@@ -733,6 +797,10 @@ namespace xpTURN.Klotho.Network
                 case SpectatorInputMessage catchupMsg:
                     HandleCatchupInputMessage(catchupMsg);
                     break;
+
+                case RecommendedExtraDelayUpdateMessage extraDelayMsg:
+                    HandleRecommendedExtraDelayUpdate(extraDelayMsg);
+                    break;
             }
         }
 
@@ -749,7 +817,20 @@ namespace xpTURN.Klotho.Network
 
             // Guest >> Host >> other guests
             if (IsHost && fromPeerId != -1)
+            {
+                // If the (tick, playerId) slot is sealed locally (host has already filled with
+                // an empty placeholder and chain advanced past it), suppress relay so other peers
+                // keep the same empty placeholder. Without this guard, a late real packet from
+                // the source peer reaches guests un-sealed and overwrites their empty → host vs
+                // guest InputBuffer divergence (silent desync, no §5.5 fallback at P1 stage).
+                bool isSealedHere = _engine != null && _engine.IsCommandSealed(msg.Tick, msg.PlayerId);
+                if (isSealedHere)
+                {
+                    _relaySealDropCount++;
+                    return;
+                }
                 RelayMessage(msg, fromPeerId, DeliveryMethod.ReliableOrdered);
+            }
 
             // DO NOT remove _lateJoinCatchups on first command receipt. Guest's first command
             // (Spawn at JoinTick) arrives within ~ms, well before guest has caught up via input
@@ -768,6 +849,10 @@ namespace xpTURN.Klotho.Network
                 _logger?.ZLogWarning($"[KlothoNetworkService][HandleCommandMessage] DeserializeCommandRaw returned null (dataLen={cmdSpan.Length})");
                 return;
             }
+
+            // Quorum-miss watchdog false-positive: real input arrived for a player that was
+            // presumed-dropped → remove from pool + rollback to restore real command path.
+            OnRealCommandReceivedDuringPresumedDrop(command);
 
             OnCommandReceived?.Invoke(command);
             OnFrameAdvantageReceived?.Invoke(msg.PlayerId, msg.SenderTick);
@@ -855,6 +940,17 @@ namespace xpTURN.Klotho.Network
                 if (player != null)
                 {
                     player.Ping = (int)rtt;
+
+                    if (Phase == SessionPhase.Playing)
+                    {
+                        if (!_rttSmoothers.TryGetValue(playerId, out var smoother))
+                        {
+                            smoother = new PlayerRttSmoother();
+                            _rttSmoothers[playerId] = smoother;
+                        }
+                        smoother.OnSample((int)rtt);
+                        MaybePushExtraDelayUpdate(playerId, peerId);
+                    }
                 }
             }
         }

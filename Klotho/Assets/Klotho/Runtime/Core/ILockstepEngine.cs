@@ -6,6 +6,22 @@ using xpTURN.Klotho.Network;
 namespace xpTURN.Klotho.Core
 {
     /// <summary>
+    /// Source path that invoked ApplyExtraDelay. Used to distinguish the entry context in logs and
+    /// to let consumers branch on the path (e.g., metrics tagging).
+    /// </summary>
+    public enum ExtraDelaySource
+    {
+        /// <summary>Normal-join handshake completion (SyncCompleteMessage).</summary>
+        Sync,
+        /// <summary>Late-join handshake completion (LateJoinAcceptMessage).</summary>
+        LateJoin,
+        /// <summary>Reconnect handshake completion (ReconnectAcceptMessage).</summary>
+        Reconnect,
+        /// <summary>Mid-match server-push update (RecommendedExtraDelayUpdateMessage).</summary>
+        DynamicPush,
+    }
+
+    /// <summary>
     /// Klotho engine state.
     /// </summary>
     public enum KlothoState
@@ -108,6 +124,13 @@ namespace xpTURN.Klotho.Core
         int InputDelay { get; }
 
         /// <summary>
+        /// Server-recommended extra InputDelay ticks currently applied (LateJoin/Reconnect catchup-gap compensation
+        /// plus mid-match dynamic adjustments). Read by transport layer to size LateJoin prefill range so the guest's
+        /// own input chain has empty cmds covering [currentTick, currentTick + InputDelay + RecommendedExtraDelay).
+        /// </summary>
+        int RecommendedExtraDelay { get; }
+
+        /// <summary>
         /// Random seed used for the session. A network-agreed value used by OnInitializeWorld for deterministic initialization.
         /// </summary>
         int RandomSeed { get; }
@@ -123,6 +146,13 @@ namespace xpTURN.Klotho.Core
         /// True only on the SD server; P2P peers, SD Client, Replay, and Spectator are all false.
         /// </summary>
         bool IsServer { get; }
+
+        /// <summary>
+        /// Whether the engine is currently acting as the host in P2P mode.
+        /// True only on the P2P host; P2P guests, SD server/client, Replay, and Spectator are all false.
+        /// Orthogonal to IsServer (SD-specific): a P2P host has IsServer=false.
+        /// </summary>
+        bool IsHost { get; }
 
         /// <summary>
         /// Current simulation stage.
@@ -168,6 +198,33 @@ namespace xpTURN.Klotho.Core
         /// for specific commands without changing the global InputDelayTicks.
         /// </summary>
         void InputCommand(ICommand command, int extraDelay = 0);
+
+        /// <summary>
+        /// Applies the server-recommended extra InputDelay (absolute value) used to compensate the
+        /// LateJoin/Reconnect catchup gap and mid-match RTT shifts. Called from accept-message handlers
+        /// and from periodic server push updates. `source` selects the log tag and metric path.
+        /// </summary>
+        void ApplyExtraDelay(int delay, ExtraDelaySource source);
+
+        /// <summary>
+        /// Client-reactive escalation: bumps the recommended extra InputDelay by `step` (capped at `max`)
+        /// only when the new value is strictly greater than the current value. Used by client-reactive
+        /// fallback when server push is delayed/missed and the client observes repeated PastTick rejects.
+        /// </summary>
+        void EscalateExtraDelay(int step, int max);
+
+        /// <summary>
+        /// Fired after ApplyExtraDelay/EscalateExtraDelay updates the recommended extra delay (newDelay).
+        /// Used by the client-reactive fallback to track the last server-push tick (engine-tick grace window).
+        /// </summary>
+        event Action<int> OnExtraDelayChanged;
+
+        /// <summary>
+        /// Fired when the verified-chain advance stalls because at least one player's command is missing
+        /// for the next tick. Production-active (fires regardless of build flags); the dev-only log path
+        /// is separate and throttled. Used by game-side reactive fallback to count chain-break bursts.
+        /// </summary>
+        event Action OnChainAdvanceBreak;
 
         /// <summary>
         /// Stops the engine and unsubscribes from events.
@@ -254,7 +311,28 @@ namespace xpTURN.Klotho.Core
         void NotifyPlayerLeft(int playerId);
         void PauseForReconnect();
         void ForceInsertCommand(ICommand cmd);
+        /// <summary>
+        /// Range-fills empty commands for [fromTick, toTickInclusive] of a single player and
+        /// triggers a single chain-advance pass. Used by reactive fill to catch the chain
+        /// up to CurrentTick when a peer is presumed-dropped or transport-disconnected.
+        /// Each inserted entry is sealed so a late real packet at the same (tick, playerId)
+        /// is silently dropped — preserves InputBuffer ↔ simulation state consistency.
+        /// </summary>
+        void ForceInsertEmptyCommandsRange(int playerId, int fromTick, int toTickInclusive);
         bool HasCommand(int tick, int playerId);
+
+        /// <summary>
+        /// Returns true if (tick, playerId) is currently sealed in the InputBuffer (by a
+        /// prior range-fill placeholder). Network layer uses this to suppress relay of late
+        /// real packets that would overwrite the sealed empty on other peers.
+        /// </summary>
+        bool IsCommandSealed(int tick, int playerId);
+
+        /// <summary>
+        /// Requests a deferred rollback to targetTick. Merged at frame end if multiple
+        /// requests target different ticks (smallest wins).
+        /// </summary>
+        void RequestRollback(int targetTick);
 
         /// <summary>
         /// Raised when full-state resync fails after the maximum retry count.

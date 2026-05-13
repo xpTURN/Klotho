@@ -111,23 +111,179 @@ namespace xpTURN.Klotho.Network
 
         /// <summary>
         /// Path B: reactive insertion — synchronous callback on engine CanAdvanceTick() failure.
-        /// Inserts directly via ForceInsertCommand() at Engine.CurrentTick, no broadcast.
+        /// Range-fills [_lastVerifiedTick+1, CurrentTick] for each disconnected/presumed-dropped
+        /// player so the chain can advance past the stall window in a single pass. Sealing inside
+        /// ForceInsertEmptyCommandsRange protects against late real packet overwrites.
         /// </summary>
         private void HandleDisconnectedInputNeeded(int tick)
         {
+            // Host-only — pool is host-only managed. Also guards SendCommand inside
+            // FillAndBroadcastDisconnectedRange from running on guests.
+            if (!IsHost || _engine == null) return;
+
+            int rangeFrom = _engine.LastVerifiedTick + 1;
+            int rangeTo = tick; // caller passes CurrentTick — fill the entire stall window
+            if (rangeTo < rangeFrom) return;
+
             for (int i = 0; i < _disconnectedPlayerInfoPool.Length; i++)
             {
                 var info = _disconnectedPlayerInfoPool[i];
                 if (!info.IsActive)
                     continue;
 
-                if (_engine.HasCommand(tick, info.PlayerId))
-                    continue;
-
-                _commandFactory.PopulateEmpty(_emptyCommandCache, info.PlayerId, tick);
-                _engine.ForceInsertCommand(_emptyCommandCache);
+                FillAndBroadcastDisconnectedRange(info.PlayerId, rangeFrom, rangeTo);
+                // Range fill increments by 1 per call (not per tick filled) to avoid false
+                // timeout trigger when stall window is large.
                 info.PredictedTickCount++;
             }
+        }
+
+        // Shared by CheckQuorumMissPresumedDrop (activation-time direct fill) and
+        // HandleDisconnectedInputNeeded (reactive fill on CanAdvanceTick failure). Host-only.
+        // Performs local fill + seal via ForceInsertEmptyCommandsRange, then broadcasts the
+        // same empty cmds so other guests fill their InputBuffer too (P2P star — host is the
+        // single source for this player's input during presumed-drop / disconnected state).
+        private void FillAndBroadcastDisconnectedRange(int playerId, int fromTick, int toTick)
+        {
+            if (toTick < fromTick || _engine == null || _commandFactory == null) return;
+
+            _engine.ForceInsertEmptyCommandsRange(playerId, fromTick, toTick);
+
+            for (int t = fromTick; t <= toTick; t++)
+            {
+                _commandFactory.PopulateEmpty(_emptyCommandCache, playerId, t);
+                SendCommand(_emptyCommandCache);
+            }
+        }
+
+        #endregion
+
+        #region Reconnect: quorum-miss watchdog
+
+        // Telemetry counters — emitted at match end via EmitPresumedDropMetrics().
+        private int _presumedDropFalsePositiveCount;
+        private int _presumedDropTrueCount;
+        // Counts cmds dropped from relay due to local seal (Phase 2-1 ②-B). High count
+        // signals frequent late retransmits that would have caused cross-peer divergence
+        // without the seal guard.
+        private int _relaySealDropCount;
+
+        // Each frame: if a remote peer's input is missing at _lastVerifiedTick + 1 for >=
+        // QuorumMissDropTicks, mark them as presumed-dropped so reactive empty-fill activates
+        // before the transport-level DisconnectTimeout fires (~5s).
+        private void CheckQuorumMissPresumedDrop()
+        {
+            if (!IsHost || _engine == null || _simConfig == null)
+                return;
+
+            int threshold = _simConfig.QuorumMissDropTicks;
+            if (threshold <= 0)
+                return;
+
+            int verifiedTick = _engine.LastVerifiedTick;
+            int currentTick = _engine.CurrentTick;
+            int lag = currentTick - verifiedTick;
+            if (lag < threshold)
+                return;
+
+            int stallTick = verifiedTick + 1;
+
+            for (int i = 0; i < _players.Count; i++)
+            {
+                var player = _players[i];
+                int playerId = player.PlayerId;
+
+                // Local player's input is always present (auto-injected empty).
+                if (playerId == LocalPlayerId)
+                    continue;
+
+                // Already tracked as disconnected (transport-detected or previously presumed).
+                if (IsPlayerDisconnected(playerId))
+                    continue;
+
+                // Peer has provided input at the stall tick — no presumed drop needed.
+                if (_engine.HasCommand(stallTick, playerId))
+                    continue;
+
+                var info = RentDisconnectedInfo();
+                if (info == null)
+                    continue;
+
+                info.PlayerId = playerId;
+                info.PeerId = -1;
+                info.DisconnectTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                info.LastConfirmedTick = verifiedTick;
+                info.PredictedTickCount = 0;
+                info.IsPresumedDrop = true;
+                _disconnectedPlayerCount++;
+
+                _engine.NotifyPlayerDisconnected(playerId);
+
+                _logger?.ZLogInformation($"[KlothoNetworkService][PresumedDrop] Activated quorum-miss watchdog: playerId={playerId}, stallTick={stallTick}, lag={lag}, threshold={threshold}");
+
+                // Directly fill the stall window. CanAdvanceTick may never fail if peer is
+                // sending late inputs at currentTick, so cannot rely on OnDisconnectedInputNeeded
+                // callback alone. Fill is host-local + broadcast to keep all peers in sync.
+                FillAndBroadcastDisconnectedRange(playerId, stallTick, currentTick);
+            }
+        }
+
+        // Called from HandleCommandMessage when a real command arrives. If the player was
+        // previously marked as presumed-dropped by the watchdog AND the cmd is AT the current
+        // stall tick (= _lastVerifiedTick + 1), treat as recovery and clear presumed-drop state.
+        // Late inputs for ticks past the stall don't recover the gap — keep presumed-drop active
+        // so empty fill / broadcast continues.
+        // Host-only: the disconnected player pool is managed by host only.
+        private void OnRealCommandReceivedDuringPresumedDrop(ICommand command)
+        {
+            if (!IsHost) return;
+            if (command == null) return;
+            int playerId = command.PlayerId;
+            var info = FindDisconnectedInfo(playerId);
+            if (info == null || !info.IsPresumedDrop)
+                return;
+
+            // Only the exact stall tick is a recovery signal. Use dynamic stall tick from engine
+            // since _lastVerifiedTick may advance between activation and this callback.
+            int stallTick = (_engine?.LastVerifiedTick ?? info.LastConfirmedTick) + 1;
+            if (command.Tick != stallTick)
+                return;
+
+            int presumedDuration = _engine != null ? _engine.CurrentTick - info.LastConfirmedTick : 0;
+
+            info.Reset();
+            _disconnectedPlayerCount--;
+            _presumedDropFalsePositiveCount++;
+
+            // Sync engine state. Without this, _disconnectedPlayerIds stays populated while
+            // the pool entry is gone — next watchdog iteration would re-add via RentDisconnectedInfo.
+            _engine?.NotifyPlayerReconnected(playerId);
+
+            _logger?.ZLogInformation($"[KlothoNetworkService][PresumedDrop] False positive — real input arrived at stallTick: playerId={playerId}, stallTick={stallTick}, presumedDurationTicks={presumedDuration}");
+        }
+
+        // Promote a presumed-drop entry to a confirmed transport disconnect. Called from
+        // HandlePeerDisconnected when the entry already exists. Returns true if the entry
+        // was a presumed-drop (so caller skips the normal Add path).
+        private bool PromotePresumedDropToConfirmed(int playerId, int peerId)
+        {
+            var info = FindDisconnectedInfo(playerId);
+            if (info == null || !info.IsPresumedDrop)
+                return false;
+
+            info.IsPresumedDrop = false;
+            info.PeerId = peerId;
+            _presumedDropTrueCount++;
+            return true;
+        }
+
+        internal void EmitPresumedDropMetrics(string role, int playerId)
+        {
+            // Host-only: watchdog and relay seal guard increment counters only on host.
+            if (!IsHost) return;
+            int total = _presumedDropFalsePositiveCount + _presumedDropTrueCount;
+            float ratio = total > 0 ? (float)_presumedDropFalsePositiveCount / total : 0f;
+            _logger?.ZLogInformation($"[Metrics][PresumedDrop] role={role} playerId={playerId} falsePositive={_presumedDropFalsePositiveCount} truePositive={_presumedDropTrueCount} ratio={ratio:F3} relaySealDrop={_relaySealDropCount}");
         }
 
         #endregion
@@ -273,7 +429,7 @@ namespace xpTURN.Klotho.Network
         private void HandleReconnectAccept(ReconnectAcceptMessage msg)
         {
             if (_reconnectState != ReconnectState.SendingRequest)
-                return;
+                return;   // KlothoConnection bypass possible — primary apply via InitializeFromConnection pending buffer.
 
             LocalPlayerId = msg.PlayerId;
             _sharedClock = new SharedTimeClock(msg.SharedEpoch, msg.ClockOffset);
@@ -281,6 +437,11 @@ namespace xpTURN.Klotho.Network
 
             _reconnectState = ReconnectState.WaitingForFullState;
             _fullStateRequestTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            // Defensive — primary application happens via InitializeFromConnection pending buffer.
+            // Warm Reconnect (this handler reached): engine reused → overwrites prior value.
+            // Caller responsibility: this handler is reached only when engine is wired.
+            _engine.ApplyExtraDelay(msg.RecommendedExtraDelay, ExtraDelaySource.Reconnect);
         }
 
         private void RebuildPlayerList(int playerCount, List<int> playerIds, List<byte> connectionStates)
@@ -373,6 +534,8 @@ namespace xpTURN.Klotho.Network
             }
 
             // 5. Accept the reconnect
+            // Snapshot RTT sample before info.Reset() clears LastAvgRtt — used below to seed RecommendedExtraDelay.
+            int reconnectAvgRtt = info.LastAvgRtt;
             _peerToPlayer[peerId] = msg.PlayerId;
             info.Reset();
             _disconnectedPlayerCount--;
@@ -412,6 +575,8 @@ namespace xpTURN.Klotho.Network
             _reconnectAcceptCache.DesyncThresholdForResync = _sessionConfig.DesyncThresholdForResync;
             _reconnectAcceptCache.CountdownDurationMs = _sessionConfig.CountdownDurationMs;
             _reconnectAcceptCache.CatchupMaxTicksPerFrame = _sessionConfig.CatchupMaxTicksPerFrame;
+            _reconnectAcceptCache.RecommendedExtraDelay =
+                ComputeRecommendedExtraDelay(reconnectAvgRtt, msg.PlayerId, peerId, "Reconnect");
 
             using (var serialized = _messageSerializer.SerializePooled(_reconnectAcceptCache))
                 _transport.Send(peerId, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
@@ -422,15 +587,83 @@ namespace xpTURN.Klotho.Network
             // 9. Register cold-start catchup so SpectatorInputMessage batches flow to the reconnecting peer.
             //    JoinTick = CurrentTick (immediate — existing PlayerId, no PlayerJoinCommand).
             //    IsReconnect=true skips OnLateJoinPlayerAdded (= PlayerJoinCommand insertion).
+            //    LastSentTick = currentTick - 1 so the catchup batch starts at currentTick
+            //    (= FullStateTick). Reconnect receiver's _lastVerifiedTick lands at FullStateTick - 1,
+            //    so it needs FullStateTick's quorum to advance — but the receiver is still in
+            //    _activePlayerIds (unlike a brand-new LateJoin player), so without this off-by-one
+            //    fix the catchup misses sending FullStateTick's [other-player inputs] entirely and
+            //    the receiver's chain stalls permanently at FullStateTick.
             int currentTick = _engine?.CurrentTick ?? 0;
+            // JoinTick extends by InputDelay (+ host's RecommendedExtraDelay) to cover the
+            // input slots whose P2P broadcasts the reconnect peer missed during disconnect.
+            // Other players' input for tick T is broadcast at host tick (T - InputDelay -
+            // host_extraDelay); the reconnect peer must catch up that window or its chain
+            // stalls at JoinTick + 1 waiting for those inputs.
+            int inputDelay = _engine?.InputDelay ?? 0;
+            int recommendedExtraDelay = _engine?.RecommendedExtraDelay ?? 0;
+            int joinTick = currentTick + inputDelay + recommendedExtraDelay;
             _lateJoinCatchups[peerId] = new LateJoinCatchupInfo
             {
                 PeerId = peerId,
                 PlayerId = msg.PlayerId,
-                LastSentTick = currentTick,
-                JoinTick = currentTick,
+                LastSentTick = currentTick - 1,
+                JoinTick = joinTick,
                 IsReconnect = true,
             };
+
+            // Zombie cleanup: disconnect port-retry sibling sockets from the same reconnecting
+            // client. KlothoConnection's reconnect pattern accepts multiple transport sockets;
+            // only one carries the ReconnectRequest. Others linger as zombies, polluting
+            // _transport.Broadcast delivery to the legit peer.
+            //
+            // Keep criteria (conservative — wrong cleanup permanently kills legit peers, and
+            // client-side does NOT auto-retry):
+            //   - _peerToPlayer: registered players (incl. just-reconnected one above)
+            //   - _peerSyncStates: mid-handshake peers (cold-start sync / LateJoin sync)
+            //   - _spectators: registered spectators (no _peerToPlayer entry by design)
+            //
+            // NOTE: _pendingPeers is intentionally NOT a keep collection. Zombie port-retry
+            // peers also occupy _pendingPeers (they never deliver app data, so the Remove
+            // at first-msg never fires). Protecting _pendingPeers would shield zombies and
+            // defeat this cleanup. Legit Step 1 cold-start peers are protected only by the
+            // bundle window narrowness below.
+            //
+            // Bundle filter: peer accepted within +/-BUNDLE_WINDOW_MS of reconnect peer's
+            // accept time. Tighter than age-based — port-retry burst is ~tens of ms; unrelated
+            // cold-start peers virtually never accept within the window of a reconnect event.
+            const long BUNDLE_WINDOW_MS = 200;
+            if (!_peerConnectedAtMs.TryGetValue(peerId, out var reconnectAcceptedAtMs))
+            {
+                reconnectAcceptedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
+            // Snapshot before iterating — DisconnectPeer may trigger synchronous unregister
+            // on the transport side, mutating its internal peer collection.
+            _zombieScanSnapshot.Clear();
+            foreach (var id in _transport.GetConnectedPeerIds())
+                _zombieScanSnapshot.Add(id);
+            int cleanupCount = 0;
+            for (int idx = 0; idx < _zombieScanSnapshot.Count; idx++)
+            {
+                int connectedPeerId = _zombieScanSnapshot[idx];
+                if (connectedPeerId == peerId) continue;
+                if (_peerToPlayer.ContainsKey(connectedPeerId)) continue;
+                if (_peerSyncStates.ContainsKey(connectedPeerId)) continue;
+                bool isSpectator = false;
+                for (int i = 0; i < _spectators.Count; i++)
+                {
+                    if (_spectators[i].PeerId == connectedPeerId) { isSpectator = true; break; }
+                }
+                if (isSpectator) continue;
+                if (!_peerConnectedAtMs.TryGetValue(connectedPeerId, out var connAt))
+                    continue;
+                long deltaMs = System.Math.Abs(connAt - reconnectAcceptedAtMs);
+                if (deltaMs > BUNDLE_WINDOW_MS) continue;
+                _logger?.ZLogDebug($"[KlothoNetworkService][ZombieCleanup] peerId={connectedPeerId}, reason=bundle, deltaMs={deltaMs}");
+                _transport.DisconnectPeer(connectedPeerId);
+                cleanupCount++;
+            }
+            if (cleanupCount > 0)
+                _logger?.ZLogDebug($"[KlothoNetworkService][ZombieCleanupSummary] reconnectPeerId={peerId}, disconnected={cleanupCount}, bundleMs={BUNDLE_WINDOW_MS}");
 
             // 10. Restore player state + raise events
             var player = _players.Find(p => p.PlayerId == msg.PlayerId);

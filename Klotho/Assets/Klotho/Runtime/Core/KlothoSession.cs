@@ -188,6 +188,8 @@ namespace xpTURN.Klotho.Core
 
             // 7.5 Late Join injection: restore FullState + start Catchup + seed existing players' PlayerConfig.
             //     Since there is no HandleGameStart path, seed manually at this point.
+            //     The extra-delay value from the accept message is applied by SDClientService.SubscribeEngine
+            //     (drains a pending value buffered when the handshake handler fired before the engine existed).
             if (isLateJoin)
             {
                 engine.SeedLateJoinFullState(setup.Connection.LateJoinPayload);

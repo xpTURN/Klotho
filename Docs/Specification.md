@@ -231,6 +231,9 @@ Configuration is split into two layers.
 | SDInputLeadTicks | 0 | ticks | (SD) Initial client lead ticks at game start. **0 = auto (default 10)**. Reused on LateJoin/Reconnect. Additive with InputDelayTicks; reflected in HardToleranceMs auto-calc |
 | EnableErrorCorrection | false | bool | Enable Error Correction (default off). Enable selectively in high-latency / multiplayer scenarios |
 | InterpolationDelayTicks | 3 | ticks | View-layer snapshot interpolation delay (used by RenderClock.VerifiedBaseTick = LastVerifiedTick - InterpolationDelayTicks). Recommended [1, 3]. SD: upper bound for AdaptiveRenderClock |
+| LateJoinDelaySafety | 2 | ticks | Safety margin added to RTT-based extra-delay computation on Sync / LateJoin / Reconnect. Also used as the standalone fallback when avgRtt is invalid / out of the sane range |
+| RttSanityMaxMs | 240 | ms | Upper bound for accepting avgRtt as a sane measurement. Samples exceeding this fall back to `LateJoinDelaySafety` only |
+| QuorumMissDropTicks | 20 | ticks | (P2P) Quorum-miss watchdog threshold. If a remote peer's input is missing at `_lastVerifiedTick + 1` for at least this many ticks, the peer is presumed-dropped and reactive empty-fill activates before the transport-level DisconnectTimeout. 0 disables. Safe range 10~80 |
 | EventDispatchWarnMs | 5 | ms | Warning threshold for OnEvent* handler execution time (DEVELOPMENT_BUILD / UNITY_EDITOR only). 0 or less = disabled |
 | TickDriftWarnMultiplier | 2 | × | Tick-loop drift warning multiplier (warns if actual interval > TickIntervalMs × multiplier). 0 or less = disabled |
 
@@ -259,9 +262,12 @@ Configuration is split into two layers.
 | OnTickExecuted | `Action<int>` | After every tick is executed (passes tick number) |
 | OnTickExecutedWithState | `Action<int, FrameState>` | After every tick (tick, Predicted/Verified) |
 | OnFrameVerified | `Action<int>` | On Predicted → Verified transition |
+| OnChainAdvanceBreak | `Action` | Verified-chain advance failed at the next tick (P2P: pending input for an active player). Drives reactive empty-fill / dynamic-delay escalation |
 | OnDesyncDetected | `Action<long, long>` | State-hash mismatch detected (localHash, remoteHash). The network-service variant (§9.5) is the extended `Action<int,int,long,long>` |
 | OnRollbackExecuted | `Action<int, int>` | Rollback completed (fromTick, toTick) |
 | OnRollbackFailed | `Action<int, string>` | Rollback failed (requestedTick, reason) |
+| OnCommandRejected | `Action<int, int, RejectionReason>` | (SD client) Server rejected a client input (tick, cmdTypeId, reason) |
+| OnExtraDelayChanged | `Action<int>` | Recommended extra InputDelay (ticks) changed. Fired on `ApplyExtraDelay` (Sync / LateJoin / Reconnect / DynamicPush) and `EscalateExtraDelay` (reactive escalation) |
 | OnEventPredicted | `Action<int, SimulationEvent>` | Event raised on a Predicted tick |
 | OnEventConfirmed | `Action<int, SimulationEvent>` | First firing of a Regular event that was confirmed without prediction (verified-direct, replay, new on rollback) |
 | OnEventCanceled | `Action<int, SimulationEvent>` | Predicted event canceled by rollback |
@@ -910,11 +916,15 @@ INetworkTransport:
 | ReconnectAccept | 71 | Reconnect accept |
 | ReconnectReject | 72 | Reconnect reject |
 | LateJoinAccept | 73 | Late-join accept |
+| RecommendedExtraDelayUpdate | 74 | Dynamic InputDelay push (server → client) when smoothed RTT change crosses the asymmetric UP/DOWN threshold. Seed value also carried inline on SyncComplete / LateJoinAccept / ReconnectAccept |
 | **Server-Driven Mode** | | |
 | ClientInput | 80 | Client → server input |
 | VerifiedState | 81 | Server → client verified state |
 | InputAck | 82 | Server's input-receipt ack |
 | ClientInputBundle | 83 | Bundled input transmission |
+| PlayerBootstrapReady | 84 | Client → server: bootstrap completed (player ready) — bootstrap handshake |
+| BootstrapBegin | 85 | Server → client: open bootstrap window (FirstTick, TickStartTimeMs) |
+| CommandRejected | 86 | Server → client unicast on input rejection (tick, cmdTypeId, RejectionReason). Surfaces as engine `OnCommandRejected` (§2.3) on the originating client |
 | **Config Layer** | | |
 | SimulationConfig | 90 | Simulation-parameter payload |
 | PlayerConfig | 91 | Per-player config payload |

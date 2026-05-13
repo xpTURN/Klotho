@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Extensions.Logging;
 using ZLogger;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
@@ -86,6 +87,31 @@ namespace xpTURN.Klotho.Network
         private int _pingSequence;
         private long _gameStartTime;
 
+        // RTT metrics (match identification)
+        public static bool RttMetricsEnabled = false;   // global runtime toggle: off → 0 emit / 0 GC for sample path
+        private int _roomId = -1;         // -1 sentinel distinguishes missed SetRoomId from valid roomId=0
+        private long _matchId;
+        private long _playingStartMs;
+        private readonly Dictionary<int, MatchRttAccumulator> _matchRttAcc = new Dictionary<int, MatchRttAccumulator>();
+
+        // Per-player short-window RTT smoother. Populated regardless of RttMetricsEnabled —
+        // intended consumer is the push-decision path
+        // 5-sample sliding median (≈5s window at PING_INTERVAL_MS=1000) rejects single-spike outliers.
+        private readonly Dictionary<int, PlayerRttSmoother> _rttSmoothers = new Dictionary<int, PlayerRttSmoother>();
+
+        // Dynamic InputDelay push state. Keyed by peerId — reset on disconnect.
+        // Seed entries written at CompletePeerSync to avoid redundant first push.
+        private readonly Dictionary<int, int> _lastPushedExtraDelay = new Dictionary<int, int>();
+        private readonly Dictionary<int, long> _lastPushTimeMs = new Dictionary<int, long>();
+        private const int EXTRA_DELAY_PUSH_THRESHOLD_UP = 2;       // ticks — fast UP response (storm prevention)
+        private const int EXTRA_DELAY_PUSH_THRESHOLD_DOWN = 4;     // ticks — conservative DOWN (oscillation buffer)
+        private const long MIN_PUSH_INTERVAL_MS = 500;             // per-peer push frequency cap
+
+        // PastTick burst tracker — emits [Metrics][BurstDuration] when reject silence > threshold,
+        // or on disconnect / Phase transition for final flush.
+        private readonly Dictionary<int, PastTickBurstState> _pastTickBursts = new Dictionary<int, PastTickBurstState>();
+        private const long BURST_SILENCE_THRESHOLD_MS = 1000;
+
         // Reconnect support
         private DisconnectedPlayerInfo[] _disconnectedPlayerPool;
         private int _disconnectedPlayerCount;
@@ -116,6 +142,18 @@ namespace xpTURN.Klotho.Network
         private byte[] _lastVerifiedBytes;
         private int _lastVerifiedBytesLength;
         private int _lastVerifiedTick;
+
+        // ── Smoothed RTT (push-decision path consumer) ────────────────────
+
+        // Returns false until MIN_SAMPLES (=3) pongs observed for this player.
+        // Returns median of up to BUFFER_SIZE (=5) most recent samples — single-spike resistant.
+        internal bool TryGetSmoothedRtt(int playerId, out int rttMs)
+        {
+            if (_rttSmoothers.TryGetValue(playerId, out var smoother))
+                return smoother.TryGetSmoothedRtt(out rttMs);
+            rttMs = 0;
+            return false;
+        }
 
         // ── Draining check (referenced by Room) ────────────────────
 
@@ -151,6 +189,22 @@ namespace xpTURN.Klotho.Network
                 }
 
                 _phase = value;
+                // Lobby branch is defensively retained but unreachable in current code paths
+                // (HandlePeerDisconnected guards Phase != Playing; SNS instances are fresh per Room).
+                if (prevPhase == SessionPhase.Playing &&
+                    (value == SessionPhase.Disconnected || value == SessionPhase.Lobby))
+                {
+                    foreach (var kvp in _matchRttAcc)
+                        EmitRttMatchAggregate(kvp.Value);
+                    _matchRttAcc.Clear();
+                    _rttSmoothers.Clear();
+                    _lastPushedExtraDelay.Clear();
+                    _lastPushTimeMs.Clear();
+                    // Final flush of any in-progress PastTick bursts before clearing.
+                    foreach (var kvp in _pastTickBursts)
+                        EmitBurstDuration(kvp.Key, kvp.Value);
+                    _pastTickBursts.Clear();
+                }
                 if (value == SessionPhase.Disconnected || value == SessionPhase.Lobby)
                 {
                     // Disconnected = teardown signal, Lobby = fresh session start.
@@ -173,6 +227,8 @@ namespace xpTURN.Klotho.Network
                     _bootstrapTimedOut = false;
                     _bootstrapWindowOpenedTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     _inputCollector?.SetBootstrapPending(true);
+                    _playingStartMs = _bootstrapWindowOpenedTimeMs;
+                    _matchId = _playingStartMs;
                 }
                 _logger?.ZLogInformation($"[ServerNetworkService] Session phase: {_phase}, SharedClock: {SharedClock.SharedNow}ms");
             }
@@ -253,6 +309,42 @@ namespace xpTURN.Klotho.Network
         private void HandleInputCollectorRejected(int peerId, int tick, int cmdTypeId, RejectionReason reason)
         {
             TryUnicastReject(peerId, tick, cmdTypeId, reason);
+            if (reason == RejectionReason.PastTick)
+                TrackPastTickBurst(peerId);
+        }
+
+        private void TrackPastTickBurst(int peerId)
+        {
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (_pastTickBursts.TryGetValue(peerId, out var burst))
+            {
+                if (nowMs - burst.LastRejectMs > BURST_SILENCE_THRESHOLD_MS)
+                {
+                    EmitBurstDuration(peerId, burst);
+                    burst.Reset(nowMs);
+                }
+                else
+                {
+                    burst.LastRejectMs = nowMs;
+                    burst.RejectCount++;
+                }
+            }
+            else
+            {
+                _pastTickBursts[peerId] = new PastTickBurstState
+                {
+                    FirstRejectMs = nowMs,
+                    LastRejectMs = nowMs,
+                    RejectCount = 1,
+                };
+            }
+        }
+
+        private void EmitBurstDuration(int peerId, PastTickBurstState burst)
+        {
+            long durationMs = burst.LastRejectMs - burst.FirstRejectMs;
+            _logger?.ZLogInformation(
+                $"[Metrics][BurstDuration] {{\"peerId\":{peerId},\"firstRejectMs\":{burst.FirstRejectMs},\"lastRejectMs\":{burst.LastRejectMs},\"durationMs\":{durationMs},\"rejectCount\":{burst.RejectCount}}}");
         }
 
         public void SubscribeEngine(IKlothoEngine engine)
@@ -298,6 +390,8 @@ namespace xpTURN.Klotho.Network
 
             InitDisconnectedPlayerPool(maxPlayers);
         }
+
+        public void SetRoomId(int roomId) => _roomId = roomId;
 
         /// <summary>
         /// Starts server listening. Call after CreateRoom.
@@ -1051,7 +1145,121 @@ namespace xpTURN.Klotho.Network
                 var player = _players.Find(p => p.PlayerId == playerId);
                 if (player != null)
                     player.Ping = (int)rtt;
+
+                // Feed short-window smoother (always-on; consumer = push-decision path).
+                // Independent of RttMetricsEnabled (which gates measurement-only emit).
+                if (Phase == SessionPhase.Playing)
+                {
+                    if (!_rttSmoothers.TryGetValue(playerId, out var smoother))
+                    {
+                        smoother = new PlayerRttSmoother();
+                        _rttSmoothers[playerId] = smoother;
+                    }
+                    smoother.OnSample((int)rtt);
+                    MaybePushExtraDelayUpdate(playerId, peerId);
+                }
+
+                if (Phase == SessionPhase.Playing && RttMetricsEnabled)
+                {
+                    long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    long matchTimeSec = (nowMs - _playingStartMs) / 1000;
+                    _logger?.ZLogInformation(
+                        $"[Metrics][RttSample] {{\"v\":1,\"roomId\":{_roomId},\"playerId\":{playerId},\"peerId\":{peerId},\"sampleMs\":{rtt},\"matchId\":{_matchId},\"matchTimeSec\":{matchTimeSec}}}");
+
+                    if (!_matchRttAcc.TryGetValue(playerId, out var acc))
+                    {
+                        acc = new MatchRttAccumulator
+                        {
+                            RoomId = _roomId,
+                            MatchId = _matchId,
+                            PlayerId = playerId,
+                            PeerId = peerId,
+                            StartTimeMs = nowMs,
+                        };
+                        _matchRttAcc[playerId] = acc;
+                    }
+                    if (acc.PrevSampleMs > 0 && rtt >= acc.PrevSampleMs * 2) acc.SpikeCount++;
+                    if (rtt > 250) acc.ThresholdExceedCount++;
+                    acc.Samples.Add((int)rtt);
+                    acc.PrevSampleMs = (int)rtt;
+                }
             }
+        }
+
+        private void EmitRttMatchAggregate(MatchRttAccumulator acc)
+        {
+            if (acc.Samples.Count == 0) return;
+            long durationSec = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - acc.StartTimeMs) / 1000;
+            // one-shot at match end — single sort allocation tolerated
+            var sorted = acc.Samples.OrderBy(x => x).ToArray();
+            int min = sorted[0], max = sorted[^1];
+            int mean = (int)acc.Samples.Average();
+            int p50 = sorted[sorted.Length / 2];
+            int p95 = sorted[(int)(sorted.Length * 0.95)];
+            int p99 = sorted[(int)(sorted.Length * 0.99)];
+            double thresholdExceedFrac = (double)acc.ThresholdExceedCount / acc.Samples.Count;
+            string fracStr = thresholdExceedFrac.ToString("F4", System.Globalization.CultureInfo.InvariantCulture);
+            _logger?.ZLogInformation(
+                $"[Metrics][RttMatch] {{\"v\":1,\"roomId\":{acc.RoomId},\"playerId\":{acc.PlayerId},\"matchId\":{acc.MatchId},\"durationSec\":{durationSec},\"sampleCount\":{acc.Samples.Count},\"min\":{min},\"max\":{max},\"mean\":{mean},\"p50\":{p50},\"p95\":{p95},\"p99\":{p99},\"spikeCount\":{acc.SpikeCount},\"thresholdExceedFrac\":{fracStr}}}");
+            acc.Samples.Clear();
+        }
+
+        // ── Dynamic InputDelay push ─────────────────────────────────────
+
+        private void MaybePushExtraDelayUpdate(int playerId, int peerId)
+        {
+            if (!_rttSmoothers.TryGetValue(playerId, out var smoother))
+                return;
+            if (!smoother.TryGetSmoothedRtt(out int smoothedRtt))
+                return;
+
+            // Pure compute — no per-sample log emit. Instance wrapper (which emits
+            // [ServerNetworkService][{tag}] + [Metrics][{tag}]) is reserved for 1-shot entry events
+            // (Sync / LateJoin / Reconnect). Mid-match emits are limited to actual push events
+            // via [Metrics][DynamicDelay] with tag="DynamicDelayPush".
+            var (newExtraDelay, _, _, _, _) = RecommendedExtraDelayCalculator.Compute(
+                smoothedRtt,
+                _simConfig.TickIntervalMs,
+                _simConfig.LateJoinDelaySafety,
+                _simConfig.RttSanityMaxMs,
+                _simConfig.MaxRollbackTicks);
+
+            // First entry path is seeded at CompletePeerSync / CompleteLateJoinSync /
+            // HandleReconnectRequest, so this lookup normally hits. If absent (race or path
+            // gap), treat lastPushed as 0 and require asymmetric UP threshold for first push.
+            int lastPushed = _lastPushedExtraDelay.TryGetValue(peerId, out int v) ? v : 0;
+            int diff = newExtraDelay - lastPushed;
+            int absDiff = diff >= 0 ? diff : -diff;
+            int threshold = (diff > 0) ? EXTRA_DELAY_PUSH_THRESHOLD_UP : EXTRA_DELAY_PUSH_THRESHOLD_DOWN;
+            if (absDiff < threshold)
+                return;
+
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (_lastPushTimeMs.TryGetValue(peerId, out long lastTime)
+                && now - lastTime < MIN_PUSH_INTERVAL_MS)
+                return;
+
+            string reason = diff > 0 ? "threshold_up" : "threshold_down";
+            PushExtraDelayUpdate(peerId, playerId, newExtraDelay, smoothedRtt, lastPushed, reason);
+            _lastPushedExtraDelay[peerId] = newExtraDelay;
+            _lastPushTimeMs[peerId] = now;
+        }
+
+        private void PushExtraDelayUpdate(int peerId, int playerId, int extraDelay, int avgRttMs, int prevDelay, string reason)
+        {
+            var msg = new RecommendedExtraDelayUpdateMessage
+            {
+                RecommendedExtraDelay = extraDelay,
+                AvgRttMs = avgRttMs,
+            };
+            using (var serialized = _messageSerializer.SerializePooled(msg))
+            {
+                _transport.Send(peerId, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
+            }
+            _logger?.ZLogDebug(
+                $"[ServerNetworkService][DynamicDelay] Push: peerId={peerId}, prev={prevDelay}, new={extraDelay}, avgRtt={avgRttMs}ms");
+            _logger?.ZLogInformation(
+                $"[Metrics][DynamicDelay] {{\"playerId\":{playerId},\"peerId\":{peerId},\"tag\":\"DynamicDelayPush\",\"avgRtt\":{avgRttMs},\"prevDelay\":{prevDelay},\"newDelay\":{extraDelay},\"reason\":\"{reason}\"}}");
         }
 
         // ── Handshake ─────────────────────────────────────
@@ -1086,9 +1294,30 @@ namespace xpTURN.Klotho.Network
                             info.PredictedTickCount = 0;
                             _peerDeviceIds.TryGetValue(peerId, out var disconnectedDeviceId);
                             info.DeviceId = disconnectedDeviceId ?? string.Empty;
+                            // Capture last RTT sample before _peerSyncStates removal — Reconnect's new
+                            // peerId would otherwise miss this entry.
+                            if (_peerSyncStates.TryGetValue(peerId, out var disconnSyncState))
+                                disconnSyncState.GetBestSample(out info.LastAvgRtt, out _);
                             _disconnectedPlayerCount++;
                             _engine?.NotifyPlayerDisconnected(playerId);
                             OnPlayerDisconnected?.Invoke(player);
+                            if (_matchRttAcc.TryGetValue(playerId, out var rttAcc))
+                            {
+                                EmitRttMatchAggregate(rttAcc);
+                                _matchRttAcc.Remove(playerId);
+                            }
+                            // Reconnect window: drop smoother. Fresh entry will be created on first
+                            // pong from the new peer — RTT distribution may differ on reconnect.
+                            _rttSmoothers.Remove(playerId);
+                            // peerId changes on reconnect → push state for the old peerId becomes stale.
+                            _lastPushedExtraDelay.Remove(peerId);
+                            _lastPushTimeMs.Remove(peerId);
+                            // Flush any in-progress PastTick burst for the disconnecting peer.
+                            if (_pastTickBursts.TryGetValue(peerId, out var pendingBurst))
+                            {
+                                EmitBurstDuration(peerId, pendingBurst);
+                                _pastTickBursts.Remove(peerId);
+                            }
                         }
                         else
                         {
@@ -1235,13 +1464,18 @@ namespace xpTURN.Klotho.Network
                 LastAckedTick = -1
             };
 
+            int seedExtraDelay = ComputeRecommendedExtraDelay(avgRtt, newPlayerId, peerId, "Sync");
             var syncComplete = new SyncCompleteMessage
             {
                 Magic = _sessionMagic,
                 PlayerId = newPlayerId,
                 SharedEpoch = _sharedClock.SharedEpoch,
-                ClockOffset = avgOffset
+                ClockOffset = avgOffset,
+                RecommendedExtraDelay = seedExtraDelay,
             };
+            // Seed push baseline with the handshake-time value sent in SyncCompleteMessage so the
+            // first MaybePushExtraDelayUpdate compares against the value the client already applied.
+            _lastPushedExtraDelay[peerId] = seedExtraDelay;
             using (var serialized = _messageSerializer.SerializePooled(syncComplete))
             {
                 _transport.Send(peerId, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
@@ -1483,6 +1717,33 @@ namespace xpTURN.Klotho.Network
                 _assignedPlayerIdCount++;
             }
             return true;
+        }
+
+        private class MatchRttAccumulator
+        {
+            public int RoomId;
+            public long MatchId;
+            public int PlayerId;
+            public int PeerId;
+            public long StartTimeMs;
+            public List<int> Samples = new List<int>(256);
+            public int SpikeCount;
+            public int ThresholdExceedCount;
+            public int PrevSampleMs;
+        }
+
+        private class PastTickBurstState
+        {
+            public long FirstRejectMs;
+            public long LastRejectMs;
+            public int RejectCount;
+
+            public void Reset(long nowMs)
+            {
+                FirstRejectMs = nowMs;
+                LastRejectMs = nowMs;
+                RejectCount = 1;
+            }
         }
     }
 }

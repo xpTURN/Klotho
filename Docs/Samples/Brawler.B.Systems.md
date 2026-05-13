@@ -382,7 +382,7 @@ Runs first in each tick. Backs up `TransformComponent.Position/Rotation` to dedi
 
 ### PlatformerCommandSystem (PreUpdate)
 
-Implements both `ICommandSystem + ISyncEventSystem`. `OnCommand` handles the 4 command kinds; for per-class skill branching, see [Brawler.A.Skills.md](Brawler.A.Skills.md) §A-1.
+Implements both `ICommandSystem + ISyncEventSystem`. `OnCommand` handles the 4 command kinds; for per-class skill branching, see [Brawler.A.Skills.md](Brawler.A.Skills.md) §A-1. `HandleSpawn` rejects a duplicate spawn (a character already exists for `cmd.PlayerId`) by enqueueing a `CommandRejectedSimEvent` (Mode = Synced, Reason = `Duplicate`) — the server's `ServerNetworkService` subscribes via `OnSyncedEvent` and unicasts a `CommandRejectedMessage` back to the originating peer over `DeliveryMethod.Unreliable`, gated by a per-peer token bucket (`ConsumeRejectToken`); rejects without a `peerId` mapping (e.g. bot players) are skipped with a warning log.
 
 ---
 

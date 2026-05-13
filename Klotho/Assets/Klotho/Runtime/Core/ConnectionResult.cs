@@ -39,6 +39,12 @@ namespace xpTURN.Klotho.Core
         public long ClockOffset { get; set; }
 
         /// <summary>
+        /// Server-recommended extra input delay forwarded from SyncCompleteMessage.RecommendedExtraDelay.
+        /// LateJoin / Reconnect carry the same value inside their AcceptMessage payloads.
+        /// </summary>
+        public int RecommendedExtraDelay { get; set; }
+
+        /// <summary>
         /// Which guest join path produced this result.
         /// </summary>
         public JoinKind Kind { get; set; } = JoinKind.Normal;

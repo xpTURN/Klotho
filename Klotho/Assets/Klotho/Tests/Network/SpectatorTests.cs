@@ -88,6 +88,7 @@ namespace xpTURN.Klotho.Network.Tests
             }
 
             public void DisconnectPeer(int peerId) { }
+            public System.Collections.Generic.IEnumerable<int> GetConnectedPeerIds() => System.Linq.Enumerable.Empty<int>();
 
             public void SimulateDataReceived(int peerId, byte[] data)
                 => OnDataReceived?.Invoke(peerId, data, data.Length);
@@ -117,10 +118,12 @@ namespace xpTURN.Klotho.Network.Tests
             public int RandomSeed { get; set; }
             public bool IsReplayMode => false;
             public bool IsServer => false;
+            public bool IsHost => false;
             public SimulationStage Stage => SimulationStage.Forward;
             public int LocalPlayerId { get; set; }
             public int TickInterval => 25;
             public int InputDelay => 4;
+            public int RecommendedExtraDelay => 0;
             public bool IsSpectatorMode { get; set; }
             public int LastVerifiedTick { get; set; } = -1;
             public int StartSpectatorCallCount { get; private set; }
@@ -148,6 +151,8 @@ namespace xpTURN.Klotho.Network.Tests
             public event Action OnResyncFailed;
             public event Action<int, int, RejectionReason> OnCommandRejected;
             public event Action<int, int, byte[], int> OnVerifiedInputBatchReady;
+            public event Action<int> OnExtraDelayChanged;
+            public event Action OnChainAdvanceBreak;
             public event Action<int> OnDisconnectedInputNeeded;
 
             public void Initialize(ISimulation simulation, IKlothoNetworkService networkService, ILogger logger) { }
@@ -156,6 +161,8 @@ namespace xpTURN.Klotho.Network.Tests
             public void Start() { }
             public void Update(float deltaTime) { }
             public void InputCommand(ICommand command, int extraDelay = 0) { }
+            public void ApplyExtraDelay(int delay, ExtraDelaySource source) { }
+            public void EscalateExtraDelay(int step, int max) { }
             public void Stop() { }
 
             public void StartSpectator(SpectatorStartInfo info)
@@ -181,7 +188,10 @@ namespace xpTURN.Klotho.Network.Tests
             public void NotifyPlayerLeft(int playerId) { }
             public void PauseForReconnect() { }
             public void ForceInsertCommand(ICommand cmd) { }
+            public void ForceInsertEmptyCommandsRange(int playerId, int fromTick, int toTickInclusive) { }
             public bool HasCommand(int tick, int playerId) => false;
+            public bool IsCommandSealed(int tick, int playerId) => false;
+            public void RequestRollback(int targetTick) { }
             public void StartCatchingUp() { }
             public void StopCatchingUp() { }
             public void ConfirmCatchupTick(int tick) { }

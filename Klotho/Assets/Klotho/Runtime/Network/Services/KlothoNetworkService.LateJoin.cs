@@ -76,17 +76,23 @@ namespace xpTURN.Klotho.Network
 
             _lateJoinState = LateJoinState.Active;
 
-            // Prefill InputDelay ticks worth of empty inputs
+            // Prefill (InputDelay + RecommendedExtraDelay) ticks worth of empty inputs.
+            // RecommendedExtraDelay shifts the guest's first real cmd.Tick to currentTick + InputDelay + extraDelay,
+            // so without extended prefill the local chain has a permanent gap at [currentTick + InputDelay, ...)
+            // until the first real cmd arrives. Host side is unaffected because its roster activates this player
+            // only at joinTick; the gap only manifests on the guest's own chain.
             int inputDelay = _engine.InputDelay;
+            int extraDelay = _engine.RecommendedExtraDelay;
+            int totalPrefill = inputDelay + extraDelay;
             int currentTick = _engine.CurrentTick;
-            for (int i = 0; i < inputDelay; i++)
+            for (int i = 0; i < totalPrefill; i++)
             {
                 int tick = currentTick + i;
                 _commandFactory.PopulateEmpty(_emptyCommandCache, LocalPlayerId, tick);
                 SendCommand(_emptyCommandCache);
             }
 
-            _logger?.ZLogInformation($"[KlothoNetworkService][LateJoin] Transition to active: tick={currentTick}, prefilled {inputDelay} empty commands");
+            _logger?.ZLogInformation($"[KlothoNetworkService][LateJoin] Transition to active: tick={currentTick}, prefilled {totalPrefill} empty commands (InputDelay={inputDelay}, extraDelay={extraDelay})");
         }
 
         private void HandleCatchupInputMessage(SpectatorInputMessage msg)
@@ -115,6 +121,11 @@ namespace xpTURN.Klotho.Network
 #endif
         }
 
+        // DEAD in the current P2P flow: KlothoConnection bypass jumps _lateJoinState directly to CatchingUp
+        // via SeedPlayersFromCatchupPayload (see line 64-69 of this file), so the WaitingForAccept guard
+        // below is always taken. RecommendedExtraDelay application is handled by the pending buffer in
+        // KlothoNetworkService.InitializeFromConnection + SubscribeEngine. Retained for future
+        // non-Connection path scenarios.
         private void HandleLateJoinAccept(LateJoinAcceptMessage msg)
         {
             if (_lateJoinState != LateJoinState.WaitingForAccept)
@@ -161,6 +172,7 @@ namespace xpTURN.Klotho.Network
             SendSimulationConfig(peerId);
 
             // 3. Send LateJoinAcceptMessage
+            int lateJoinSeedExtraDelay = ComputeRecommendedExtraDelay(avgRtt, newPlayerId, peerId, "LateJoin");
             var accept = new LateJoinAcceptMessage
             {
                 PlayerId = newPlayerId,
@@ -180,6 +192,7 @@ namespace xpTURN.Klotho.Network
                 DesyncThresholdForResync = _sessionConfig.DesyncThresholdForResync,
                 CountdownDurationMs = _sessionConfig.CountdownDurationMs,
                 CatchupMaxTicksPerFrame = _sessionConfig.CatchupMaxTicksPerFrame,
+                RecommendedExtraDelay = lateJoinSeedExtraDelay,
             };
             for (int i = 0; i < _players.Count; i++)
             {
@@ -263,6 +276,35 @@ namespace xpTURN.Klotho.Network
                     count++;
             }
             return count;
+        }
+
+        // Instance wrapper — config injection + path-tagged logging + structured metrics emission.
+        // playerId = game-level player identifier (reported in metrics JSON for telemetry analysis).
+        // peerId = connection-level identifier (kept in operational logs for connection debugging).
+        // Pure computation lives in xpTURN.Klotho.Core.RecommendedExtraDelayCalculator (shared with SD path).
+        private int ComputeRecommendedExtraDelay(int avgRtt, int playerId, int peerId, string pathTag)
+        {
+            var (extraDelay, fallback, rttTicks, raw, clamped) = RecommendedExtraDelayCalculator.Compute(
+                avgRtt,
+                _simConfig.TickIntervalMs,
+                _simConfig.LateJoinDelaySafety,
+                _simConfig.RttSanityMaxMs,
+                _simConfig.MaxRollbackTicks);
+
+            if (fallback)
+                _logger?.ZLogWarning($"[KlothoNetworkService][{pathTag}] FallbackPath: avgRtt={avgRtt}ms invalid, peerId={peerId}, clamped={extraDelay}");
+            else
+                _logger?.ZLogDebug($"[KlothoNetworkService][{pathTag}] RecommendedExtraDelay computed: peerId={peerId}, avgRtt={avgRtt}ms, clamped={extraDelay}");
+
+            // Structured JSON-line metrics — single source of truth for verification scripts and
+            // production telemetry. Bool literals lowercased for JSON validity. Path tag is controlled
+            // ("LateJoin" / "Reconnect" / "Sync") so no escaping needed.
+            string clampedStr = clamped ? "true" : "false";
+            string fallbackStr = fallback ? "true" : "false";
+            int safety = _simConfig.LateJoinDelaySafety;
+            _logger?.ZLogInformation($"[Metrics][{pathTag}] {{\"playerId\":{playerId},\"peerId\":{peerId},\"tag\":\"{pathTag}\",\"avgRtt\":{avgRtt},\"rttTicks\":{rttTicks},\"safety\":{safety},\"raw\":{raw},\"clamped\":{clampedStr},\"extraDelay\":{extraDelay},\"fallback\":{fallbackStr}}}");
+
+            return extraDelay;
         }
     }
 }

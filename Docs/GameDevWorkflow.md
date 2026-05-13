@@ -238,11 +238,26 @@ public class HeroViewFactory : EntityViewFactory
 // 2. Attach an EntityView subclass to the prefab — the Updater injects EntityRef/Engine and drives the lifecycle
 public class HeroView : EntityView
 {
+    private int _ownerId;
+
     public override void OnInitialize()           { base.OnInitialize();       /* once on first prefab creation (skipped on pool reuse) */ }
-    public override void OnActivate(FrameRef frame){ base.OnActivate(frame);    /* on every spawn / pool re-rent */ }
+    public override void OnActivate(FrameRef frame){
+        base.OnActivate(frame);
+        // Cache the owner from the entity at spawn time; consumed by OwnerMatches below.
+        if (frame.Frame.Has<OwnerComponent>(EntityRef))
+            _ownerId = frame.Frame.GetReadOnly<OwnerComponent>(EntityRef).OwnerId;
+    }
     public override void OnDeactivate()           { base.OnDeactivate();       /* just before destroy / pool return */ }
     public override void OnUpdateView()           { base.OnUpdateView();       /* per tick — inside InternalUpdateView from EVU.OnTickExecuted */ }
     public override void OnLateUpdateView()       { base.OnLateUpdateView();   /* per frame — inside EVU.LateUpdate */ }
+
+    // REQUIRED override for any view bound to an entity with OwnerComponent. EVU uses this on
+    // Reconcile to detect entity-slot reuse with owner swap (e.g. player A's character respawn
+    // landing on the same ECS entity slot previously held by player B during rollback). The
+    // base implementation returns false on purpose — without override, EVU rebinds every
+    // Reconcile, which surfaces as continuous churn in [ViewLife][Rebind] logs / profiler.
+    // Owner-agnostic views (no OwnerComponent on the bound entity) do NOT need to override.
+    public override bool OwnerMatches(int ownerId) => _ownerId == ownerId;
 }
 
 // 3. Scene wiring — bind the Factory asset and (optionally) DefaultEntityViewPool to EntityViewUpdater.
@@ -257,9 +272,12 @@ evu.Cleanup();
 **How it works**
 - **Reconcile timing** — runs each tick on the `IKlothoEngine.OnTickExecuted` hook
   1. Scans `VerifiedFrame` / `PredictedFrame` and collects entities whose `TryGetBindBehaviour` matches the corresponding path
-  2. New entities → asynchronous spawn via `CreateAsync` (a version counter prevents duplicate calls)
+  2. New entities → asynchronous spawn via `CreateAsync` (a spawn-sequence counter + `EntityRef.Version` prevent duplicate / stale calls)
   3. Disappeared entities → `OnDeactivate`, then `Factory.Destroy` (auto-return when a Pool is present)
-- **Async safety** — if an entity disappears mid-spawn, the result is discarded automatically due to a version mismatch
+- **Hybrid dedup (`EntityRef.Version` + Owner)** — on every Reconcile, EVU compares the live view against the current frame on two axes:
+  - `EntityRef.Version` mismatch → entity slot was reused after destroy / rollback → **Rebind** (destroy old view, spawn new) and emit `[ViewLife][Rebind]` (Debug)
+  - For entities with `OwnerComponent`, EVU also calls `EntityView.OwnerMatches(currentOwnerId)`. Mismatch → stale destroy. Owner-bearing views **must** override `OwnerMatches`; the default returns `false` to fail loudly.
+- **Async safety** — if an entity disappears mid-spawn (or its slot is reused) before `CreateAsync` resolves, the result is discarded automatically via the spawn-counter + version mismatch.
 - **Factory init constraint** — do not query `Engine.LocalPlayerId` / `IsServer` from the constructor or `OnEnable`. Those values are only guaranteed inside `TryGetBindBehaviour` / `GetViewFlags` / `CreateAsync`.
 - **Pool** — wiring `DefaultEntityViewPool` to the `EntityViewUpdater._pool` field enables prefab reuse via `Rent` / `Return` (optional).
 

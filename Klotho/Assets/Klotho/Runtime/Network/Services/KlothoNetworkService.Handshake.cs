@@ -14,6 +14,7 @@ namespace xpTURN.Klotho.Network
             if (!IsHost) return;
 
             _pendingPeers.Add(peerId);
+            _peerConnectedAtMs[peerId] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (Phase < SessionPhase.Countdown)
             {
                 Phase = SessionPhase.Syncing;
@@ -203,12 +204,18 @@ namespace xpTURN.Klotho.Network
             };
             _players.Add(newPlayer);
 
+            // Sync (normal join) path: NO extraDelay seed in P2P. Unlike SD where the server tolerates
+            // late cmds within a window, P2P's host chain requires every peer's cmd at every tick to
+            // advance verification. Adding extraDelay shifts the guest's cmd.Tick beyond the host's
+            // initial chain head (ticks [0..extraDelay-1] will never receive a cmd) → permanent break.
+            // LateJoin/Reconnect are OK because their catchup gap absorbs the lead.
             var msg = new SyncCompleteMessage
             {
                 Magic = _sessionMagic,
                 PlayerId = newPlayerId,
                 SharedEpoch = _sharedClock.SharedEpoch,
-                ClockOffset = avgOffset
+                ClockOffset = avgOffset,
+                RecommendedExtraDelay = 0,
             };
             using (var serialized = _messageSerializer.SerializePooled(msg))
             {
@@ -285,6 +292,7 @@ namespace xpTURN.Klotho.Network
             _logger?.ZLogInformation($"[KlothoNetworkService][HandlePeerDisconnected] Peer disconnected: peerId={peerId}");
 
             _pendingPeers.Remove(peerId);
+            _peerConnectedAtMs.Remove(peerId);
             _lateJoinCatchups.Remove(peerId);
 
             if (_peerToPlayer.TryGetValue(peerId, out int playerId))
@@ -298,27 +306,49 @@ namespace xpTURN.Klotho.Network
                         // Guests do not take this path — guest reconnect starts in HandleDisconnected
                         _logger?.ZLogInformation($"[KlothoNetworkService][HandlePeerDisconnected] Host: player {playerId} disconnected during Playing, waiting for reconnect");
                         player.ConnectionState = PlayerConnectionState.Disconnected;
-                        var info = RentDisconnectedInfo();
-                        if (info == null)
+
+                        // Quorum-miss watchdog may have already added this player as
+                        // presumed-dropped. Promote the existing entry instead of renting a new one.
+                        if (PromotePresumedDropToConfirmed(playerId, peerId))
                         {
-                            _logger?.ZLogWarning($"[KlothoNetworkService][HandlePeerDisconnected] Disconnected player pool exhausted, removing player {playerId}");
-                            _players.Remove(player);
-                            _engine?.NotifyPlayerLeft(playerId);
-                            OnPlayerLeft?.Invoke(player);
+                            _peerDeviceIds.TryGetValue(peerId, out var promotedDeviceId);
+                            var promoted = FindDisconnectedInfo(playerId);
+                            if (promoted != null)
+                            {
+                                promoted.DeviceId = promotedDeviceId ?? string.Empty;
+                                if (_peerSyncStates.TryGetValue(peerId, out var promotedSyncState))
+                                    promotedSyncState.GetBestSample(out promoted.LastAvgRtt, out _);
+                            }
+                            OnPlayerDisconnected?.Invoke(player);
                         }
                         else
                         {
-                            info.PlayerId = playerId;
-                            info.PeerId = peerId;
-                            info.DisconnectTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                            info.LastConfirmedTick = _engine?.CurrentTick ?? 0;
-                            info.PredictedTickCount = 0;
-                            _peerDeviceIds.TryGetValue(peerId, out var disconnectedDeviceId);
-                            info.DeviceId = disconnectedDeviceId ?? string.Empty;
-                            _disconnectedPlayerCount++;
-                            _engine?.NotifyPlayerDisconnected(playerId);
-                            OnPlayerDisconnected?.Invoke(player);
-                            // Do not remove from _players — keep the slot
+                            var info = RentDisconnectedInfo();
+                            if (info == null)
+                            {
+                                _logger?.ZLogWarning($"[KlothoNetworkService][HandlePeerDisconnected] Disconnected player pool exhausted, removing player {playerId}");
+                                _players.Remove(player);
+                                _engine?.NotifyPlayerLeft(playerId);
+                                OnPlayerLeft?.Invoke(player);
+                            }
+                            else
+                            {
+                                info.PlayerId = playerId;
+                                info.PeerId = peerId;
+                                info.DisconnectTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                                info.LastConfirmedTick = _engine?.CurrentTick ?? 0;
+                                info.PredictedTickCount = 0;
+                                // Snapshot last good RTT sample before peer sync state is discarded —
+                                // used by Reconnect path to seed RecommendedExtraDelay (matches SD pattern).
+                                if (_peerSyncStates.TryGetValue(peerId, out var disconnSyncState))
+                                    disconnSyncState.GetBestSample(out info.LastAvgRtt, out _);
+                                _peerDeviceIds.TryGetValue(peerId, out var disconnectedDeviceId);
+                                info.DeviceId = disconnectedDeviceId ?? string.Empty;
+                                _disconnectedPlayerCount++;
+                                _engine?.NotifyPlayerDisconnected(playerId);
+                                OnPlayerDisconnected?.Invoke(player);
+                                // Do not remove from _players — keep the slot
+                            }
                         }
                     }
                     else

@@ -140,6 +140,8 @@ namespace xpTURN.Klotho.Helper.Tests
 
         public void FlushSendQueue() { }
 
+        public System.Collections.Generic.IEnumerable<int> GetConnectedPeerIds() => _peers.Keys;
+
         public void DisconnectPeer(int peerId)
         {
             DisconnectPeerCallCount++;

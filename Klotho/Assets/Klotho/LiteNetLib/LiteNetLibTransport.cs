@@ -95,6 +95,12 @@ namespace xpTURN.Klotho.LiteNetLib
             string resolvedIp = IPv6Helper.Resolve(address);
             _useIPv6 = IPv6Helper.IsIPv6(resolvedIp);
             _isServer = false;
+            // Tear down any previous _netManager so its background _logicThread and UDP socket
+            // are released. Without this, retried Connect calls (reconnect state machine, ~1s
+            // interval while IsConnected stays false) leak threads/sockets and the abandoned
+            // managers keep retransmitting Connection Requests in the background — the server
+            // ends up accepting multiple sockets from the same client (zombie peers).
+            _netManager?.Stop();
             _netManager = new LiteNetManager(this);
             _netManager.IPv6Enabled = _useIPv6;
             if (!_netManager.Start())
@@ -129,6 +135,8 @@ namespace xpTURN.Klotho.LiteNetLib
             if (_peerMap.TryGetPeer(peerId, out var peer))
                 peer.Disconnect();
         }
+
+        public System.Collections.Generic.IEnumerable<int> GetConnectedPeerIds() => _peerMap.GetAllPeerIds();
 
         public void Send(int peerId, byte[] data, DeliveryMethod deliveryMethod)
         {

@@ -33,6 +33,11 @@ namespace xpTURN.Klotho
         [Header("View Interpolation")]
         [field: SerializeField, Range(1, 3)] public int InterpolationDelayTicks { get; set; } = 3;
 
+        [Header("LateJoin/Reconnect")]
+        [field: SerializeField] public int LateJoinDelaySafety { get; set; } = 2;
+        [field: SerializeField] public int RttSanityMaxMs { get; set; } = 240;
+        [field: SerializeField] public int QuorumMissDropTicks { get; set; } = 20;
+
         [Header("Diagnostics")]
         [field: SerializeField] public int EventDispatchWarnMs { get; set; } = 5;
         [field: SerializeField] public int TickDriftWarnMultiplier { get; set; } = 2;

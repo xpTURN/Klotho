@@ -22,8 +22,10 @@ const string KLOTHO_CONNECTION_KEY = "xpTURN.Brawler";
 // Multi-room:  dotnet run -- --multi <port> <maxRooms> <botCount> [logLevel]
 // Test:        dotnet run -- --test
 // Config:      dotnet run -- --config-dir <dir> ...  (auto-discovered from CWD or bin directory if not specified)
+// Flags:       --rtt-metrics  (enable RTT metrics for match identification)
 bool isTest = args.Length > 0 && args[0] == "--test";
 bool multiRoom = args.Length > 0 && args[0] == "--multi";
+bool rttMetricsEnabled = Array.IndexOf(args, "--rtt-metrics") >= 0;
 
 if (isTest)
 {
@@ -33,9 +35,9 @@ if (isTest)
     return failures;
 }
 else if (multiRoom)
-    RunMultiRoom(args);
+    RunMultiRoom(args, rttMetricsEnabled);
 else
-    RunSingleRoom(args);
+    RunSingleRoom(args, rttMetricsEnabled);
 return 0;
 
 static int SafeRunSuite(string name, Func<int> run)
@@ -51,7 +53,7 @@ static int SafeRunSuite(string name, Func<int> run)
 // ═══════════════════════════════════════════════════════════
 // Single room — RoomManager-based (MaxRooms=1, lazy CreateRoom via RoomRouter)
 // ═══════════════════════════════════════════════════════════
-static void RunSingleRoom(string[] args)
+static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
 {
     int port = args.Length > 0 ? int.Parse(args[0]) : 7777;
     int botCount = args.Length > 1 ? int.Parse(args[1]) : 0;
@@ -75,6 +77,9 @@ static void RunSingleRoom(string[] args)
     int tickIntervalMs = simConfig.TickIntervalMs;
     var maxPlayersPerRoom = sessionConfig.MaxPlayers;
     var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
+
+    // RTT metrics (match identification)
+    ServerNetworkService.RttMetricsEnabled = rttMetricsEnabled;
 
     // Pre-load data
     var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);
@@ -128,7 +133,7 @@ static void RunSingleRoom(string[] args)
 // ═══════════════════════════════════════════════════════════
 // Multi-room
 // ═══════════════════════════════════════════════════════════
-static void RunMultiRoom(string[] args)
+static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
 {
     // dotnet run -- --multi <port> <maxRooms> <botCount> [logLevel]
     int port = args.Length > 1 ? int.Parse(args[1]) : 7777;
@@ -153,6 +158,9 @@ static void RunMultiRoom(string[] args)
     int tickIntervalMs = simConfig.TickIntervalMs;
     var maxPlayersPerRoom = sessionConfig.MaxPlayers;
     var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
+
+    // RTT metrics (match identification)
+    ServerNetworkService.RttMetricsEnabled = rttMetricsEnabled;
 
     // Pre-load data — shared across rooms (read-only)
     var staticColliders = FPStaticColliderSerializer.Load(staticColliderPath);

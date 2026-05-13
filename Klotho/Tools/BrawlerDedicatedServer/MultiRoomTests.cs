@@ -518,6 +518,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             DisconnectedPeers.Add(peerId);
         }
 
+        public IEnumerable<int> GetConnectedPeerIds() => System.Linq.Enumerable.Empty<int>();
+
         public void PollEvents() { }
         public void FlushSendQueue() { }
         public bool Listen(string address, int port, int maxConnections) => true;
