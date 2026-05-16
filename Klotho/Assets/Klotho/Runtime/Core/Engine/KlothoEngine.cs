@@ -63,6 +63,7 @@ namespace xpTURN.Klotho.Core
         public event Action<int> OnTickExecuted;
         public event Action<int, FrameState> OnTickExecutedWithState;
         public event Action<long, long> OnDesyncDetected;
+        public event Action<int, long, long> OnHashMismatch;
         public event Action<int, int> OnRollbackExecuted;
         public event Action<int, string> OnRollbackFailed;
         public event Action<int> OnFrameVerified;
@@ -72,7 +73,14 @@ namespace xpTURN.Klotho.Core
         public event Action<int, SimulationEvent> OnEventCanceled;
         public event Action<int, SimulationEvent> OnSyncedEvent;
         public event Action<int> OnResyncCompleted;
+        public event Action<AbortReason> OnMatchAborted;
+        public event Action<ResetReason> OnMatchReset;
         public event Action OnResyncFailed;
+        // Invoked only under DEVELOPMENT_BUILD || UNITY_EDITOR (cleanup diagnostics).
+        // Suppress CS0067 in release/server builds where neither symbol is defined.
+#pragma warning disable CS0067
+        public event Action<int, int, WipeKind> OnPendingWipe;
+#pragma warning restore CS0067
         public event Action<int, int, RejectionReason> OnCommandRejected;
         public event Action<int, int, byte[], int> OnVerifiedInputBatchReady;
 
@@ -530,6 +538,7 @@ namespace xpTURN.Klotho.Core
                 _networkService.OnFullStateRequested += HandleFullStateRequested;
                 _networkService.OnFullStateReceived += HandleFullStateReceived;
                 _networkService.OnLateJoinPlayerAdded += HandleLateJoinPlayerAdded;
+                OnHashMismatch += HandleHashMismatchForCorrectiveReset;
 
                 _timeSync = new TimeSyncService();
                 _networkService.OnFrameAdvantageReceived += HandleFrameAdvantage;
@@ -964,6 +973,14 @@ namespace xpTURN.Klotho.Core
             _networkService.SendCommand(command);
         }
 
+        public void AbortMatch(AbortReason reason)
+        {
+            if (State.IsEnded()) return;
+            _logger?.ZLogWarning($"[KlothoEngine][AbortMatch] reason={reason}, State {State}->Aborted");
+            State = KlothoState.Aborted;
+            OnMatchAborted?.Invoke(reason);
+        }
+
         public void Stop()
         {
             if (_replaySystem.IsRecording)
@@ -1341,7 +1358,8 @@ namespace xpTURN.Klotho.Core
                 // Diagnostic — log InputBuffer entries about to be wiped while still beyond
                 // chain advance reach (t > _lastVerifiedTick). Surfaces host self-wipe during
                 // P2P quorum stall — wiped player commands are unrecoverable.
-                _inputBuffer.LogPendingWipe(cleanupTick, _lastVerifiedTick, CurrentTick);
+                _inputBuffer.LogPendingWipe(cleanupTick, _lastVerifiedTick, CurrentTick,
+                    (t, pid) => OnPendingWipe?.Invoke(t, pid, WipeKind.Input));
 #endif
 
                 _inputBuffer.ClearBefore(cleanupTick);
@@ -1360,7 +1378,10 @@ namespace xpTURN.Klotho.Core
                     {
                         var evt = pendingEvts[ei];
                         if (evt.Mode == EventMode.Synced)
+                        {
                             _logger?.ZLogWarning($"[KlothoEngine][Cleanup] Pending Synced event WIPED: tick={t}, typeId={evt.EventTypeId}, _lastVerifiedTick={_lastVerifiedTick}, CurrentTick={CurrentTick}, lag={CurrentTick - _lastVerifiedTick}");
+                            OnPendingWipe?.Invoke(t, -1, WipeKind.SyncedEvent);
+                        }
                     }
                 }
 #endif

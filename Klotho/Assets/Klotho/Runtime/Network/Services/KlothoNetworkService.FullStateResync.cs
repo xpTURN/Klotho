@@ -21,6 +21,25 @@ namespace xpTURN.Klotho.Network
             BroadcastMessagePooled(msg, DeliveryMethod.ReliableOrdered);
         }
 
+        public void BroadcastFullState(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast)
+        {
+            if (!IsHost)
+            {
+                _logger?.ZLogWarning($"[KlothoNetworkService][BroadcastFullState] Ignored — guest cannot broadcast (tick={tick})");
+                return;
+            }
+            _logger?.ZLogInformation($"[KlothoNetworkService][BroadcastFullState] tick={tick}, stateSize={stateData?.Length ?? 0}, stateHash=0x{stateHash:X16}");
+
+            var msg = new FullStateResponseMessage
+            {
+                Tick = tick,
+                StateHash = stateHash,
+                StateData = stateData,
+                KindEnum = kind,
+            };
+            BroadcastMessagePooled(msg, DeliveryMethod.ReliableOrdered);
+        }
+
         public void SendFullStateResponse(int peerId, int tick, byte[] stateData, long stateHash)
         {
             _logger?.ZLogInformation($"[KlothoNetworkService][SendFullStateResponse] Full state response: peerId={peerId}, tick={tick}, stateSize={stateData?.Length ?? 0}, stateHash=0x{stateHash:X16}");
@@ -70,7 +89,7 @@ namespace xpTURN.Klotho.Network
             if (IsHost) return;
 
             _logger?.ZLogInformation($"[KlothoNetworkService] FullStateResponse received: tick={msg.Tick}, size={msg.StateData?.Length ?? 0}");
-            OnFullStateReceived?.Invoke(msg.Tick, msg.StateData, msg.StateHash);
+            OnFullStateReceived?.Invoke(msg.Tick, msg.StateData, msg.StateHash, msg.KindEnum);
 
             // If a reconnect was in progress, transition to completion
             if (_reconnectState == ReconnectState.WaitingForFullState)

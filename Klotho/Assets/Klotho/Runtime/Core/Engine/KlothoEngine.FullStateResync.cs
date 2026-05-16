@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using ZLogger;
 
 using xpTURN.Klotho.Input;
+using xpTURN.Klotho.Network;
 using xpTURN.Klotho.State;
 
 namespace xpTURN.Klotho.Core
@@ -29,6 +30,40 @@ namespace xpTURN.Klotho.Core
         private long _cachedFullStateHash;
         private int _cachedFullStateTick = -1;
 
+        // Counts FullStateResponse messages dropped by the silent-ignore guard in
+        // HandleFullStateReceived (received outside Requested / expectingFullState state).
+        // Exposed to the network-service telemetry emitter.
+        private int _unexpectedFullStateDropCount;
+        internal int UnexpectedFullStateDropCount => _unexpectedFullStateDropCount;
+
+        // Counts hash-mismatch observations in ApplyFullState. Quantifies post-②-B residual
+        // divergence frequency — operational input for corrective-reset priority.
+        private int _resyncHashMismatchCount;
+        internal int ResyncHashMismatchCount => _resyncHashMismatchCount;
+
+        // Peak _consecutiveDesyncCount reached during the match. Quantifies divergence
+        // pressure: low peak = sporadic, high peak ≥ DesyncThresholdForResync = repeated
+        // escalation. Resets when the desync streak ends.
+        private int _consecutiveDesyncPeak;
+        internal int ConsecutiveDesyncPeak => _consecutiveDesyncPeak;
+
+        // Total RequestFullStateResync invocations across the match. Separate from
+        // _resyncRetryCount which resets after a completed resync; this counter never resets
+        // so the operator sees the lifetime resync-request burden.
+        private int _resyncRequestTotalCount;
+        internal int ResyncRequestTotalCount => _resyncRequestTotalCount;
+
+        // Desync detections that occur after at least one successful resync — i.e. the
+        // resync recovered to a clean state and the match diverged again. A high value
+        // signals non-deterministic serialization or a persistent state bug.
+        private int _postResyncDesyncCount;
+        internal int PostResyncDesyncCount => _postResyncDesyncCount;
+
+        private bool _hasCompletedResync;
+
+        // Corrective Reset
+        private long _lastCorrectiveResetMs;
+
         /// <summary>
         /// Event handler for ReplaySystem.OnInitialStateSnapshotSet.
         /// When the game code calls SetInitialStateSnapshot(data, hash), fills _cachedFullState* based on tick 0.
@@ -44,6 +79,49 @@ namespace xpTURN.Klotho.Core
 
         #region Full State Resync
 
+        private void TryCorrectiveReset(int divergenceTick)
+        {
+            if (!_networkService.IsHost) return;
+            if (State.IsEnded()) return;
+
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (now - _lastCorrectiveResetMs < _sessionConfig.CorrectiveResetCooldownMs)
+            {
+                _logger?.ZLogWarning($"[KlothoEngine][CorrectiveReset] cooldown active, skip (elapsed={now - _lastCorrectiveResetMs}ms)");
+                return;
+            }
+            _lastCorrectiveResetMs = now;
+
+            if (_cachedFullStateTick != CurrentTick)
+            {
+                var (data, hash) = _simulation.SerializeFullStateWithHash();
+                _cachedFullState = data;
+                _cachedFullStateHash = hash;
+                _cachedFullStateTick = CurrentTick;
+            }
+
+            _logger?.ZLogWarning($"[KlothoEngine][CorrectiveReset] broadcast: tick={CurrentTick}, divergenceTick={divergenceTick}");
+            _networkService.BroadcastFullState(CurrentTick, _cachedFullState, _cachedFullStateHash, FullStateKind.CorrectiveReset);
+
+            // Host self-apply — mirrors HandleFullStateReceived post-processing (host does not receive its own broadcast).
+            ApplyFullState(CurrentTick, _cachedFullState, _cachedFullStateHash, ApplyReason.CorrectiveReset);
+            _inputBuffer.Clear();
+            _pendingCommands.Clear();
+            _lastVerifiedTick = CurrentTick - 1;
+            _pendingSyncCheckTick = -1;
+            _desyncDetectedForPending = false;
+            _hasPendingRollback = false;
+            _pendingRollbackTick = -1;
+            _lastMatchedSyncTick = CurrentTick;
+            _consecutiveDesyncCount = 0;
+            _resyncRetryCount = 0;
+        }
+
+        private void HandleHashMismatchForCorrectiveReset(int tick, long localHash, long remoteHash)
+        {
+            TryCorrectiveReset(tick);
+        }
+
         private void RequestFullStateResync()
         {
             if (_resyncState != ResyncState.None)
@@ -53,6 +131,7 @@ namespace xpTURN.Klotho.Core
                 return;
 
             _resyncRetryCount++;
+            _resyncRequestTotalCount++;
 
             if (_resyncRetryCount > _sessionConfig.ResyncMaxRetries)
             {
@@ -102,22 +181,40 @@ namespace xpTURN.Klotho.Core
 
         /// <summary>
         /// Common full-state restoration for P2P/SD. The caller performs mode-specific post-processing.
+        /// Returns true when the post-restore hash matches the advertised remote hash.
         /// </summary>
-        private void ApplyFullState(int tick, byte[] stateData, long stateHash)
+        private bool ApplyFullState(int tick, byte[] stateData, long stateHash, ApplyReason reason)
         {
+            // Retreat guard — CorrectiveReset/LateJoin/InitialFullState allow retreat; others do not.
+            bool allowRetreat = reason == ApplyReason.CorrectiveReset
+                               || reason == ApplyReason.LateJoin
+                               || reason == ApplyReason.InitialFullState;
+            if (!allowRetreat && _lastVerifiedTick >= tick)
+            {
+                _logger?.ZLogWarning($"[KlothoEngine][ApplyFullState] skip retreat: _lastVerifiedTick={_lastVerifiedTick} >= tick={tick}, reason={reason}");
+                return true;
+            }
+
             // 1. Replace local state
             _simulation.RestoreFromFullState(stateData);
 
             // 1.5. Hash verification
             long localHash = _simulation.GetStateHash();
-            _logger?.ZLogInformation($"[KlothoEngine][FullStateResync] hash check: tick={tick} local=0x{localHash:X16} remote=0x{stateHash:X16} match={(localHash == stateHash)}");
-            if (localHash != stateHash)
+            bool hashMatched = localHash == stateHash;
+            _logger?.ZLogInformation($"[KlothoEngine][FullStateResync] hash check: tick={tick} local=0x{localHash:X16} remote=0x{stateHash:X16} match={hashMatched}");
+            if (!hashMatched)
             {
+                _resyncHashMismatchCount++;
                 _logger?.ZLogError($"[KlothoEngine][FullStateResync] hash mismatch: local=0x{localHash:X16}, remote=0x{stateHash:X16}. Deserialization may be non-deterministic - resync state unreliable");
 
                 // Diagnostic — per-component hash to identify which component(s) diverged.
                 if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimDiag)
                     ecsSimDiag.LogComponentHashes(_logger, "ClientApplyMismatch");
+
+                OnHashMismatch?.Invoke(tick, localHash, stateHash);
+                // Bridge into the mid-match desync pipeline so HandleNetworkDesync's
+                // _consecutiveDesyncCount accumulation can escalate via the shared path.
+                OnDesyncDetected?.Invoke(localHash, stateHash);
             }
 
             // 2. Reset snapshot manager
@@ -136,17 +233,31 @@ namespace xpTURN.Klotho.Core
             _eventBuffer.ClearAll();
             EventPool.ClearAll();
 
+            // Watermark cascade: ClearAll discards all buffered Synced events, so previously-
+            // dispatched ticks no longer have buffered evidence. Lower watermark below tick so
+            // future Synced events at tick or later can dispatch.
+            if (_syncedDispatchHighWaterMark >= tick)
+                _syncedDispatchHighWaterMark = tick - 1;
+
             // 6. Reset accumulator
             _accumulator = 0.0f;
+
+            // Clamp _lastBatchedTick on corrective reset to prevent FireVerifiedInputBatch under-fire.
+            if (reason == ApplyReason.CorrectiveReset)
+                _lastBatchedTick = Math.Min(_lastBatchedTick, tick - 1);
+
+            return hashMatched;
         }
 
-        private void HandleFullStateReceived(int tick, byte[] stateData, long stateHash)
+        private void HandleFullStateReceived(int tick, byte[] stateData, long stateHash, FullStateKind kind)
         {
             bool isResync = _resyncState == ResyncState.Requested;
+            bool isCorrectiveReset = kind == FullStateKind.CorrectiveReset;
 
-            if (!isResync && !_expectingFullState)
+            if (!isResync && !_expectingFullState && !isCorrectiveReset)
             {
-                _logger?.ZLogWarning($"[KlothoEngine][FullStateResync] FullStateResponse received but not in Requested state, ignoring");
+                _unexpectedFullStateDropCount++;
+                _logger?.ZLogWarning($"[KlothoEngine][FullStateResync] FullStateResponse received but not in Requested state, ignoring (drops={_unexpectedFullStateDropCount})");
                 return;
             }
 
@@ -155,34 +266,59 @@ namespace xpTURN.Klotho.Core
             _expectingFullState = false;
 
             // Common restoration
-            ApplyFullState(tick, stateData, stateHash);
+            ApplyReason reason = isCorrectiveReset
+                ? ApplyReason.CorrectiveReset
+                : (isResync ? ApplyReason.ResyncRequest : ApplyReason.LateJoin);
+            bool hashMatched = ApplyFullState(tick, stateData, stateHash, reason);
 
             // P2P-only post-processing
 
-            // Clean up input buffers
+            // Clean up input buffers (always — new state is the baseline regardless of hash)
             _inputBuffer.Clear();
             _pendingCommands.Clear();
 
-            // Reset verification chain
+            // Verified-chain reset always anchors on the new tick; the matched-sync baseline
+            // only advances when the hash agrees so a mismatched tick does not become a
+            // known-good rollback target for HandleNetworkDesync.
             _lastVerifiedTick = tick - 1;
-            _lastMatchedSyncTick = tick;
             _pendingSyncCheckTick = -1;
             _desyncDetectedForPending = false;
-
-            // Reset consecutive desync counter
-            _consecutiveDesyncCount = 0;
-            _resyncRetryCount = 0;
 
             // Reset rollback-related state
             _hasPendingRollback = false;
             _pendingRollbackTick = -1;
 
+            if (hashMatched)
+            {
+                _lastMatchedSyncTick = tick;
+                _consecutiveDesyncCount = 0;
+                _resyncRetryCount = 0;
+            }
+            // else: preserve _lastMatchedSyncTick / _consecutiveDesyncCount / _resyncRetryCount
+            // so the mid-match desync path can keep accumulating toward ResyncMaxRetries and
+            // fire OnResyncFailed when the divergence is unrecoverable.
+
             // Resync path: state restoration + event firing
             if (isResync)
             {
                 _resyncState = ResyncState.None;
-                _logger?.ZLogWarning($"[KlothoEngine][FullStateResync] complete: tick={tick}");
-                OnResyncCompleted?.Invoke(tick);
+                if (hashMatched)
+                {
+                    _hasCompletedResync = true;
+                    _logger?.ZLogWarning($"[KlothoEngine][FullStateResync] complete: tick={tick}");
+                    OnResyncCompleted?.Invoke(tick);
+                }
+                else
+                {
+                    _logger?.ZLogWarning($"[KlothoEngine][FullStateResync] applied with hash mismatch at tick={tick}; OnResyncCompleted suppressed, mid-match desync path will re-attempt");
+                }
+            }
+
+            // Corrective reset path: emit OnMatchReset on successful state restoration.
+            if (isCorrectiveReset && hashMatched)
+            {
+                _logger?.ZLogWarning($"[KlothoEngine][CorrectiveReset] state restored at tick={tick}, firing OnMatchReset");
+                OnMatchReset?.Invoke(ResetReason.StateDivergence);
             }
         }
 
@@ -218,6 +354,10 @@ namespace xpTURN.Klotho.Core
                 return;
 
             _consecutiveDesyncCount++;
+            if (_consecutiveDesyncCount > _consecutiveDesyncPeak)
+                _consecutiveDesyncPeak = _consecutiveDesyncCount;
+            if (_hasCompletedResync)
+                _postResyncDesyncCount++;
             _logger?.ZLogWarning($"[KlothoEngine][FullStateResync] Desync consecutiveCount={_consecutiveDesyncCount}/{_sessionConfig.DesyncThresholdForResync}, lastMatchedSyncTick={_lastMatchedSyncTick}, currentTick={CurrentTick}");
 
             if (_consecutiveDesyncCount >= _sessionConfig.DesyncThresholdForResync)

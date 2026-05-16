@@ -191,9 +191,9 @@ namespace xpTURN.Klotho.Input
         // Emits a warning for each tick in (verifiedTick, beforeTick) that still holds
         // player commands at the moment of cleanup. Surfaces host self-wipe during P2P
         // quorum stall — wiped commands past the verified horizon are unrecoverable.
-        public void LogPendingWipe(int beforeTick, int verifiedTick, int currentTick)
+        public void LogPendingWipe(int beforeTick, int verifiedTick, int currentTick, System.Action<int, int> onWipe = null)
         {
-            if (_logger == null)
+            if (_logger == null && onWipe == null)
                 return;
 
             int from = System.Math.Max(0, verifiedTick + 1);
@@ -209,8 +209,9 @@ namespace xpTURN.Klotho.Input
                     if (!first) sb.Append(',');
                     first = false;
                     sb.Append("pid=").Append(kv.Key);
+                    onWipe?.Invoke(t, kv.Key);
                 }
-                _logger.ZLogWarning($"[InputBuffer][Cleanup] Pending Input WIPED: tick={t}, commands=[{sb}], _lastVerifiedTick={verifiedTick}, CurrentTick={currentTick}, lag={currentTick - verifiedTick}");
+                _logger?.ZLogWarning($"[InputBuffer][Cleanup] Pending Input WIPED: tick={t}, commands=[{sb}], _lastVerifiedTick={verifiedTick}, CurrentTick={currentTick}, lag={currentTick - verifiedTick}");
             }
         }
 #endif

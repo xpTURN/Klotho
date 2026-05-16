@@ -36,6 +36,11 @@ namespace xpTURN.Klotho.Helper.Tests
         /// </summary>
         public int DisconnectPeerCallCount { get; private set; }
 
+        /// <summary>
+        /// Number of times Send has been called (test instrumentation).
+        /// </summary>
+        public int SendCallCount { get; private set; }
+
         // INetworkTransport events
         public event Action OnConnected;
         public event Action<DisconnectReason> OnDisconnected;
@@ -72,6 +77,7 @@ namespace xpTURN.Klotho.Helper.Tests
 
         public void Send(int peerId, byte[] data, DeliveryMethod deliveryMethod)
         {
+            SendCallCount++;
             // Ignore DeliveryMethod in local tests (always reliable)
             if (peerId == 0 && _hostInstance != null)
             {

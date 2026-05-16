@@ -35,6 +35,9 @@ namespace xpTURN.Klotho.Core
         public int DesyncThresholdForResync { get; set; } = 3;
 
         /// <inheritdoc />
+        public int CorrectiveResetCooldownMs { get; set; } = 5000;
+
+        /// <inheritdoc />
         public int CountdownDurationMs { get; set; } = 3000;
 
         /// <inheritdoc />

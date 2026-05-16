@@ -30,6 +30,7 @@ namespace xpTURN.Klotho.Helper.Tests
         private List<TestPeer> _guests = new List<TestPeer>();
         private CommandFactory _commandFactory;
         private ILogger _logger;
+        private SimulationConfig _simulationConfig = new SimulationConfig();
 
         private static readonly FieldInfo _gameStartTimeField = typeof(KlothoNetworkService)
             .GetField("_gameStartTime", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -49,10 +50,25 @@ namespace xpTURN.Klotho.Helper.Tests
         public TestPeer Host => _host;
         public IReadOnlyList<TestPeer> Guests => _guests;
 
+        public IEnumerable<TestPeer> AllPeers
+        {
+            get
+            {
+                if (_host != null) yield return _host;
+                foreach (var g in _guests) yield return g;
+            }
+        }
+
         public KlothoTestHarness(ILogger logger)
         {
             _logger = logger;
             _commandFactory = new CommandFactory();
+        }
+
+        public KlothoTestHarness WithSimulationConfig(SimulationConfig config)
+        {
+            _simulationConfig = config;
+            return this;
         }
 
         // ── Initialization ──
@@ -167,6 +183,74 @@ namespace xpTURN.Klotho.Helper.Tests
             }
         }
 
+        public void AdvanceWithStalledPeer(int targetTick, int stallPlayerId, float deltaTime = 0.025f)
+        {
+            int safetyLimit = targetTick * 10;
+            int iterations = 0;
+            while (_host.CurrentTick < targetTick)
+            {
+                InjectEmptyInputsForAllPeersExcept(stallPlayerId);
+                TickWithStalledPeer(stallPlayerId, deltaTime);
+                if (++iterations > safetyLimit)
+                {
+                    Assert.Fail($"AdvanceWithStalledPeer safety limit reached. Host tick: {_host.CurrentTick}, target: {targetTick}, stallPlayerId: {stallPlayerId}");
+                }
+            }
+        }
+
+        // Drives all peers' Update except the stalled peer, without injecting empty inputs
+        // for missing players. Used to freeze _lastVerifiedTick while CurrentTick advances
+        // via prediction — exercises EventBuffer ring wrap past SnapshotCapacity.
+        //
+        // Caller MUST:
+        //   - set simConfig.QuorumMissDropTicks = int.MaxValue via WithSimulationConfig
+        //     before CreateHost (disables CheckQuorumMissPresumedDrop watchdog)
+        //   - NOT call DisconnectPeer on the stalled peer (transport disconnect triggers
+        //     engine.NotifyPlayerDisconnected → CanAdvanceTick fires OnDisconnectedInputNeeded
+        //     which auto-fills empty inputs and advances the chain)
+        //
+        // Stall mechanism: stallPlayerId's Update is skipped, so it produces no input. Host's
+        // CanAdvanceTick fails (missing pid input), _disconnectedPlayerIds stays empty (no
+        // disconnect), QuorumMissDrop watchdog gated by int.MaxValue threshold, so chain
+        // truly stalls and ExecuteTickWithPrediction advances CurrentTick via prediction.
+        public void AdvanceWithFrozenVerifiedTick(int targetCurrentTick, int stallPlayerId,
+                                                  float deltaTime = 0.025f)
+        {
+            int safetyLimit = targetCurrentTick * 10;
+            int iterations = 0;
+            while (_host.CurrentTick < targetCurrentTick)
+            {
+                TickWithStalledPeer(stallPlayerId, deltaTime);
+                if (++iterations > safetyLimit)
+                {
+                    Assert.Fail($"AdvanceWithFrozenVerifiedTick safety limit reached. Host tick: {_host.CurrentTick}, target: {targetCurrentTick}, stallPlayerId: {stallPlayerId}");
+                }
+            }
+        }
+
+        private void TickWithStalledPeer(int stallPlayerId, float deltaTime = 0.025f)
+        {
+            if (!IsCatchingUp(_host))
+                _host.NetworkService.Update();
+            foreach (var guest in _guests)
+            {
+                if (!guest.Transport.IsConnected) continue;
+                if (guest.LocalPlayerId == stallPlayerId) continue;
+                if (!IsCatchingUp(guest))
+                    guest.NetworkService.Update();
+            }
+
+            if (_host.Phase == SessionPhase.Playing)
+                _host.Engine.Update(deltaTime);
+            foreach (var guest in _guests)
+            {
+                if (!guest.Transport.IsConnected) continue;
+                if (guest.LocalPlayerId == stallPlayerId) continue;
+                if (guest.Phase == SessionPhase.Playing)
+                    guest.Engine.Update(deltaTime);
+            }
+        }
+
         // ── Fault injection ──
 
         public void DisconnectPeer(TestPeer peer)
@@ -176,6 +260,9 @@ namespace xpTURN.Klotho.Helper.Tests
 
         public void ReconnectPeer(TestPeer peer)
         {
+            // Message-based reconnect handshake — preserved verbatim. Host-side state
+            // (peer<->player mapping via HandleReconnectRequest) and guest-side NetworkService
+            // state (Phase=Playing, _lateJoinState=Active via HandleFullStateResponse) sync here.
             peer.Transport = new TestTransport();
             peer.NetworkService.Initialize(peer.Transport, _commandFactory, _logger);
             peer.Engine.Initialize(peer.Simulation, peer.NetworkService, _logger);
@@ -184,6 +271,34 @@ namespace xpTURN.Klotho.Helper.Tests
 
             peer.NetworkService.JoinRoom("test");
             peer.Transport.Connect("localhost", 7777);
+
+            // Drive the handshake to completion — RR -> RA -> FullStateResponse round-trip.
+            // rounds=24: safety margin for the 4-6 round handshake (default 12 * 2).
+            PumpMessages(rounds: 24);
+
+            // Replicate production's catchup entry path (KlothoSession.cs:198-203). The message
+            // handshake above only routes the FullState through HandleFullStateReceived's Resync
+            // branch, which does NOT call StartCatchingUp — leaving State at WaitingForPlayers.
+            // ApplyP2PLateJoinFullState (invoked by SeedReconnectFullState) resets the chain
+            // marker and calls StartCatchingUp to transition State -> Running.
+            var payload = BuildReconnectPayload();
+            peer.Engine.SeedReconnectFullState(payload);
+        }
+
+        private ReconnectPayload BuildReconnectPayload()
+        {
+            // Capture host's current full state — semantic equivalent of KlothoConnection's
+            // FullStateResponse -> ReconnectPayload synthesis. AcceptMessage is unused by
+            // ApplyP2PLateJoinFullState (only FullStateTick/Data/Hash are read), so a default
+            // instance suffices.
+            var (fullStateData, fullStateHash) = _host.Simulation.SerializeFullStateWithHash();
+            return new ReconnectPayload
+            {
+                AcceptMessage = new ReconnectAcceptMessage(),
+                FullStateTick = _host.Engine.CurrentTick,
+                FullStateData = fullStateData,
+                FullStateHash = fullStateHash,
+            };
         }
 
         // ── Assertion helpers ──
@@ -213,6 +328,15 @@ namespace xpTURN.Klotho.Helper.Tests
                 Assert.IsTrue(hostIds.Contains(id),
                     $"Host _activePlayerIds should contain playerId={id}, actual: {string.Join(", ", hostIds)}");
             }
+        }
+
+        public long CaptureStateHash() => _host.Simulation.GetStateHash();
+
+        public void AssertPostReconnectHashUnchanged(long preDisconnectHash)
+        {
+            Assert.AreEqual(preDisconnectHash, _host.Simulation.GetStateHash(),
+                "Host state hash changed after reconnect (possible silent corruption)");
+            AssertStateHashConsistent();
         }
 
         public void AssertStateHashConsistent()
@@ -274,7 +398,7 @@ namespace xpTURN.Klotho.Helper.Tests
             {
                 Transport = new TestTransport(),
                 NetworkService = new KlothoNetworkService(),
-                Engine = new KlothoEngine(new SimulationConfig(), new SessionConfig()),
+                Engine = new KlothoEngine(_simulationConfig, new SessionConfig()),
                 Simulation = new TestSimulation(),
             };
 
@@ -308,6 +432,21 @@ namespace xpTURN.Klotho.Helper.Tests
             var peers = GetActivePeers();
             foreach (var peer in peers)
             {
+                if (peer.Phase == SessionPhase.Playing && !IsCatchingUp(peer))
+                {
+                    int tick = peer.CurrentTick + peer.Engine.InputDelay;
+                    var cmd = new EmptyCommand(peer.LocalPlayerId, tick);
+                    peer.NetworkService.SendCommand(cmd);
+                }
+            }
+        }
+
+        private void InjectEmptyInputsForAllPeersExcept(int stallPlayerId)
+        {
+            var peers = GetActivePeers();
+            foreach (var peer in peers)
+            {
+                if (peer.LocalPlayerId == stallPlayerId) continue;
                 if (peer.Phase == SessionPhase.Playing && !IsCatchingUp(peer))
                 {
                     int tick = peer.CurrentTick + peer.Engine.InputDelay;

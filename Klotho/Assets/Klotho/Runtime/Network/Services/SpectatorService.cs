@@ -47,7 +47,7 @@ namespace xpTURN.Klotho.Network
         public event Action<int, ICommand> OnConfirmedInputReceived;
         public event Action<int> OnTickConfirmed;
         public event Action<string> OnSpectatorStopped;
-        public event Action<int, byte[], long> OnFullStateReceived;
+        public event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
 
         /// <summary>
         /// Raised when SimulationConfig is received from SpectatorAcceptMessage.
@@ -181,7 +181,7 @@ namespace xpTURN.Klotho.Network
                         _pendingStartInfo = null;
                     }
                     // 2. State restore + ResetToTick (must be called after StartSpectator so CurrentTick is not overwritten)
-                    OnFullStateReceived?.Invoke(stateMsg.Tick, stateMsg.StateData, stateMsg.StateHash);
+                    OnFullStateReceived?.Invoke(stateMsg.Tick, stateMsg.StateData, stateMsg.StateHash, FullStateKind.Unicast);
                     // 3. Buffer drain: discard ticks <= snapshot tick, apply only later ticks
                     // Case A: catch-up arrived before FullStateResponse → buffer then drain
                     while (_pendingInputs.Count > 0)

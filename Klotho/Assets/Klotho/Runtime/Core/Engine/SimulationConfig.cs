@@ -64,6 +64,9 @@ namespace xpTURN.Klotho.Core
         /// <inheritdoc />
         public int QuorumMissDropTicks { get; set; } = 20;
 
+        /// <inheritdoc />
+        public int MinStallAbortTicks { get; set; } = 600;
+
         // --- Diagnostics ---
 
         /// <inheritdoc />

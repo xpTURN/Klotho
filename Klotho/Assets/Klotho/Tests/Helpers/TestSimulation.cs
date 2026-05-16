@@ -14,6 +14,14 @@ namespace xpTURN.Klotho.Helper.Tests
         public int TickCallCount { get; private set; }
 
         /// <summary>
+        /// Optional hook invoked at the end of each Tick(commands) call. The engine sets up its
+        /// internal event collector before Tick; tests can wire it into <see cref="EventRaiser"/>
+        /// via reflection and raise events here for dispatch through the engine's event pipeline.
+        /// </summary>
+        public ISimulationEventRaiser EventRaiser { get; set; }
+        public Action<int, ISimulationEventRaiser> OnAfterTickRaise { get; set; }
+
+        /// <summary>
         /// When true, computes an input-based hash that differs per command type and player.
         /// When false (default), returns a fixed StateHash.
         /// </summary>
@@ -54,6 +62,8 @@ namespace xpTURN.Klotho.Helper.Tests
                     OnPlayerJoined(joinCmd.JoinedPlayerId, CurrentTick);
                 }
             }
+
+            OnAfterTickRaise?.Invoke(CurrentTick, EventRaiser);
         }
 
         public void Rollback(int targetTick)

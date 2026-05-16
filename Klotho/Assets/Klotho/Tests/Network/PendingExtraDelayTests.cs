@@ -136,6 +136,7 @@ namespace xpTURN.Klotho.Tests.Network
             public event Action<int, bool> OnPlayerConfigReceived;
             public event Action<int> OnTickExecuted;
             public event Action<long, long> OnDesyncDetected;
+            public event Action<int, long, long> OnHashMismatch;
             public event Action<int, int> OnRollbackExecuted;
             public event Action<int, string> OnRollbackFailed;
             public event Action<int> OnFrameVerified;
@@ -146,12 +147,15 @@ namespace xpTURN.Klotho.Tests.Network
             public event Action<int, SimulationEvent> OnSyncedEvent;
             public event Action<int> OnResyncCompleted;
             public event Action OnResyncFailed;
+            public event Action<AbortReason> OnMatchAborted;
+            public event Action<ResetReason> OnMatchReset;
             public event Action<int, int, RejectionReason> OnCommandRejected;
             public event Action<int, int, byte[], int> OnVerifiedInputBatchReady;
             public event Action<int> OnExtraDelayChanged;
             public event Action OnChainAdvanceBreak;
             public event Action<int> OnDisconnectedInputNeeded;
             public event Action OnCatchupComplete;
+            public event Action<int, int, WipeKind> OnPendingWipe;
 #pragma warning restore CS0067
 
             public T GetPlayerConfig<T>(int playerId) where T : PlayerConfigBase => null;
@@ -165,6 +169,7 @@ namespace xpTURN.Klotho.Tests.Network
             public void InputCommand(ICommand command, int extraDelay = 0) { }
             public void EscalateExtraDelay(int step, int max) { }
             public void Stop() { }
+            public void AbortMatch(AbortReason reason) { }
             public void StartSpectator(SpectatorStartInfo info) { }
             public bool IsFrameVerified(int tick) => false;
             public FrameState GetFrameState(int tick) => FrameState.Predicted;

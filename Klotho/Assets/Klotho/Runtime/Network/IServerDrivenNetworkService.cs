@@ -69,12 +69,8 @@ namespace xpTURN.Klotho.Network
         /// </summary>
         void ClearUnackedInputs();
 
-        /// <summary>
-        /// Server only: broadcast full state to all remote SD clients (including spectators).
-        /// Used for the initial FullState transmission (blocking) at session start.
-        /// The server itself is not included in the remote peer list, so it is naturally excluded.
-        /// Throws NotSupportedException on the client implementation.
-        /// </summary>
-        void BroadcastFullState(int tick, byte[] stateData, long stateHash);
+        // BroadcastFullState(int, byte[], long) — inherited from IKlothoNetworkService.
+        // SD-server impl broadcasts to all remote SD clients (including spectators); SD-client impl
+        // throws NotSupportedException.
     }
 }

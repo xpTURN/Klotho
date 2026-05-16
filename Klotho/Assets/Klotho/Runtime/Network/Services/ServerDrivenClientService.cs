@@ -103,7 +103,7 @@ namespace xpTURN.Klotho.Network
         public event Action<int, int> OnFrameAdvantageReceived;
         public event Action<int> OnLocalPlayerIdAssigned;
         public event Action<int, int> OnFullStateRequested;
-        public event Action<int, byte[], long> OnFullStateReceived;
+        public event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
         public event Action<IPlayerInfo> OnPlayerDisconnected;
         public event Action<IPlayerInfo> OnPlayerReconnected;
         public event Action OnReconnecting;
@@ -436,7 +436,7 @@ namespace xpTURN.Klotho.Network
             throw new NotSupportedException("The client cannot call SendFullStateResponse.");
         }
 
-        public void BroadcastFullState(int tick, byte[] stateData, long stateHash)
+        public void BroadcastFullState(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast)
         {
             throw new NotSupportedException("The client cannot call BroadcastFullState.");
         }
@@ -960,7 +960,7 @@ namespace xpTURN.Klotho.Network
             OnDesyncDetected?.Invoke(0, 0, 0, 0);
             OnFrameAdvantageReceived?.Invoke(0, 0);
             OnFullStateRequested?.Invoke(0, 0);
-            OnFullStateReceived?.Invoke(0, null, 0);
+            OnFullStateReceived?.Invoke(0, null, 0, FullStateKind.Unicast);
             OnPlayerDisconnected?.Invoke(null);
             OnPlayerReconnected?.Invoke(null);
             OnReconnectFailed?.Invoke(null);

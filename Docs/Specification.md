@@ -206,6 +206,7 @@ Assets/Klotho/
 | Running | Simulation in progress |
 | Paused | Paused (waiting for input or manual) |
 | Finished | Game over or manually stopped |
+| Aborted | Match aborted before completion (chain stall timeout, catastrophic divergence, etc.). Distinct from `Finished` so replay-save / score-aggregation / normal-end UI can branch. Pair with `AbortReason` via `OnMatchAborted`. Use `KlothoStateExtensions.IsEnded()` for terminal-state check (covers both `Finished` and `Aborted`) |
 
 ### 2.2 Default Configuration Values
 
@@ -234,6 +235,7 @@ Configuration is split into two layers.
 | LateJoinDelaySafety | 2 | ticks | Safety margin added to RTT-based extra-delay computation on Sync / LateJoin / Reconnect. Also used as the standalone fallback when avgRtt is invalid / out of the sane range |
 | RttSanityMaxMs | 240 | ms | Upper bound for accepting avgRtt as a sane measurement. Samples exceeding this fall back to `LateJoinDelaySafety` only |
 | QuorumMissDropTicks | 20 | ticks | (P2P) Quorum-miss watchdog threshold. If a remote peer's input is missing at `_lastVerifiedTick + 1` for at least this many ticks, the peer is presumed-dropped and reactive empty-fill activates before the transport-level DisconnectTimeout. 0 disables. Safe range 10~80 |
+| MinStallAbortTicks | 600 | ticks | (P2P) Chain-stall watchdog threshold (peer-local). Aborts the match via `AbortMatch(AbortReason.ChainStallTimeout)` when `CurrentTick - LastVerifiedTick` exceeds `max(SessionConfig.ReconnectTimeoutMs / TickIntervalMs + 100, MinStallAbortTicks)`. Default 600 = 30s @ 50ms TickInterval. Guards against `ReconnectTimeoutMs` misconfiguration shorter than recovery floor |
 | EventDispatchWarnMs | 5 | ms | Warning threshold for OnEvent* handler execution time (DEVELOPMENT_BUILD / UNITY_EDITOR only). 0 or less = disabled |
 | TickDriftWarnMultiplier | 2 | × | Tick-loop drift warning multiplier (warns if actual interval > TickIntervalMs × multiplier). 0 or less = disabled |
 
@@ -251,6 +253,7 @@ Configuration is split into two layers.
 | LateJoinDelayTicks | 10 | ticks | Late-join activation delay |
 | ResyncMaxRetries | 3 | tries | Max resync attempts |
 | DesyncThresholdForResync | 3 | count | Desync count that triggers resync |
+| CorrectiveResetCooldownMs | 5000 | ms | (P2P, host-only) Minimum interval between consecutive corrective-reset broadcasts. Prevents broadcast storms when persistent hash divergence fires `OnHashMismatch` repeatedly |
 | CountdownDurationMs | 3000 | ms | Game-start countdown length |
 | CatchupMaxTicksPerFrame | 200 | ticks | Max ticks per frame during catchup |
 | Old-data cleanup threshold | CurrentTick - MaxRollbackTicks - 10 | ticks | Threshold for discarding old data |
@@ -264,8 +267,10 @@ Configuration is split into two layers.
 | OnFrameVerified | `Action<int>` | On Predicted → Verified transition |
 | OnChainAdvanceBreak | `Action` | Verified-chain advance failed at the next tick (P2P: pending input for an active player). Drives reactive empty-fill / dynamic-delay escalation |
 | OnDesyncDetected | `Action<long, long>` | State-hash mismatch detected (localHash, remoteHash). The network-service variant (§9.5) is the extended `Action<int,int,long,long>` |
+| OnHashMismatch | `Action<int, long, long>` | Hash gate detected a mismatch after `ApplyFullState` (tick, localHash, remoteHash). Wired in P2P to trigger `TryCorrectiveReset` (host only). Fires from all 5 `ApplyFullState` entry points (LateJoin / InitialFullState / ResyncRequest / CorrectiveReset / Reconnect) |
 | OnRollbackExecuted | `Action<int, int>` | Rollback completed (fromTick, toTick) |
 | OnRollbackFailed | `Action<int, string>` | Rollback failed (requestedTick, reason) |
+| OnPendingWipe | `Action<int, int, WipeKind>` | A pending input or Synced event was wiped during cleanup before the chain advanced past it (tick, playerId, kind). `playerId = -1` for `WipeKind.SyncedEvent` |
 | OnCommandRejected | `Action<int, int, RejectionReason>` | (SD client) Server rejected a client input (tick, cmdTypeId, reason) |
 | OnExtraDelayChanged | `Action<int>` | Recommended extra InputDelay (ticks) changed. Fired on `ApplyExtraDelay` (Sync / LateJoin / Reconnect / DynamicPush) and `EscalateExtraDelay` (reactive escalation) |
 | OnEventPredicted | `Action<int, SimulationEvent>` | Event raised on a Predicted tick |
@@ -274,6 +279,8 @@ Configuration is split into two layers.
 | OnSyncedEvent | `Action<int, SimulationEvent>` | Synced event — fired only on verified ticks |
 | OnResyncCompleted | `Action<int>` | Full state resync completed (restoredTick) |
 | OnResyncFailed | `Action` | Failed after exceeding max resync retries |
+| OnMatchAborted | `Action<AbortReason>` | Match terminated mid-play via `AbortMatch` (state transitions to `Aborted`). Reasons: `ChainStallTimeout` / `StateDivergence` / `ReconnectFailed` / `Unknown` |
+| OnMatchReset | `Action<ResetReason>` | Corrective reset applied — state restored, match continues (`Running` preserved). Sibling to `OnMatchAborted` (terminal). Reasons: `StateDivergence` / `ManualResync` / `Unknown` |
 | OnDisconnectedInputNeeded | `Action<int>` | Empty-input request for a disconnected player (playerId) |
 | OnCatchupComplete | `Action` | Late-join catchup completed |
 | OnVerifiedInputBatchReady | `Action<int, int, byte[], int>` | Verified input batch ready for spectators (startTick, tickCount, data, length) |
@@ -986,6 +993,49 @@ Every SyncCheckInterval (30 ticks):
 └─ on mismatch → raise OnDesyncDetected(localHash, remoteHash)
 ```
 
+### 9.4.1 Hash Gate (post-`ApplyFullState`)
+
+```text
+ApplyFullState(tick, data, hash, ApplyReason):
+├─ restore from data
+├─ localHash = ISimulation.GetStateHash()
+├─ compare localHash vs advertised stateHash
+└─ on mismatch → raise OnHashMismatch(tick, localHash, remoteHash)
+```
+
+The hash gate fires on every `ApplyFullState` entry point (`LateJoin` / `InitialFullState` / `ResyncRequest` / `CorrectiveReset` / `Reconnect`). In P2P, `OnHashMismatch` is wired to `HandleHashMismatchForCorrectiveReset` → `TryCorrectiveReset` (host-only). In SD / Spectator the event still fires but the corrective path is a no-op (host-only guard).
+
+### 9.4.2 Corrective Reset (P2P, host-only)
+
+```text
+OnHashMismatch (host) ─► HandleHashMismatchForCorrectiveReset
+                          └─► TryCorrectiveReset(divergenceTick):
+                                ├─ if (!IsHost) return
+                                ├─ if (now - _lastCorrectiveResetMs < CorrectiveResetCooldownMs) return
+                                ├─ serialize current state (cached if same tick)
+                                ├─ BroadcastFullState(CurrentTick, data, hash, FullStateKind.CorrectiveReset)
+                                └─ host self-apply (host does not receive its own broadcast)
+
+ApplyFullState (ApplyReason.CorrectiveReset):
+└─ on successful hash match → raise OnMatchReset(ResetReason.StateDivergence)
+```
+
+The cooldown (`CorrectiveResetCooldownMs`, default 5000ms) prevents broadcast storms under persistent divergence. Guests receive `FullStateKind.CorrectiveReset` via `OnFullStateReceived` and apply with `ApplyReason.CorrectiveReset` (retreat allowed). `OnMatchReset` only fires when the post-restore hash matches the broadcast hash — on mismatch, the mid-match desync pipeline retries.
+
+### 9.4.3 Chain Stall Watchdog (peer-local)
+
+```text
+Every Update():
+└─ CheckChainStallTimeout():
+     ├─ if (Phase != Playing || engine ended) return
+     ├─ lag = CurrentTick - LastVerifiedTick
+     ├─ threshold = max(SessionConfig.ReconnectTimeoutMs / TickIntervalMs + 100, SimulationConfig.MinStallAbortTicks)
+     ├─ if (lag < threshold) return
+     └─ AbortMatch(AbortReason.ChainStallTimeout) → state = Aborted, OnMatchAborted raised
+```
+
+Both host and guest peers run the watchdog locally — either can self-abort when its verified chain stalls past the threshold. Distinct from `Finished` so abort-handling UI (replay save / score aggregation) can branch via `KlothoStateExtensions.IsEnded()`.
+
 ### 9.5 IKlothoNetworkService Events
 
 | Event | Signature | Description |
@@ -999,7 +1049,7 @@ Every SyncCheckInterval (30 ticks):
 | OnFrameAdvantageReceived | `Action<int, int>` | Remote frame-advantage received (peerId, advantageTicks) |
 | OnLocalPlayerIdAssigned | `Action<int>` | Local player ID assignment completed |
 | OnFullStateRequested | `Action<int, int>` | Full-state request received (peerId, requestTick) |
-| OnFullStateReceived | `Action<int, byte[], long>` | Full state received (tick, data, hash) |
+| OnFullStateReceived | `Action<int, byte[], long, FullStateKind>` | Full state received (tick, data, hash, kind). `kind` distinguishes `Unicast` (resync / late-join reply), `CorrectiveReset` (P2P host-broadcast on hash divergence), `InitialState` (SD session-start broadcast) |
 | OnPlayerDisconnected | `Action<IPlayerInfo>` | Player disconnected (awaiting reconnect) |
 | OnPlayerReconnected | `Action<IPlayerInfo>` | Player reconnected (Host) |
 | OnReconnecting | `Action` | Reconnect in progress (Guest) |

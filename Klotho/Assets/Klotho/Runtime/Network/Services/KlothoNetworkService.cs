@@ -228,7 +228,7 @@ namespace xpTURN.Klotho.Network
         public event Action<int, int> OnFrameAdvantageReceived;
         public event Action<int> OnLocalPlayerIdAssigned;
         public event Action<int, int> OnFullStateRequested;
-        public event Action<int, byte[], long> OnFullStateReceived;
+        public event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
         public event Action<IPlayerInfo> OnPlayerDisconnected;
         public event Action<IPlayerInfo> OnPlayerReconnected;
         public event Action OnReconnecting;
@@ -624,9 +624,10 @@ namespace xpTURN.Klotho.Network
                 }
             }
 
-            // Reconnect: host — check timeout + inject empty inputs
+            // Reconnect / chain watchdogs — mixed host-only and peer-local; each method gates internally
             CheckQuorumMissPresumedDrop();
             CheckDisconnectedPlayerTimeout();
+            CheckChainStallTimeout();
             InjectDisconnectedPlayerInputs();
             InjectCatchupPlayerInputs();
             UpdateReconnect();
@@ -822,7 +823,7 @@ namespace xpTURN.Klotho.Network
                 // an empty placeholder and chain advanced past it), suppress relay so other peers
                 // keep the same empty placeholder. Without this guard, a late real packet from
                 // the source peer reaches guests un-sealed and overwrites their empty → host vs
-                // guest InputBuffer divergence (silent desync, no §5.5 fallback at P1 stage).
+                // guest InputBuffer divergence (silent desync, no fallback at P1 stage).
                 bool isSealedHere = _engine != null && _engine.IsCommandSealed(msg.Tick, msg.PlayerId);
                 if (isSealedHere)
                 {

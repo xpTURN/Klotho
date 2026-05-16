@@ -259,7 +259,7 @@ namespace xpTURN.Klotho.Network
         public event Action<int, int> OnFrameAdvantageReceived;
         public event Action<int> OnLocalPlayerIdAssigned;
         public event Action<int, int> OnFullStateRequested;
-        public event Action<int, byte[], long> OnFullStateReceived;
+        public event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
         public event Action<IPlayerInfo> OnPlayerDisconnected;
         public event Action<IPlayerInfo> OnPlayerReconnected;
         public event Action OnReconnecting;
@@ -513,13 +513,14 @@ namespace xpTURN.Klotho.Network
         /// Used for the initial FullState send at session start (reuses the _peerStates iteration pattern from BroadcastVerifiedState).
         /// The server itself is not in _peerStates and is naturally excluded.
         /// </summary>
-        public void BroadcastFullState(int tick, byte[] stateData, long stateHash)
+        public void BroadcastFullState(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast)
         {
             var msg = new FullStateResponseMessage
             {
                 Tick = tick,
                 StateData = stateData,
-                StateHash = stateHash
+                StateHash = stateHash,
+                KindEnum = kind,
             };
             using (var serialized = _messageSerializer.SerializePooled(msg))
             {
@@ -1624,7 +1625,7 @@ namespace xpTURN.Klotho.Network
             OnDesyncDetected?.Invoke(0, 0, 0, 0);
             OnFrameAdvantageReceived?.Invoke(0, 0);
             OnLocalPlayerIdAssigned?.Invoke(0);
-            OnFullStateReceived?.Invoke(0, null, 0);
+            OnFullStateReceived?.Invoke(0, null, 0, FullStateKind.Unicast);
             OnReconnecting?.Invoke();
             OnReconnectFailed?.Invoke(null);
             OnReconnected?.Invoke();

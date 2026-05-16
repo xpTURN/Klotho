@@ -202,7 +202,7 @@ namespace xpTURN.Klotho.Core
         private void ApplyP2PLateJoinFullState(int tick, byte[] stateData, long stateHash)
         {
             _expectingFullState = false;
-            ApplyFullState(tick, stateData, stateHash);
+            ApplyFullState(tick, stateData, stateHash, ApplyReason.LateJoin);
 
             _inputBuffer.Clear();
             _pendingCommands.Clear();

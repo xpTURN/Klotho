@@ -67,6 +67,13 @@ namespace xpTURN.Klotho.Core
         int DesyncThresholdForResync { get; }
 
         /// <summary>
+        /// Minimum interval between consecutive corrective resets (milliseconds).
+        /// Prevents broadcast storms when persistent hash divergence fires OnHashMismatch repeatedly.
+        /// Range: 1000 or greater. Default 5000.
+        /// </summary>
+        int CorrectiveResetCooldownMs { get; }
+
+        /// <summary>
         /// Game start countdown duration (milliseconds). After all players are ready,
         /// the game starts simultaneously after waiting this duration based on SharedClock.
         /// Compensates for network latency differences to guarantee a synchronized start.

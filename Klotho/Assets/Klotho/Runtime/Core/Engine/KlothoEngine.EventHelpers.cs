@@ -10,28 +10,56 @@ namespace xpTURN.Klotho.Core
         private readonly List<SimulationEvent> _rollbackOldEventsCache = new List<SimulationEvent>();
         private readonly List<SimulationEvent> _rollbackNewEventsCache = new List<SimulationEvent>();
 
+        // Last tick at which OnSyncedEvent has been dispatched. Guards against re-fire across
+        // rollback/resim cycles where _lastVerifiedTick rewinds and chain re-advances past
+        // already-dispatched ticks. Reset by ApplyFullState (event buffer ClearAll cascade)
+        // and by Spectator.ResetToTick (per-tick re-emit).
+        private int _syncedDispatchHighWaterMark = -1;
+
         #region Event System Helpers
 
         private void DispatchTickEvents(int tick, FrameState state)
         {
             var events = _eventBuffer.GetEvents(tick);
-            for (int ei = 0; ei < events.Count; ei++)
+            if (state == FrameState.Verified)
             {
-                var evt = events[ei];
-                if (state == FrameState.Verified)
+                DispatchSyncedEventsForTick(tick, events);
+                for (int ei = 0; ei < events.Count; ei++)
                 {
-                    if (evt.Mode == EventMode.Synced)
-                        _dispatcher.Dispatch(OnSyncedEvent, tick, evt, nameof(OnSyncedEvent));
-                    else
+                    var evt = events[ei];
+                    if (evt.Mode != EventMode.Synced)
                         _dispatcher.Dispatch(OnEventConfirmed, tick, evt, nameof(OnEventConfirmed));
                 }
-                else
+            }
+            else
+            {
+                // On Predicted ticks, only fire Regular events; Synced events are kept in the buffer only.
+                for (int ei = 0; ei < events.Count; ei++)
                 {
-                    // On Predicted ticks, only fire Regular events; Synced events are kept in the buffer only.
+                    var evt = events[ei];
                     if (evt.Mode == EventMode.Regular)
                         _dispatcher.Dispatch(OnEventPredicted, tick, evt, nameof(OnEventPredicted));
                 }
             }
+        }
+
+        /// <summary>
+        /// Dispatches all Synced events at <paramref name="tick"/> exactly once across the engine
+        /// lifetime. Idempotent across rollback/resim: re-entry with the same tick (i.e.
+        /// <paramref name="tick"/> &lt;= <c>_syncedDispatchHighWaterMark</c>) skips the entire batch.
+        /// </summary>
+        private void DispatchSyncedEventsForTick(int tick, IReadOnlyList<SimulationEvent> events)
+        {
+            if (tick <= _syncedDispatchHighWaterMark) return;
+            bool anyFired = false;
+            for (int i = 0; i < events.Count; i++)
+            {
+                var evt = events[i];
+                if (evt.Mode != EventMode.Synced) continue;
+                _dispatcher.Dispatch(OnSyncedEvent, tick, evt, nameof(OnSyncedEvent));
+                anyFired = true;
+            }
+            if (anyFired) _syncedDispatchHighWaterMark = tick;
         }
 
         private void DiffRollbackEvents(int fromTick)

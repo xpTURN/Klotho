@@ -51,7 +51,85 @@ namespace xpTURN.Klotho.Core
         /// <summary>
         /// Stop() invoked — engine has been torn down. Replay playback also lands here when finished.
         /// </summary>
-        Finished
+        Finished,
+        /// <summary>
+        /// Match was aborted before completion (chain stall timeout, catastrophic divergence, etc.).
+        /// Distinct from Finished so replay save / score aggregation / "normal end" UI paths can branch.
+        /// Pair an AbortReason via the OnMatchAborted event for user-facing context.
+        /// </summary>
+        Aborted
+    }
+
+    /// <summary>
+    /// Helpers for KlothoState.
+    /// </summary>
+    public static class KlothoStateExtensions
+    {
+        /// <summary>
+        /// True if the engine has reached a terminal state (Finished normally or Aborted).
+        /// Prefer over `== Finished` so abort paths are not silently treated as normal end.
+        /// </summary>
+        public static bool IsEnded(this KlothoState state)
+            => state == KlothoState.Finished || state == KlothoState.Aborted;
+    }
+
+    /// <summary>
+    /// Category of a pending entry wiped during cleanup before the chain advanced past it.
+    /// Emitted via IKlothoEngine.OnPendingWipe.
+    /// </summary>
+    public enum WipeKind
+    {
+        /// <summary>A player input command was wiped (playerId ≥ 0).</summary>
+        Input,
+        /// <summary>A Synced simulation event was wiped (playerId = -1).</summary>
+        SyncedEvent,
+    }
+
+    /// <summary>
+    /// Reason an in-progress match was aborted. Emitted via IKlothoEngine.OnMatchAborted.
+    /// </summary>
+    public enum AbortReason
+    {
+        /// <summary>Unspecified / generic abort.</summary>
+        Unknown,
+        /// <summary>Chain advance stalled past the watchdog threshold.</summary>
+        ChainStallTimeout,
+        /// <summary>State hash divergence that corrective reset could not recover.</summary>
+        StateDivergence,
+        /// <summary>Reconnect attempt exhausted retries or timed out.</summary>
+        ReconnectFailed,
+    }
+
+    /// <summary>
+    /// Reason an in-progress match was corrective-reset (state restored, match continues).
+    /// Emitted via IKlothoEngine.OnMatchReset. Sibling to AbortReason — abort ends the match,
+    /// reset rewinds state and resumes.
+    /// </summary>
+    public enum ResetReason
+    {
+        /// <summary>Unspecified / generic reset.</summary>
+        Unknown,
+        /// <summary>Hash divergence recovered by FullState rebroadcast.</summary>
+        StateDivergence,
+        /// <summary>Manual / operator-triggered resync (debug / admin tool).</summary>
+        ManualResync,
+    }
+
+    /// <summary>
+    /// Source path that invoked ApplyFullState. Controls retreat policy and side-effect cascade.
+    /// </summary>
+    public enum ApplyReason
+    {
+        /// <summary>P2P late-join or SD late-join FullState apply.</summary>
+        LateJoin,
+        /// <summary>SD session-start initial FullState broadcast.</summary>
+        InitialFullState,
+        /// <summary>Unicast resync response to RequestFullStateResync.</summary>
+        ResyncRequest,
+        /// <summary>Host-broadcast corrective reset on hash divergence.</summary>
+        CorrectiveReset,
+        /// <summary>Reconnect FullState apply.</summary>
+        Reconnect,
     }
 
     /// <summary>
@@ -242,6 +320,13 @@ namespace xpTURN.Klotho.Core
         event Action<long, long> OnDesyncDetected;
 
         /// <summary>
+        /// Raised when an ApplyFullState pass observes localHash != remoteHash (tick, localHash, remoteHash).
+        /// Sample / telemetry layer can trend mismatches; an upcoming corrective-reset path may use this
+        /// as the trigger for KlothoState recovery via FullState rebroadcast.
+        /// </summary>
+        event Action<int, long, long> OnHashMismatch;
+
+        /// <summary>
         /// Rollback executed event (fromTick, toTick).
         /// </summary>
         event Action<int, int> OnRollbackExecuted;
@@ -302,6 +387,27 @@ namespace xpTURN.Klotho.Core
         event Action<int> OnResyncCompleted;
 
         /// <summary>
+        /// Match was aborted (state transitioned to KlothoState.Aborted). UI / score / replay-save
+        /// branches should check IsEnded() instead of `== Finished` so abort paths are not silently
+        /// treated as normal end.
+        /// </summary>
+        event Action<AbortReason> OnMatchAborted;
+
+        /// <summary>
+        /// Transitions the engine to KlothoState.Aborted and fires OnMatchAborted with the given reason.
+        /// Idempotent: subsequent calls (or calls after Finished) are no-ops. The sole entry point for
+        /// the Aborted state — callers must not assign State directly.
+        /// </summary>
+        void AbortMatch(AbortReason reason);
+
+        /// <summary>
+        /// Raised after a corrective reset has been applied — state restored and match continues
+        /// (KlothoState.Running preserved). Distinct from OnMatchAborted (terminal). Skeleton event
+        /// — wired by the broadcast corrective-reset implementation.
+        /// </summary>
+        event Action<ResetReason> OnMatchReset;
+
+        /// <summary>
         /// Raised when an empty input is needed for a disconnected player. Invoked synchronously when CanAdvanceTick fails.
         /// </summary>
         event Action<int> OnDisconnectedInputNeeded;
@@ -338,6 +444,12 @@ namespace xpTURN.Klotho.Core
         /// Raised when full-state resync fails after the maximum retry count.
         /// </summary>
         event Action OnResyncFailed;
+
+        /// <summary>
+        /// Raised when a pending input or synced event is wiped during cleanup before the chain
+        /// has advanced past it (tick, playerId, kind). playerId is -1 for SyncedEvent wipes.
+        /// </summary>
+        event Action<int, int, WipeKind> OnPendingWipe;
 
         /// <summary>
         /// Raised on a client when the server rejects one of this client's commands (tick, commandTypeId, reason).

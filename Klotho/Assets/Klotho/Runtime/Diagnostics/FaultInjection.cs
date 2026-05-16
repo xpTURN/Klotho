@@ -87,6 +87,13 @@ namespace xpTURN.Klotho.Diagnostics
         public static readonly List<(float atSec, int rttMs)> EmulatedRttSchedule = new List<(float, int)>();
 
         /// <summary>
+        /// Disconnect injection schedule. Entry = (atSecondsFromMatchStart, durationSec, playerId).
+        /// Driver calls DisconnectPeer(playerId) at atSec, then reconnects after durationSec elapses.
+        /// playerId = null disconnects all non-host peers. Empty list = disabled.
+        /// </summary>
+        public static readonly List<(float atSec, float durationSec, int? playerId)> EmulatedDisconnectSchedule = new List<(float, float, int?)>();
+
+        /// <summary>
         /// Server GC pause: blocks the server tick once when CurrentTick == ServerGcPauseAtTick,
         /// then auto-resets the trigger so it fires only once per arming.
         /// </summary>
@@ -130,6 +137,7 @@ namespace xpTURN.Klotho.Diagnostics
         {
             EmulatedRttMs = 0;
             EmulatedRttSchedule.Clear();
+            EmulatedDisconnectSchedule.Clear();
             ServerGcPauseMs = 0;
             ServerGcPauseAtTick = -1;
             DropSpawnCommandPlayerIds.Clear();

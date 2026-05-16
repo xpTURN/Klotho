@@ -171,6 +171,11 @@ namespace xpTURN.Klotho.Core
             _eventCollector.BeginTick(tick);
             _simulation.EmitSyncEvents();
             _eventBuffer.ClearTick(tick);
+            // Watermark cascade: ClearTick discards buffered Synced at `tick`, and the following
+            // DispatchTickEvents will re-dispatch the freshly re-emitted batch. Lower watermark
+            // below tick so the helper does not short-circuit.
+            if (_syncedDispatchHighWaterMark >= tick)
+                _syncedDispatchHighWaterMark = tick - 1;
             for (int ei = 0; ei < _eventCollector.Count; ei++)
                 _eventBuffer.AddEvent(tick, _eventCollector.Collected[ei]);
             DispatchTickEvents(tick, FrameState.Verified);
@@ -270,13 +275,7 @@ namespace xpTURN.Klotho.Core
 
                     // When promoted to verified, dispatch buffered Synced events at once.
                     // Prevents the issue where Synced events buffered during prediction never fire even after re-simulation, leaving VFX behind.
-                    var verifiedEvents = _eventBuffer.GetEvents(CurrentTick);
-                    for (int ei = 0; ei < verifiedEvents.Count; ei++)
-                    {
-                        var evt = verifiedEvents[ei];
-                        if (evt.Mode == EventMode.Synced)
-                            _dispatcher.Dispatch(OnSyncedEvent, evt.Tick, evt, nameof(OnSyncedEvent));
-                    }
+                    DispatchSyncedEventsForTick(CurrentTick, _eventBuffer.GetEvents(CurrentTick));
 
                     _lastVerifiedTick = CurrentTick;
                     CurrentTick++;
@@ -323,13 +322,7 @@ namespace xpTURN.Klotho.Core
 
                     // When promoted to verified, dispatch buffered Synced events at once.
                     // Prevents the issue where Synced events buffered during prediction never fire even after re-simulation, leaving VFX behind.
-                    var verifiedEvents = _eventBuffer.GetEvents(CurrentTick);
-                    for (int ei = 0; ei < verifiedEvents.Count; ei++)
-                    {
-                        var evt = verifiedEvents[ei];
-                        if (evt.Mode == EventMode.Synced)
-                            _dispatcher.Dispatch(OnSyncedEvent, evt.Tick, evt, nameof(OnSyncedEvent));
-                    }
+                    DispatchSyncedEventsForTick(CurrentTick, _eventBuffer.GetEvents(CurrentTick));
 
                     _lastVerifiedTick = CurrentTick;
                     CurrentTick++;

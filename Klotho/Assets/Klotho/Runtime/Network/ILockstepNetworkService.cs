@@ -213,14 +213,22 @@ namespace xpTURN.Klotho.Network
         void SendFullStateResponse(int peerId, int tick, byte[] stateData, long stateHash);
 
         /// <summary>
+        /// Broadcast the full state to every remote peer. Host / SD-server only — the
+        /// client / guest implementation skips or throws. Provided as a unified API across
+        /// modes so callers can issue a single-shot rebroadcast (e.g. corrective reset)
+        /// without branching on transport type.
+        /// </summary>
+        void BroadcastFullState(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast);
+
+        /// <summary>
         /// Client full-state request (peerId, requestTick) — received by host
         /// </summary>
         event Action<int, int> OnFullStateRequested;
 
         /// <summary>
-        /// Full state received from host (tick, stateData, stateHash) — received by client
+        /// Full state received from host (tick, stateData, stateHash, kind) — received by client
         /// </summary>
-        event Action<int, byte[], long> OnFullStateReceived;
+        event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
 
         /// <summary>
         /// Player disconnected event (reconnect grace period started).

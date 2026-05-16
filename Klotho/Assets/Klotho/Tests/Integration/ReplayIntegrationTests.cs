@@ -95,7 +95,7 @@ namespace xpTURN.Klotho.Integration.Tests
             int maxIterations = replayData.Metadata.TotalTicks * 2;
             for (int i = 0; i < maxIterations; i++)
             {
-                if (replayEngine.State == KlothoState.Finished)
+                if (replayEngine.State.IsEnded())
                     break;
                 replayEngine.Update(replayData.Metadata.TickIntervalMs);
             }

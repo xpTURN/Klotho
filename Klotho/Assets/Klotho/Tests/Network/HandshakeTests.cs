@@ -1,3 +1,4 @@
+#pragma warning disable CS0067
 using System;
 using System.Collections.Generic;
 using NUnit.Framework;
@@ -539,9 +540,7 @@ namespace xpTURN.Klotho.Network.Tests
         {
             public ISimulationConfig SimulationConfig { get; set; } = new SimulationConfig();
             public ISessionConfig SessionConfig { get; set; } = new SessionConfig();
-#pragma warning disable CS0067
             public event Action<int, bool> OnPlayerConfigReceived;
-#pragma warning restore CS0067
             public T GetPlayerConfig<T>(int playerId) where T : PlayerConfigBase => null;
             public bool TryGetPlayerConfig<T>(int playerId, out T config) where T : PlayerConfigBase { config = null; return false; }
             public KlothoState State { get; set; } = KlothoState.Idle;
@@ -571,6 +570,7 @@ namespace xpTURN.Klotho.Network.Tests
 
             public event Action<int> OnTickExecuted;
             public event Action<long, long> OnDesyncDetected;
+            public event Action<int, long, long> OnHashMismatch;
             public event Action<int, int> OnRollbackExecuted;
             public event Action<int, string> OnRollbackFailed;
             public event Action<int> OnFrameVerified;
@@ -581,12 +581,15 @@ namespace xpTURN.Klotho.Network.Tests
             public event Action<int, SimulationEvent> OnSyncedEvent;
             public event Action<int> OnResyncCompleted;
             public event Action OnResyncFailed;
+            public event Action<AbortReason> OnMatchAborted;
+            public event Action<ResetReason> OnMatchReset;
             public event Action<int, int, RejectionReason> OnCommandRejected;
             public event Action<int, int, byte[], int> OnVerifiedInputBatchReady;
             public event Action<int> OnExtraDelayChanged;
             public event Action OnChainAdvanceBreak;
             public event Action<int> OnDisconnectedInputNeeded;
             public event Action OnCatchupComplete;
+            public event Action<int, int, WipeKind> OnPendingWipe;
 
             public void Initialize(ISimulation simulation, IKlothoNetworkService networkService, ILogger logger) { }
             public void Initialize(ISimulation simulation, IKlothoNetworkService networkService, ILogger logger, ISimulationCallbacks simulationCallbacks, IViewCallbacks viewCallbacks = null) { }
@@ -597,6 +600,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void ApplyExtraDelay(int delay, ExtraDelaySource source) { }
             public void EscalateExtraDelay(int step, int max) { }
             public void Stop() { }
+            public void AbortMatch(AbortReason reason) { }
             public void StartSpectator(SpectatorStartInfo info) { }
             public bool IsFrameVerified(int tick) => false;
             public FrameState GetFrameState(int tick) => FrameState.Predicted;

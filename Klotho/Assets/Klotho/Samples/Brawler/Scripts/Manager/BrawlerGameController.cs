@@ -95,6 +95,7 @@ namespace Brawler
         private Camera _mainCamera;
         private CancellationTokenSource _connectCts;  // For canceling JoinGameAsync
         private IReconnectCredentialsStore _credentialsStore;
+        private bool _isStopping;
 
         private BrawlerInputCapture _input;
         private BrawlerSimulationCallbacks _simCallbacks;
@@ -116,6 +117,12 @@ namespace Brawler
         // Drift across clients = each client's GameStartMessage receive jitter.
         private float _rttScheduleAnchorTime = -1f;
         private int _rttScheduleNextIdx;
+
+        // Disconnect schedule state.
+        private int _disconnectScheduleNextIdx;
+        // Per-entry reconnect timer: (targetReconnectTime, playerId). -1f = inactive.
+        private float _disconnectReconnectAt = -1f;
+        private int? _disconnectReconnectPlayerId;
 #endif
 
         public bool IsHost => _brawlerSettings._isHost;
@@ -270,6 +277,55 @@ namespace Brawler
                 _rttScheduleNextIdx++;
             }
         }
+
+        private void UpdateDisconnectSchedule()
+        {
+            if (Phase != SessionPhase.Playing)
+            {
+                _disconnectScheduleNextIdx = 0;
+                _disconnectReconnectAt = -1f;
+                _disconnectReconnectPlayerId = null;
+                return;
+            }
+
+            if (FaultInjection.EmulatedDisconnectSchedule.Count == 0 && _disconnectReconnectAt < 0f)
+                return;
+
+            float now = Time.unscaledTime;
+            float anchorElapsed = _rttScheduleAnchorTime >= 0f ? now - _rttScheduleAnchorTime : -1f;
+            if (anchorElapsed < 0f) return;
+
+            var schedule = FaultInjection.EmulatedDisconnectSchedule;
+            while (_disconnectScheduleNextIdx < schedule.Count && anchorElapsed >= schedule[_disconnectScheduleNextIdx].atSec)
+            {
+                var entry = schedule[_disconnectScheduleNextIdx];
+                _disconnectScheduleNextIdx++;
+
+                if (entry.playerId.HasValue)
+                {
+                    _logger?.ZLogWarning($"[FaultInjection] Disconnect peer={entry.playerId.Value} at anchorSec={entry.atSec:F1} duration={entry.durationSec:F1}s (tick={CurrentTick})");
+                    _transport.DisconnectPeer(entry.playerId.Value);
+                }
+                else
+                {
+                    foreach (int peerId in _transport.GetConnectedPeerIds())
+                    {
+                        _logger?.ZLogWarning($"[FaultInjection] Disconnect peer={peerId} at anchorSec={entry.atSec:F1} duration={entry.durationSec:F1}s (tick={CurrentTick})");
+                        _transport.DisconnectPeer(peerId);
+                    }
+                }
+
+                _disconnectReconnectAt = now + entry.durationSec;
+                _disconnectReconnectPlayerId = entry.playerId;
+            }
+
+            if (_disconnectReconnectAt >= 0f && now >= _disconnectReconnectAt)
+            {
+                _disconnectReconnectAt = -1f;
+                _logger?.ZLogWarning($"[FaultInjection] Reconnect trigger after disconnect (tick={CurrentTick})");
+                _ = ReconnectAsync(CancellationToken.None);
+            }
+        }
 #endif
 
         private void OnEnable()
@@ -298,6 +354,7 @@ namespace Brawler
 
 #if KLOTHO_FAULT_INJECTION
             UpdateRttSchedule();
+            UpdateDisconnectSchedule();
 #endif
 
             var engine = ActiveEngine;
@@ -331,6 +388,18 @@ namespace Brawler
             {
                 _session?.Update(deltaTime);
             }
+
+#if KLOTHO_FAULT_INJECTION
+            if (Keyboard.current != null && Keyboard.current.f12Key.wasPressedThisFrame && _session?.Engine != null)
+            {
+                if (engine == null) return;
+                var field = typeof(KlothoEngine).GetField("_lastVerifiedTick",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                // Force lag well past threshold (default ~1300 / 2500 ticks)
+                field.SetValue(engine, engine.CurrentTick - 5000);
+                _logger?.ZLogWarning($"[Brawler][Debug] Forced chain stall: lvt={engine.LastVerifiedTick}, currentTick={engine.CurrentTick}");
+            }
+#endif
         }
 
         private void OnDestroy()
@@ -417,6 +486,7 @@ namespace Brawler
 
         private void StartHost()
         {
+            _isStopping = false;
             _logger?.ZLogInformation($"[Brawler] Hosting game");
 
             ISimulationConfig simulationConfig = null;
@@ -466,6 +536,8 @@ namespace Brawler
             _session.NetworkService.OnPlayerDisconnected += OnPlayerDisconnected;
             _session.NetworkService.OnPlayerReconnected += OnPlayerReconnected;
             _session.Engine.OnGameStart += InjectInitialStateSnapshot;
+            _session.Engine.OnMatchAborted += OnMatchAborted;
+            _session.Engine.OnMatchReset += OnMatchReset;
 
             // Broadcast the local player's character selection via PlayerConfig
             _session.SendPlayerConfig(new BrawlerPlayerConfig
@@ -489,6 +561,7 @@ namespace Brawler
 
         private async UniTaskVoid JoinGameAsync(CancellationToken ct)
         {
+            _isStopping = false;
             _logger?.ZLogInformation($"[Brawler] Joining game");
             _gameMenu.ReconnectStatus = "Connecting...";
 
@@ -543,6 +616,8 @@ namespace Brawler
                 _session.Engine.OnCatchupComplete += OnLateJoinActive;
                 _session.Engine.OnResyncCompleted += OnResyncCompleted;
                 _session.Engine.OnGameStart += InjectInitialStateSnapshot;
+                _session.Engine.OnMatchAborted += OnMatchAborted;
+                _session.Engine.OnMatchReset += OnMatchReset;
 
                 // Broadcast the local player's character selection via PlayerConfig
                 _session.SendPlayerConfig(new BrawlerPlayerConfig
@@ -573,6 +648,7 @@ namespace Brawler
 
         private async UniTaskVoid ReconnectAsync(CancellationToken ct)
         {
+            _isStopping = false;
             _logger?.ZLogInformation($"[Brawler] Cold-start reconnect");
             _gameMenu.ReconnectStatus = "Reconnecting...";
 
@@ -612,6 +688,8 @@ namespace Brawler
                 _session.Engine.OnCatchupComplete += OnLateJoinActive;
                 _session.Engine.OnResyncCompleted += OnResyncCompleted;
                 _session.Engine.OnGameStart += InjectInitialStateSnapshot;
+                _session.Engine.OnMatchAborted += OnMatchAborted;
+                _session.Engine.OnMatchReset += OnMatchReset;
 
                 // Re-send PlayerConfig on reconnect to force-sync the last selection (intent).
                 // Even if the host/server preserves the previous PlayerConfig, the client is authoritative — idempotency assumed.
@@ -792,7 +870,7 @@ namespace Brawler
             _spectatorService.OnSpectatorStarted += info => engine.StartSpectator(info);
             _spectatorService.OnConfirmedInputReceived += (tick, cmd) => engine.ReceiveConfirmedCommand(cmd);
             _spectatorService.OnTickConfirmed += tick => engine.ConfirmSpectatorTick(tick);
-            _spectatorService.OnFullStateReceived += (tick, stateData, stateHash) =>
+            _spectatorService.OnFullStateReceived += (tick, stateData, stateHash, kind) =>
             {
                 simulation.RestoreFromFullState(stateData);
                 engine.ResetToTick(tick);
@@ -847,6 +925,9 @@ namespace Brawler
 
         private void StopGame()
         {
+            if (_isStopping) return;
+            _isStopping = true;
+
             _logger?.ZLogInformation($"[Brawler] Game stopped");
 
             // Cancel any in-progress JoinGameAsync
@@ -878,6 +959,8 @@ namespace Brawler
                 _session.Engine.OnCatchupComplete -= OnLateJoinActive;
                 _session.Engine.OnResyncCompleted -= OnResyncCompleted;
                 _session.Engine.OnGameStart -= InjectInitialStateSnapshot;
+                _session.Engine.OnMatchAborted -= OnMatchAborted;
+                _session.Engine.OnMatchReset -= OnMatchReset;
             }
 
             _gameMenu.ReconnectStatus = null;
@@ -992,6 +1075,26 @@ namespace Brawler
             _logger?.ZLogError($"[Brawler] Reconnection failed: {reason}");
             _gameMenu.ReconnectStatus = null;
             StopGame();
+        }
+
+        private void OnMatchAborted(AbortReason reason)
+        {
+            _logger?.ZLogWarning($"[Brawler] Match aborted: {reason}");
+            _gameMenu.ReconnectStatus = reason switch
+            {
+                AbortReason.ChainStallTimeout => "Match ended: communication timeout",
+                AbortReason.StateDivergence => "Match ended: state divergence",
+                AbortReason.ReconnectFailed => "Match ended: reconnection failed",
+                _ => "Match ended",
+            };
+            StopGame();
+        }
+
+        private void OnMatchReset(ResetReason reason)
+        {
+            _logger?.ZLogWarning($"[Brawler] Match reset: {reason} — state recovered, match continues");
+            _gameMenu.ReconnectStatus = "State recovered — match continues";
+            _simCallbacks?.OnResyncCompleted(_session?.Engine?.CurrentTick ?? 0);
         }
 
         private void OnReconnected()

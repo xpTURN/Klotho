@@ -442,13 +442,7 @@ namespace xpTURN.Klotho.Core
                 OnFrameVerified?.Invoke(executionTick);
 
                 // When executionTick transitions to verified, dispatch the buffered Synced events exactly once.
-                var verifiedEvents = _eventBuffer.GetEvents(executionTick);
-                for (int ei = 0; ei < verifiedEvents.Count; ei++)
-                {
-                    var evt = verifiedEvents[ei];
-                    if (evt.Mode == EventMode.Synced)
-                        _dispatcher.Dispatch(OnSyncedEvent, evt.Tick, evt, nameof(OnSyncedEvent));
-                }
+                DispatchSyncedEventsForTick(executionTick, _eventBuffer.GetEvents(executionTick));
             }
 
             // Save a snapshot of the resulting state so the next ProcessVerifiedBatch can roll back to this tick.
@@ -671,7 +665,7 @@ namespace xpTURN.Klotho.Core
             if (_expectingFullState)
             {
                 _expectingFullState = false;
-                ApplyFullState(tick, stateData, stateHash);
+                ApplyFullState(tick, stateData, stateHash, ApplyReason.LateJoin);
                 SaveSnapshot(tick);
                 _inputBuffer.Clear();
                 _lastServerVerifiedTick = tick;
@@ -691,7 +685,7 @@ namespace xpTURN.Klotho.Core
             int previousTick = CurrentTick;
 
             // Determinism failure or Reconnect recovery path.
-            ApplyFullState(tick, stateData, stateHash);
+            ApplyFullState(tick, stateData, stateHash, ApplyReason.ResyncRequest);
 
             // Preserve local inputs that are not yet confirmed.
             _inputBuffer.ClearBefore(tick);
@@ -766,7 +760,7 @@ namespace xpTURN.Klotho.Core
         private void HandleInitialFullStateReceived(int tick, byte[] stateData, long stateHash)
         {
             _expectingInitialFullState = false;
-            ApplyFullState(tick, stateData, stateHash);
+            ApplyFullState(tick, stateData, stateHash, ApplyReason.InitialFullState);
             _lastServerVerifiedTick = tick;
             _replaySystem.SetInitialStateSnapshot(stateData, stateHash);
             // ApplyFullState resets _accumulator to 0, so re-establish the warm-up lead.

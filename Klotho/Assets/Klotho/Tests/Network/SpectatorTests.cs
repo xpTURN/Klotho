@@ -139,6 +139,7 @@ namespace xpTURN.Klotho.Network.Tests
 
             public event Action<int> OnTickExecuted;
             public event Action<long, long> OnDesyncDetected;
+            public event Action<int, long, long> OnHashMismatch;
             public event Action<int, int> OnRollbackExecuted;
             public event Action<int, string> OnRollbackFailed;
             public event Action<int> OnFrameVerified;
@@ -149,6 +150,8 @@ namespace xpTURN.Klotho.Network.Tests
             public event Action<int, SimulationEvent> OnSyncedEvent;
             public event Action<int> OnResyncCompleted;
             public event Action OnResyncFailed;
+            public event Action<AbortReason> OnMatchAborted;
+            public event Action<ResetReason> OnMatchReset;
             public event Action<int, int, RejectionReason> OnCommandRejected;
             public event Action<int, int, byte[], int> OnVerifiedInputBatchReady;
             public event Action<int> OnExtraDelayChanged;
@@ -164,6 +167,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void ApplyExtraDelay(int delay, ExtraDelaySource source) { }
             public void EscalateExtraDelay(int step, int max) { }
             public void Stop() { }
+            public void AbortMatch(AbortReason reason) { }
 
             public void StartSpectator(SpectatorStartInfo info)
             {
@@ -196,6 +200,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void StopCatchingUp() { }
             public void ConfirmCatchupTick(int tick) { }
             public event Action OnCatchupComplete;
+            public event Action<int, int, WipeKind> OnPendingWipe;
             public void ExpectFullState() { }
             public void CancelExpectFullState() { }
             public ErrorCorrectionSettings ErrorCorrectionSettings { get; set; } = ErrorCorrectionSettings.Default;
@@ -264,7 +269,7 @@ namespace xpTURN.Klotho.Network.Tests
             public event Action<int, int> OnFrameAdvantageReceived;
             public event Action<int> OnLocalPlayerIdAssigned;
             public event Action<int, int> OnFullStateRequested;
-            public event Action<int, byte[], long> OnFullStateReceived;
+            public event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
             public event Action<IPlayerInfo> OnPlayerDisconnected;
             public event Action<IPlayerInfo> OnPlayerReconnected;
             public event Action OnReconnecting;
@@ -286,6 +291,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void SetLocalTick(int tick) { }
             public void SendFullStateRequest(int currentTick) { }
             public void SendFullStateResponse(int peerId, int tick, byte[] stateData, long stateHash) { }
+            public void BroadcastFullState(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast) { }
             public void SendPlayerConfig(int playerId, xpTURN.Klotho.Core.PlayerConfigBase playerConfig) { }
 
             public void FireCommandReceived(ICommand cmd) => OnCommandReceived?.Invoke(cmd);
@@ -300,7 +306,7 @@ namespace xpTURN.Klotho.Network.Tests
                 OnFrameAdvantageReceived?.Invoke(0, 0);
                 OnLocalPlayerIdAssigned?.Invoke(0);
                 OnFullStateRequested?.Invoke(0, 0);
-                OnFullStateReceived?.Invoke(0, null, 0);
+                OnFullStateReceived?.Invoke(0, null, 0, FullStateKind.Unicast);
             }
         }
 

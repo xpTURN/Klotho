@@ -210,6 +210,82 @@ namespace xpTURN.Klotho.Input.Tests
             Assert.AreEqual(15, _buffer.NewestTick);
         }
 
+        [TestCase(-1)]
+        [TestCase(0)]
+        [TestCase(1)]
+        public void ClearBefore_NonPositiveOrFirstTick_PreservesAllEntries(int cleanupTick)
+        {
+            // KlothoEngine's CleanupOldData uses `cleanupTick = Math.Min(rawCleanupTick, _lastVerifiedTick)`
+            // and gates with `if (cleanupTick > 0)`, so transient game-start state (_lastVerifiedTick = -1)
+            // never reaches InputBuffer.ClearBefore. Lock in the buffer's own behaviour for cleanup ticks
+            // at or below the smallest seeded tick — no entries should be removed.
+            _buffer.AddCommand(new EmptyCommand(0, 1));
+            _buffer.AddCommand(new EmptyCommand(0, 2));
+            _buffer.AddCommand(new EmptyCommand(0, 3));
+
+            _buffer.ClearBefore(cleanupTick);
+
+            Assert.AreEqual(3, _buffer.Count, $"ClearBefore({cleanupTick}) must not remove any entries");
+            Assert.IsTrue(_buffer.HasCommandForTick(1));
+            Assert.IsTrue(_buffer.HasCommandForTick(2));
+            Assert.IsTrue(_buffer.HasCommandForTick(3));
+        }
+
+        #endregion
+
+        #region Seal guard — Phase 2-1 ②-B silent desync 마지막 차단막
+
+        [Test]
+        public void SealEmpty_MarksTickPlayerPair_IsSealedReturnsTrueForExactMatchOnly()
+        {
+            _buffer.SealEmpty(tick: 10, playerId: 1);
+
+            Assert.IsTrue(_buffer.IsSealed(10, 1), "Exact (tick, playerId) match must be sealed");
+            Assert.IsFalse(_buffer.IsSealed(10, 2), "Different playerId at same tick must not be sealed");
+            Assert.IsFalse(_buffer.IsSealed(11, 1), "Different tick for same playerId must not be sealed");
+            Assert.IsFalse(_buffer.IsSealed(0, 0), "Unrelated (tick, playerId) must not be sealed");
+        }
+
+        [Test]
+        public void AddCommand_OnSealedTickPlayer_SilentDropsLateRealCommand()
+        {
+            // Seal first, then attempt to add a real command for the same (tick, playerId).
+            // The seal guard drops the late real packet to keep buffer and simulation state consistent.
+            _buffer.SealEmpty(tick: 10, playerId: 1);
+
+            int countBefore = _buffer.Count;
+            _buffer.AddCommand(new EmptyCommand(playerId: 1, tick: 10));
+
+            Assert.AreEqual(countBefore, _buffer.Count,
+                "AddCommand on sealed (tick, playerId) must be silently dropped — buffer count unchanged");
+            Assert.IsFalse(_buffer.HasCommandForTick(10),
+                "Sealed slot must remain empty after AddCommand drop");
+
+            // Sealing must NOT affect AddCommand at a different (tick, playerId) — guard is per-key.
+            _buffer.AddCommand(new EmptyCommand(playerId: 2, tick: 10));
+            Assert.IsTrue(_buffer.HasCommandForTick(10),
+                "AddCommand at different playerId on same tick must still succeed");
+        }
+
+        [Test]
+        public void ClearBefore_RemovesSealsAtTicksBelowCleanup_PreservesSealsAtAndAbove()
+        {
+            // ClearBefore must keep seals in lockstep with buffer entries — stale seals below cleanup
+            // would otherwise persist and block legitimate future AddCommand calls forever.
+            _buffer.SealEmpty(tick: 5, playerId: 1);
+            _buffer.SealEmpty(tick: 8, playerId: 1);
+            _buffer.SealEmpty(tick: 12, playerId: 1);
+
+            _buffer.ClearBefore(10);
+
+            Assert.IsFalse(_buffer.IsSealed(5, 1),
+                "Seal at tick 5 (< cleanup 10) must be removed");
+            Assert.IsFalse(_buffer.IsSealed(8, 1),
+                "Seal at tick 8 (< cleanup 10) must be removed");
+            Assert.IsTrue(_buffer.IsSealed(12, 1),
+                "Seal at tick 12 (>= cleanup 10) must be preserved");
+        }
+
         #endregion
 
         #region Overwrite

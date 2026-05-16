@@ -37,6 +37,7 @@ namespace xpTURN.Klotho
         [field: SerializeField] public int LateJoinDelaySafety { get; set; } = 2;
         [field: SerializeField] public int RttSanityMaxMs { get; set; } = 240;
         [field: SerializeField] public int QuorumMissDropTicks { get; set; } = 20;
+        [field: SerializeField] public int MinStallAbortTicks { get; } = 600;
 
         [Header("Diagnostics")]
         [field: SerializeField] public int EventDispatchWarnMs { get; set; } = 5;

@@ -62,6 +62,19 @@ namespace xpTURN.Klotho.Network
             return FindDisconnectedInfo(playerId) != null;
         }
 
+        // Returns true ONLY for actively reconnecting peers (IsReconnect=true). Cold-start
+        // LateJoin peers (IsReconnect=false) return false — their watchdog activation during
+        // the longer JoinTick wait is preserved as intentional behavior.
+        private bool IsPlayerInActiveCatchup(int playerId)
+        {
+            foreach (var kvp in _lateJoinCatchups)
+            {
+                if (kvp.Value.PlayerId == playerId && kvp.Value.IsReconnect)
+                    return true;
+            }
+            return false;
+        }
+
         #endregion
 
         #region Reconnect: empty input injection
@@ -101,7 +114,11 @@ namespace xpTURN.Klotho.Network
             foreach (var kvp in _lateJoinCatchups)
             {
                 var info = kvp.Value;
-                if (_localTick >= info.JoinTick)
+                // Reconnect: inject from the tick following LastSentTick (= reconnect entry tick).
+                // Cold-start LateJoin: defer to JoinTick (existing behavior — pre-join input is
+                // semantically undefined for a never-joined player).
+                int injectStartTick = info.IsReconnect ? info.LastSentTick + 1 : info.JoinTick;
+                if (_localTick >= injectStartTick)
                 {
                     _commandFactory.PopulateEmpty(_emptyCommandCache, info.PlayerId, _localTick);
                     SendCommand(_emptyCommandCache);
@@ -168,6 +185,10 @@ namespace xpTURN.Klotho.Network
         // without the seal guard.
         private int _relaySealDropCount;
 
+        internal int PresumedDropFalsePositiveCount => _presumedDropFalsePositiveCount;
+        internal int PresumedDropTrueCount => _presumedDropTrueCount;
+        internal int RelaySealDropCount => _relaySealDropCount;
+
         // Each frame: if a remote peer's input is missing at _lastVerifiedTick + 1 for >=
         // QuorumMissDropTicks, mark them as presumed-dropped so reactive empty-fill activates
         // before the transport-level DisconnectTimeout fires (~5s).
@@ -203,6 +224,14 @@ namespace xpTURN.Klotho.Network
 
                 // Peer has provided input at the stall tick — no presumed drop needed.
                 if (_engine.HasCommand(stallTick, playerId))
+                    continue;
+
+                // Skip activation for players currently in active reconnect-catchup. Host has
+                // already initiated the catchup flow (peerId<->playerId remapped in
+                // HandleReconnectRequest, catchup batches in transit), and presuming a drop here
+                // would emit a false positive every reconnect whose first-real-input latency
+                // exceeds QuorumMissDropTicks.
+                if (IsPlayerInActiveCatchup(playerId))
                     continue;
 
                 var info = RentDisconnectedInfo();
@@ -283,7 +312,13 @@ namespace xpTURN.Klotho.Network
             if (!IsHost) return;
             int total = _presumedDropFalsePositiveCount + _presumedDropTrueCount;
             float ratio = total > 0 ? (float)_presumedDropFalsePositiveCount / total : 0f;
-            _logger?.ZLogInformation($"[Metrics][PresumedDrop] role={role} playerId={playerId} falsePositive={_presumedDropFalsePositiveCount} truePositive={_presumedDropTrueCount} ratio={ratio:F3} relaySealDrop={_relaySealDropCount}");
+            var engine = _engine as KlothoEngine;
+            int unexpectedFullStateDrops = engine?.UnexpectedFullStateDropCount ?? 0;
+            int resyncHashMismatches = engine?.ResyncHashMismatchCount ?? 0;
+            int consecutiveDesyncPeak = engine?.ConsecutiveDesyncPeak ?? 0;
+            int resyncRequestTotal = engine?.ResyncRequestTotalCount ?? 0;
+            int postResyncDesync = engine?.PostResyncDesyncCount ?? 0;
+            _logger?.ZLogInformation($"[Metrics][PresumedDrop] role={role} playerId={playerId} falsePositive={_presumedDropFalsePositiveCount} truePositive={_presumedDropTrueCount} ratio={ratio:F3} relaySealDrop={_relaySealDropCount} unexpectedFullStateDrop={unexpectedFullStateDrops} resyncHashMismatch={resyncHashMismatches} desyncPeak={consecutiveDesyncPeak} resyncRequestTotal={resyncRequestTotal} postResyncDesync={postResyncDesync}");
         }
 
         #endregion
@@ -318,6 +353,29 @@ namespace xpTURN.Klotho.Network
                     OnPlayerLeft?.Invoke(player);
                 }
             }
+        }
+
+        internal void CheckChainStallTimeout()
+        {
+            if (_engine == null || _simConfig == null) return;
+            if (_engine.State.IsEnded()) return;
+            if (Phase != SessionPhase.Playing) return;
+            if (_simConfig.TickIntervalMs <= 0) return;
+
+            int lag = _engine.CurrentTick - _engine.LastVerifiedTick;
+            int reconnectTimeoutTicks = _sessionConfig.ReconnectTimeoutMs / _simConfig.TickIntervalMs;
+            int threshold = System.Math.Max(reconnectTimeoutTicks + 100, _simConfig.MinStallAbortTicks);
+            if (lag < threshold) return;
+
+            _logger?.ZLogWarning($"[KlothoNetworkService][ChainStallWatchdog] Aborting match — lag={lag} >= threshold={threshold} " +
+                                 $"(ReconnectTimeoutMs={_sessionConfig.ReconnectTimeoutMs}, MinStallAbortTicks={_simConfig.MinStallAbortTicks}, " +
+                                 $"TickIntervalMs={_simConfig.TickIntervalMs}, CurrentTick={_engine.CurrentTick}, LastVerifiedTick={_engine.LastVerifiedTick})");
+
+            _engine.AbortMatch(AbortReason.ChainStallTimeout);
+
+            if (_reconnectState != ReconnectState.None)
+                _reconnectState = ReconnectState.Failed;
+            Phase = SessionPhase.Disconnected;
         }
 
         #endregion

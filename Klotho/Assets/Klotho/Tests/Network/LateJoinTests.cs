@@ -100,7 +100,7 @@ namespace xpTURN.Klotho.Network.Tests
             public event Action<int, int> OnFrameAdvantageReceived;
             public event Action<int> OnLocalPlayerIdAssigned;
             public event Action<int, int> OnFullStateRequested;
-            public event Action<int, byte[], long> OnFullStateReceived;
+            public event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
             public event Action<IPlayerInfo> OnPlayerDisconnected;
             public event Action<IPlayerInfo> OnPlayerReconnected;
             public event Action OnReconnecting;
@@ -128,6 +128,7 @@ namespace xpTURN.Klotho.Network.Tests
             public void SetLocalTick(int tick) { }
             public void SendFullStateRequest(int currentTick) { }
             public void SendFullStateResponse(int peerId, int tick, byte[] stateData, long stateHash) { }
+            public void BroadcastFullState(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast) { }
             public void SendPlayerConfig(int playerId, xpTURN.Klotho.Core.PlayerConfigBase playerConfig) { }
 
             public void FireCommandReceived(ICommand cmd) => OnCommandReceived?.Invoke(cmd);

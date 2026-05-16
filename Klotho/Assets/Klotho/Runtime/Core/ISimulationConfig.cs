@@ -141,6 +141,15 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         int QuorumMissDropTicks { get; }
 
+        /// <summary>
+        /// Lower-bound floor (ticks) for the chain-stall abort watchdog.
+        /// Effective threshold = max(SessionConfig.ReconnectTimeoutMs / TickIntervalMs + 100, MinStallAbortTicks).
+        /// Guards against misconfigurations where ReconnectTimeoutMs is unusually small or zero —
+        /// without this floor the watchdog would fire almost immediately.
+        /// Default 600 (30s @ 50ms tick).
+        /// </summary>
+        int MinStallAbortTicks { get; }
+
         // --- Diagnostics (DEVELOPMENT_BUILD / UNITY_EDITOR only) ---
 
         /// <summary>

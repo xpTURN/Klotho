@@ -59,6 +59,37 @@ namespace xpTURN.Klotho.Diagnostics
             _rollbackDepths.Add(depth);
         }
 
+        public static int ChainBreakCount => _chainBreakMs.Count;
+
+        public static long[] GetChainResumeLatencies(long endMs)
+        {
+            if (_spikeAtSec.Count == 0) return Array.Empty<long>();
+            var result = new long[_spikeAtSec.Count];
+            for (int i = 0; i < _spikeAtSec.Count; i++)
+            {
+                long spikeMs = _anchorMs + (long)(_spikeAtSec[i] * 1000f);
+                long windowEnd = (i + 1 < _spikeAtSec.Count)
+                    ? _anchorMs + (long)(_spikeAtSec[i + 1] * 1000f)
+                    : endMs;
+
+                long lastChainBreakInWindow = -1;
+                for (int j = 0; j < _chainBreakMs.Count; j++)
+                {
+                    long t = _chainBreakMs[j];
+                    if (t >= spikeMs && t < windowEnd && t > lastChainBreakInWindow)
+                        lastChainBreakInWindow = t;
+                }
+
+                if (lastChainBreakInWindow < 0)
+                    result[i] = 0;
+                else if (lastChainBreakInWindow + ResumeQuiescenceMs >= windowEnd)
+                    result[i] = -1;
+                else
+                    result[i] = (lastChainBreakInWindow - spikeMs) + ResumeQuiescenceMs;
+            }
+            return result;
+        }
+
         public static void EmitSummary(ILogger logger)
         {
             if (!_matchActive) return;
@@ -138,33 +169,13 @@ namespace xpTURN.Klotho.Diagnostics
         // again" without instrumenting every per-tick advance. -1 sentinel when stuck until window end.
         private static string FormatResumeLatencies(long endMs)
         {
-            if (_spikeAtSec.Count == 0) return "";
+            var latencies = GetChainResumeLatencies(endMs);
+            if (latencies.Length == 0) return "";
             var sb = new StringBuilder();
-            for (int i = 0; i < _spikeAtSec.Count; i++)
+            for (int i = 0; i < latencies.Length; i++)
             {
-                long spikeMs = _anchorMs + (long)(_spikeAtSec[i] * 1000f);
-                long windowEnd = (i + 1 < _spikeAtSec.Count)
-                    ? _anchorMs + (long)(_spikeAtSec[i + 1] * 1000f)
-                    : endMs;
-
-                long lastChainBreakInWindow = -1;
-                for (int j = 0; j < _chainBreakMs.Count; j++)
-                {
-                    long t = _chainBreakMs[j];
-                    if (t >= spikeMs && t < windowEnd && t > lastChainBreakInWindow)
-                        lastChainBreakInWindow = t;
-                }
-
-                long latencyMs;
-                if (lastChainBreakInWindow < 0)
-                    latencyMs = 0;
-                else if (lastChainBreakInWindow + ResumeQuiescenceMs >= windowEnd)
-                    latencyMs = -1;
-                else
-                    latencyMs = (lastChainBreakInWindow - spikeMs) + ResumeQuiescenceMs;
-
                 if (i > 0) sb.Append(',');
-                sb.Append(latencyMs);
+                sb.Append(latencies[i]);
             }
             return sb.ToString();
         }

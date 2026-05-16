@@ -56,13 +56,8 @@ namespace xpTURN.Klotho.Core
                 // Dispatch synced events for the newly verified tick.
                 // Regular events were already fired during the Predicted stage - do not refire them.
                 // On the rollback path, the subsequent DiffRollbackEvents fires new-only events as Confirmed.
-                var verifiedEvents = _eventBuffer.GetEvents(tick);
-                for (int ei = 0; ei < verifiedEvents.Count; ei++)
-                {
-                    var evt = verifiedEvents[ei];
-                    if (evt.Mode == EventMode.Synced)
-                        OnSyncedEvent?.Invoke(tick, evt);
-                }
+                // Batch helper short-circuits when this tick was already dispatched (rollback chain re-walk).
+                DispatchSyncedEventsForTick(tick, _eventBuffer.GetEvents(tick));
 
                 tick++;
             }

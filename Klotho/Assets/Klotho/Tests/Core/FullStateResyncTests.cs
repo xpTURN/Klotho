@@ -106,7 +106,7 @@ namespace xpTURN.Klotho.Core.Tests
             public event Action<int, int> OnFrameAdvantageReceived;
             public event Action<int> OnLocalPlayerIdAssigned;
             public event Action<int, int> OnFullStateRequested;
-            public event Action<int, byte[], long> OnFullStateReceived;
+            public event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
             public event Action<IPlayerInfo> OnPlayerDisconnected;
             public event Action<IPlayerInfo> OnPlayerReconnected;
             public event Action OnReconnecting;
@@ -139,14 +139,16 @@ namespace xpTURN.Klotho.Core.Tests
                 FullStateResponses.Add((peerId, tick, stateData, stateHash));
             }
 
+            public void BroadcastFullState(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast) { }
+
             public void FireDesyncDetected(int playerId, int tick, long localHash, long remoteHash)
             {
                 OnDesyncDetected?.Invoke(playerId, tick, localHash, remoteHash);
             }
 
-            public void FireFullStateReceived(int tick, byte[] stateData, long stateHash)
+            public void FireFullStateReceived(int tick, byte[] stateData, long stateHash, FullStateKind kind = FullStateKind.Unicast)
             {
-                OnFullStateReceived?.Invoke(tick, stateData, stateHash);
+                OnFullStateReceived?.Invoke(tick, stateData, stateHash, kind);
             }
 
             public void FireFullStateRequested(int peerId, int requestTick)

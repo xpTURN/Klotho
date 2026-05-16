@@ -44,7 +44,7 @@ namespace xpTURN.Klotho.Network
 
         event Action<string> OnSpectatorStopped;
 
-        event Action<int, byte[], long> OnFullStateReceived;
+        event Action<int, byte[], long, FullStateKind> OnFullStateReceived;
 
         event Action<ISessionConfig> OnSessionConfigReceived;
     }

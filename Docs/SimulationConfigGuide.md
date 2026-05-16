@@ -183,6 +183,7 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
    - SD `MaxUnackedInputs exceeded` → adjust `InputResendIntervalMs` or raise `SDInputLeadTicks`.
 3. **On desync**: temporarily lower `SyncCheckInterval` (e.g., 10 → 5) for faster detection.
 4. **Interpolation jitter**: raise `InterpolationDelayTicks` one step at a time and enable `EnableErrorCorrection`.
+5. **On `OnMatchAborted(ChainStallTimeout)` false positives**: verify `SessionConfig.ReconnectTimeoutMs` against the recovery floor. Effective threshold = `max(ReconnectTimeoutMs / TickIntervalMs + 100, SimulationConfig.MinStallAbortTicks)`. If `ReconnectTimeoutMs < 30s`, `MinStallAbortTicks` (default 600 = 30s @ 50ms) acts as the floor — raise both for high-latency/long-recovery scenarios.
 
 ---
 

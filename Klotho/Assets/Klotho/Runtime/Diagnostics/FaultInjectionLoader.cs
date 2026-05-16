@@ -23,6 +23,7 @@ namespace xpTURN.Klotho.Diagnostics
         {
             [JsonProperty] public int? EmulatedRttMs { get; set; }
             [JsonProperty] public List<RttScheduleEntry> EmulatedRttSchedule { get; set; }
+            [JsonProperty] public List<DisconnectScheduleEntry> EmulatedDisconnectSchedule { get; set; }
             [JsonProperty] public int? ServerGcPauseMs { get; set; }
             [JsonProperty] public int? ServerGcPauseAtTick { get; set; }
             [JsonProperty] public List<int> DropSpawnCommandPlayerIds { get; set; }
@@ -36,6 +37,14 @@ namespace xpTURN.Klotho.Diagnostics
         {
             [JsonProperty("atSec")] public float AtSec { get; set; }
             [JsonProperty("rttMs")] public int RttMs { get; set; }
+        }
+
+        [JsonObject(MemberSerialization.OptIn)]
+        private class DisconnectScheduleEntry
+        {
+            [JsonProperty("atSec")] public float AtSec { get; set; }
+            [JsonProperty("durationSec")] public float DurationSec { get; set; }
+            [JsonProperty("playerId")] public int? PlayerId { get; set; }
         }
 
         /// <summary>
@@ -74,6 +83,7 @@ namespace xpTURN.Klotho.Diagnostics
             logger?.ZLogWarning(
                 $"[FaultInjectionLoader] Applied: RTT={FaultInjection.EmulatedRttMs}ms, " +
                 $"rttSchedule=[{FormatRttSchedule()}], " +
+                $"disconnectSchedule=[{FormatDisconnectSchedule()}], " +
                 $"GC={FaultInjection.ServerGcPauseMs}ms@tick{FaultInjection.ServerGcPauseAtTick}, " +
                 $"dropSpawn=[{string.Join(",", FaultInjection.DropSpawnCommandPlayerIds)}], " +
                 $"suppressAck=[{string.Join(",", FaultInjection.SuppressBootstrapAckPlayerIds)}], " +
@@ -96,6 +106,22 @@ namespace xpTURN.Klotho.Diagnostics
             return sb.ToString();
         }
 
+        private static string FormatDisconnectSchedule()
+        {
+            var schedule = FaultInjection.EmulatedDisconnectSchedule;
+            if (schedule.Count == 0) return "";
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < schedule.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                var e = schedule[i];
+                sb.Append('(').Append(e.atSec.ToString("F1")).Append("s+")
+                  .Append(e.durationSec.ToString("F1")).Append("s,peer=")
+                  .Append(e.playerId.HasValue ? e.playerId.Value.ToString() : "all").Append(')');
+            }
+            return sb.ToString();
+        }
+
         private static void ApplySchema(Schema s)
         {
             if (s.EmulatedRttMs.HasValue)        FaultInjection.EmulatedRttMs = s.EmulatedRttMs.Value;
@@ -110,6 +136,14 @@ namespace xpTURN.Klotho.Diagnostics
                     FaultInjection.EmulatedRttSchedule.Add((entry.AtSec, entry.RttMs));
                 // Driver consumes sequentially — enforce ascending atSec.
                 FaultInjection.EmulatedRttSchedule.Sort((a, b) => a.atSec.CompareTo(b.atSec));
+            }
+
+            if (s.EmulatedDisconnectSchedule != null)
+            {
+                FaultInjection.EmulatedDisconnectSchedule.Clear();
+                foreach (var entry in s.EmulatedDisconnectSchedule)
+                    FaultInjection.EmulatedDisconnectSchedule.Add((entry.AtSec, entry.DurationSec, entry.PlayerId));
+                FaultInjection.EmulatedDisconnectSchedule.Sort((a, b) => a.atSec.CompareTo(b.atSec));
             }
 
             if (s.DropSpawnCommandPlayerIds != null)
