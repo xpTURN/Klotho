@@ -190,12 +190,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         private int ReconstructCorridor(int endTri)
         {
-            // cameFrom walks end -> start. Count the full chain first so that, on overflow,
-            // we can skip the triangles nearest the destination and keep the ones nearest
-            // the agent's actual start triangle instead. Keeping the end-side segment (the
-            // previous behavior) produces a corridor that never touches the agent's current
-            // triangle, which desyncs corridor-advance tracking in FPNavAgentSystem.
-            // The totalLength bound guards against a malformed (cyclic) cameFrom chain.
+            // cameFrom walks end -> start. On overflow, keep the segment nearest the start
+            // triangle (not the end) so the agent's current triangle stays in the corridor.
+            // The totalLength bound also guards against a malformed (cyclic) cameFrom chain.
             int totalLength = 0;
             int node = endTri;
             while (node >= 0 && totalLength <= _cameFrom.Length)
@@ -220,7 +217,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 node = _cameFrom[node];
             }
 
-            // Reverse into start -> end order (returns the collected partial path even on overflow)
+            // Reverse into start -> end order
             for (int i = 0; i < count / 2; i++)
             {
                 int tmp = _corridor[i];
