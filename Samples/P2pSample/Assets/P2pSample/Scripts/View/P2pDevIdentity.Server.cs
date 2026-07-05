@@ -28,7 +28,7 @@ namespace xpTURN.Samples.P2pSample
         /// endpoint, reached over the network; the client never holds the seed or runs this.</summary>
         private static string IssueDevTicket(string account, string displayName, long nowMs)
         {
-            var issuer = new DevLobbyTicketIssuer(new BcEd25519Backend(), Seed);
+            var issuer = new DevLobbyTicketIssuer(Ed25519Backends.Default, Seed);
             var ticket = new LobbyTicket(
                 account: account,
                 displayName: displayName,

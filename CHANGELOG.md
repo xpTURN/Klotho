@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3] - 2026-07-05
+
+### Sample identity — dependency-free Ed25519
+
+- **The reference identity backend now signs and verifies logins with a dependency-free, pure-C# Ed25519 instead of BouncyCastle.** The samples use Atropos — a Zero-GC RFC 8032 implementation — so the shared identity reference no longer bundles a ~4.6 MB crypto library: the .NET and Godot samples pull it from NuGet (`xpTURN.Atropos`) and the Unity samples reference it as a UPM git package. Nothing changes on the wire — Atropos is byte-identical to any conformant implementation, so tickets minted before the switch still verify and players see no difference.
+- **Verifying a login ticket now allocates nothing.** The check a dedicated server runs on every join is Zero-GC after a one-time per-thread warm-up, where it previously allocated several kilobytes per verification; signing a ticket allocates only the returned signature. BouncyCastle remains only as an independent cross-check inside the identity tests, off every runtime path.
+
 ## [0.5.2] - 2026-07-05
 
 ### Logging — configurable timestamp format

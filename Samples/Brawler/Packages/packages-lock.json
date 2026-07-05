@@ -262,6 +262,13 @@
       },
       "url": "https://packages.unity.com"
     },
+    "com.xpturn.atropos": {
+      "version": "https://github.com/xpTURN/Atropos.git?path=com.xpturn.atropos#atropos-v0.1.1",
+      "depth": 0,
+      "source": "git",
+      "dependencies": {},
+      "hash": "6c0042aa9d149f42ba435c24d15b83ff061973f1"
+    },
     "com.xpturn.klotho": {
       "version": "file:../../../com.xpturn.klotho",
       "depth": 0,

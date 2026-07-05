@@ -2,7 +2,8 @@
     "name": "xpTURN.Klotho.Identity.P2pRef",
     "rootNamespace": "xpTURN.Klotho.Samples.Identity",
     "references": [
-        "xpTURN.Klotho.Runtime"
+        "xpTURN.Klotho.Runtime",
+        "xpTURN.Atropos"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

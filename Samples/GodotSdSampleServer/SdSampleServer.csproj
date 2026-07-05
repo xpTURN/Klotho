@@ -30,9 +30,9 @@
   </ItemGroup>
 
   <!-- SD identity validator + lobby redeem client (server side). Reuses p2pref's codec / Ed25519 backend
-       + sdref's validator / DevLobbyCore / redeem client. BouncyCastle via NuGet. -->
+       + sdref's validator / DevLobbyCore / redeem client. Ed25519 via the xpTURN.Atropos NuGet package. -->
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <PackageReference Include="xpTURN.Atropos" Version="0.1.1" />
     <Compile Include="../IdentityP2pRef/Runtime/*.cs" Link="IdentityP2pRef/%(Filename)%(Extension)" />
     <Compile Include="../IdentitySdRef/Runtime/*.cs" Link="IdentitySdRef/%(Filename)%(Extension)" />
   </ItemGroup>

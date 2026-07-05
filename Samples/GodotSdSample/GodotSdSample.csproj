@@ -23,10 +23,10 @@
   <Import Project="addons/klotho/Klotho.props" />
 
   <!-- SD identity reference (client = ticket provider + lobby Issue client, no validator). Godot consumes
-       the same Runtime/*.cs as the Unity sample + BouncyCastle via NuGet; sdref reuses p2pref's codec /
-       Ed25519 backend. Verify Export/AOT/trimming; add a TrimmerRootAssembly if BC is stripped. -->
+       the same Runtime/*.cs as the Unity sample + Ed25519 via the xpTURN.Atropos NuGet package; sdref
+       reuses p2pref's codec / Ed25519 backend. Verify Export/AOT/trimming. -->
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <PackageReference Include="xpTURN.Atropos" Version="0.1.1" />
     <Compile Include="../IdentityP2pRef/Runtime/*.cs" Link="IdentityP2pRef/%(Filename)%(Extension)" />
     <Compile Include="../IdentitySdRef/Runtime/*.cs" Link="IdentitySdRef/%(Filename)%(Extension)" />
   </ItemGroup>

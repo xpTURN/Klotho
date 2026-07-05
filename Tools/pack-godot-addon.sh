@@ -97,11 +97,13 @@ cat > "$OUT/Klotho.Server.props" <<'PROPS'
 </Project>
 PROPS
 
-echo "==> 6/6 copy addon meta (plugin.cfg, plugin.gd[+uid], README)"
+echo "==> 6/6 copy addon meta (plugin.cfg, plugin.gd[+uid], README, LICENSE)"
 cp "$PKG/Godot~/plugin.cfg"    "$OUT/"
 cp "$PKG/Godot~/plugin.gd"     "$OUT/"
 cp "$PKG/Godot~/plugin.gd.uid" "$OUT/"
 cp "$PKG/Godot~/README.md"     "$OUT/"
+# Godot Asset Library requires the LICENSE to be bundled with the addon.
+cp "$REPO_ROOT/LICENSE"        "$OUT/"
 
 # Drop Unity .meta sidecars; keep .cs.uid (Godot script UIDs, copied above).
 find "$OUT/Adapters" -name '*.meta' -delete 2>/dev/null || true

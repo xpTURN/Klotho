@@ -1,6 +1,6 @@
 {
   "name": "com.xpturn.klotho",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "displayName": "xpTURN.Klotho",
   "description": "Deterministic Multiplayer Simulation Framework for Unity (CSP / Rollback / Frame Sync / Server-Driven / Replay).",
   "unity": "2022.3",

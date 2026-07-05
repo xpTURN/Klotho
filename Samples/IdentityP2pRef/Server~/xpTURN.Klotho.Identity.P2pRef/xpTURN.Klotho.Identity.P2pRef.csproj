@@ -7,8 +7,8 @@
   of globbing the raw Runtime sources. The asmdef (noEngineReferences: true) guarantees these sources are
   engine-agnostic, so they compile unchanged here.
 
-  References the Runtime server mirror (Serialization/Network/Core types). BouncyCastle is a NuGet
-  PackageReference here (BcEd25519Backend) and flows transitively to consumers.
+  References the Runtime server mirror (Serialization/Network/Core types). Ed25519 is provided by the
+  xpTURN.Atropos NuGet package (PureEd25519Backend) and flows transitively to consumers.
 -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -30,7 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <PackageReference Include="xpTURN.Atropos" Version="0.1.1" />
   </ItemGroup>
 
   <!-- Source generator: DemoEntitlementData is a [KlothoSerializableStruct] whose

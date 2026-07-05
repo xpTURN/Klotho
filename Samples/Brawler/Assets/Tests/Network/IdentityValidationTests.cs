@@ -638,11 +638,11 @@ namespace xpTURN.Klotho.Network.Tests
         };
 
         private static string MintTicket(string account, string displayName, string nonce, long? expiresAt = null)
-            => new DevLobbyTicketIssuer(new BcEd25519Backend(), _itSeed)
+            => new DevLobbyTicketIssuer(new PureEd25519Backend(), _itSeed)
                 .Issue(new LobbyTicket(account, displayName, _itSid, _itNow, expiresAt ?? (_itNow + 60_000), nonce));
 
         private static P2pEd25519IdentityValidator RealValidator()
-            => new P2pEd25519IdentityValidator(_itPub, _itSid, () => _itNow, new BcEd25519Backend());
+            => new P2pEd25519IdentityValidator(_itPub, _itSid, () => _itNow, new PureEd25519Backend());
 
         private sealed class CountingValidator : IPlayerIdentityValidator
         {

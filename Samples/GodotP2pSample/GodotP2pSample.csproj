@@ -16,11 +16,10 @@
 
   <Import Project="addons/klotho/Klotho.props" />
 
-  <!-- Shared P2P identity reference (SQ5 shared source). Godot consumes the same
-       Runtime/*.cs as the Unity samples + BouncyCastle via NuGet (Unity gets BC from the package's
-       bundled DLL instead). Verify Export/AOT/trimming; add a TrimmerRootAssembly if BC is stripped. -->
+  <!-- Shared P2P identity reference (SQ5 shared source). Godot consumes the same Runtime/*.cs as the
+       Unity samples + Ed25519 via the xpTURN.Atropos NuGet package. Verify Export/AOT/trimming. -->
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <PackageReference Include="xpTURN.Atropos" Version="0.1.1" />
     <Compile Include="../IdentityP2pRef/Runtime/*.cs" Link="IdentityP2pRef/%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

@@ -11,6 +11,8 @@
   <Import Project="../GodotSdSample/addons/klotho/Klotho.Server.props" />
 
   <ItemGroup>
+    <PackageReference Include="xpTURN.Atropos" Version="0.1.1" />
+    <!-- BouncyCastle is used only as the Atropos<->BC differential oracle (Ed25519InteropTests); the runtime carries no BouncyCastle dependency. -->
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />

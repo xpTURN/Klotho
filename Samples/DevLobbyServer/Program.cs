@@ -31,7 +31,7 @@ using var loggerFactory = KLoggerFactory.Create(builder =>
 });
 var logger = loggerFactory.CreateLogger("DevLobby");
 
-var backend = new BcEd25519Backend();
+var backend = Ed25519Backends.Default;
 Func<long> now = () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 // Verify with the real public key (BC). The core holds the private seed (via the issuer) + the
 // match→server assignment + the consumed-nonce ledger.

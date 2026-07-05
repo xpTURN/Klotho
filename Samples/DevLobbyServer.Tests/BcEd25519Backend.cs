@@ -1,18 +1,15 @@
-// Production Ed25519 backend over BouncyCastle.
-//
-// BouncyCastle.Cryptography is bundled in this shared package (Runtime/Plugins/, Unity) — so this file
-// compiles unconditionally; no KLOTHO_BOUNCYCASTLE define or per-project DLL drop is needed (the prior
-// #if guard is gone now that BC ships with the package). Godot consumers supply BC via a NuGet
-// <PackageReference> while <Compile Include>-ing this same source.
-// Uses ONLY the low-level Org.BouncyCastle.Math.EC.Rfc8032.Ed25519 static API (no provider/registry
-// reflection → IL2CPP / Godot-trim safe). Ed25519 is RFC 8032 deterministic, so this interoperates
-// byte-identically with any conformant implementation (BC version-independent).
+// BouncyCastle Ed25519 backend — an independent-implementation differential oracle for the Atropos
+// backend (PureEd25519Backend). It lives in this .NET test project, so the runtime assemblies carry no
+// BouncyCastle dependency. Uses ONLY the low-level Org.BouncyCastle.Math.EC.Rfc8032.Ed25519 static API.
+// Ed25519 is RFC 8032 deterministic, so it is byte-identical to any conformant implementation — the
+// byte-identity that Ed25519InteropTests asserts between this backend and PureEd25519Backend.
 using System;
 using Org.BouncyCastle.Math.EC.Rfc8032;
 
 namespace xpTURN.Klotho.Samples.Identity
 {
-    /// <summary>Real Ed25519 sign/verify via BouncyCastle (default backend; the test fake is <see cref="FakeEd25519Backend"/>).</summary>
+    /// <summary>Ed25519 sign/verify via BouncyCastle — test differential oracle only (runtime uses
+    /// <see cref="PureEd25519Backend"/>; the deterministic unit fake is <see cref="FakeEd25519Backend"/>).</summary>
     public sealed class BcEd25519Backend : IEd25519Backend
     {
         public byte[] Sign(byte[] privateKey, byte[] message)

@@ -12,6 +12,7 @@
     "com.unity.timeline": "1.8.12",
     "com.unity.ugui": "2.0.0",
     "com.unity.visualscripting": "1.9.11",
+    "com.xpturn.atropos": "https://github.com/xpTURN/Atropos.git?path=com.xpturn.atropos#atropos-v0.1.1",
     "com.xpturn.klotho": "file:../../../com.xpturn.klotho",
     "com.xpturn.klotho.identityp2pref": "file:../../../Samples/IdentityP2pRef",
     "com.xpturn.polyfill": "https://github.com/xpTURN/Polyfill.git?path=src/Polyfill/Assets/Polyfill",

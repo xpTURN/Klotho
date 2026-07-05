@@ -58,7 +58,7 @@ namespace xpTURN.Samples.P2pSample
             => new P2pEd25519IdentityValidator(
                 PublicKey, DevSessionId,
                 () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                new BcEd25519Backend());
+                Ed25519Backends.Default);
     }
 }
 #endif

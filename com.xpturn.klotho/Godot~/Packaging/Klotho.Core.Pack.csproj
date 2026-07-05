@@ -27,7 +27,7 @@
   <!-- NuGet package metadata -->
   <PropertyGroup>
     <PackageId>xpTURN.Klotho.Runtime</PackageId>
-    <Version>0.5.2</Version>
+    <Version>0.5.3</Version>
     <Authors>xpTURN</Authors>
     <Description>Engine-agnostic deterministic lockstep core for Klotho (Godot .NET build).</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

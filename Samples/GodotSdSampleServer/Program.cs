@@ -82,7 +82,7 @@ var roomManagerConfig = new RoomManagerConfigBuilder((roomLogger) => new SdServe
 #if KLOTHO_DEV_LOBBY
 LiteNetLibLobbyRedeemClient redeemClient = new LiteNetLibLobbyRedeemClient(logger, lobbyHost, lobbyPort);
 roomManagerConfig.IdentityValidator = SdDevIdentity.CreateValidator(
-    new BcEd25519Backend(), SdDevIdentity.PublicKey, redeemClient,
+    Ed25519Backends.Default, SdDevIdentity.PublicKey, redeemClient,
     () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 logger.KInformation($"[SdServer] identity validator active — dev lobby {lobbyHost}:{lobbyPort}, serverId={SdDevIdentity.DevServerId}");
 #endif

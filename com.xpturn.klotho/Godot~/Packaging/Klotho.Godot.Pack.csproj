@@ -20,7 +20,7 @@
 
   <PropertyGroup>
     <PackageId>xpTURN.Klotho.Runtime.Godot</PackageId>
-    <Version>0.5.2</Version>
+    <Version>0.5.3</Version>
     <Authors>xpTURN</Authors>
     <Description>Godot (.NET) adapter for the Klotho deterministic lockstep core — shipped as source so it compiles against the consumer's GodotSharp.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
@@ -30,7 +30,7 @@
   <!-- Core package dependency. PrivateAssets=none so the core's analyzer (KlothoGenerator) and runtime
        deps flow transitively — a consumer that references only the adapter still gets the generator. -->
   <ItemGroup>
-    <PackageReference Include="xpTURN.Klotho.Runtime" Version="0.5.2" PrivateAssets="none" />
+    <PackageReference Include="xpTURN.Klotho.Runtime" Version="0.5.3" PrivateAssets="none" />
   </ItemGroup>
 
   <!-- Ship adapter sources + the buildTransitive props that compiles them in the consumer. -->

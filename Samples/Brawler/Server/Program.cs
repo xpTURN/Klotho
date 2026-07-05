@@ -142,7 +142,7 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
     {
         redeemClient = new LiteNetLibLobbyRedeemClient(logger, lobbyHost, lobbyPort);
         roomManagerConfig.IdentityValidator = SdDevIdentity.CreateValidator(
-            new BcEd25519Backend(), SdDevIdentity.PublicKey, redeemClient,
+            Ed25519Backends.Default, SdDevIdentity.PublicKey, redeemClient,
             () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         logger.KInformation($"[BrawlerDedicatedServer] identity validator active — dev lobby {lobbyHost}:{lobbyPort}, serverId={SdDevIdentity.DevServerId}");
     }
@@ -259,7 +259,7 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
     {
         redeemClient = new LiteNetLibLobbyRedeemClient(logger, lobbyHost, lobbyPort);
         roomManagerConfig.IdentityValidator = SdDevIdentity.CreateValidator(
-            new BcEd25519Backend(), SdDevIdentity.PublicKey, redeemClient,
+            Ed25519Backends.Default, SdDevIdentity.PublicKey, redeemClient,
             () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         logger.KInformation($"[BrawlerDedicatedServer] identity validator active — dev lobby {lobbyHost}:{lobbyPort}, serverId={SdDevIdentity.DevServerId}");
     }
