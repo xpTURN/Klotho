@@ -151,9 +151,11 @@ namespace xpTURN.Klotho.Network
         void RequestCommandsForTick(int tick);
 
         /// <summary>
-        /// Send sync hash
+        /// Send sync hash. <paramref name="cmdHash"/> is the command digest of the tick's executed
+        /// set — carried alongside the state hash so a desync can be classified as input vs state
+        /// divergence at the comparison point. Diagnostic-only; never drives recovery.
         /// </summary>
-        void SendSyncHash(int tick, long hash);
+        void SendSyncHash(int tick, long hash, long cmdHash);
 
         /// <summary>
         /// Guest → host (Reliable): reports that determinism recovery is failing on this peer

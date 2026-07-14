@@ -257,6 +257,25 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         int TickDriftWarnMultiplier { get; }
 
+        /// <summary>
+        /// Number of recent ticks retained in the desync-diagnostic hash history. 0 disables it.
+        /// When &gt; 0 the simulation accumulates a per-tick layered <c>StateHashBreakdown</c> into a
+        /// pre-allocated numeric ring (zero-GC on the steady path), so a desync can be localized to a
+        /// component type or system participant from any role's local log, not just the SD prediction
+        /// path. Unlike the state hash itself this is diagnostic-only and never crosses the wire
+        /// (not part of SimulationConfigMessage), so peers may run different values.
+        ///
+        /// <para>Cost is asymmetric: the SD server / SD verified-resim paths already hash every tick,
+        /// so accumulation is a free byproduct there. The P2P forward/rollback paths only hash on check
+        /// ticks, so a non-zero value buys a NEW per-tick full-state hash (~0.1% of the tick budget for a
+        /// typical world). Off ⇒ P2P history degrades gracefully to check-tick granularity. The default is
+        /// 60 (diagnostics ON, opt-OUT): a desync is rare and expensive to reproduce, so the small steady
+        /// cost is paid by default and a game that cannot afford it sets 0. Replay engines (null network
+        /// service) never accumulate regardless — there is no peer to diverge from, and replaying a
+        /// recording against its own capture is a separate feature.</para>
+        /// </summary>
+        int DiagnosticHistoryTicks { get; }
+
         // --- Multi-stage ---
 
         /// <summary>

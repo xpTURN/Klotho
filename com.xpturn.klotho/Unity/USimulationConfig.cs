@@ -58,6 +58,10 @@ namespace xpTURN.Klotho
         [field: Header("Diagnostics")]
         [field: SerializeField] public int EventDispatchWarnMs { get; set; } = 5;
         [field: SerializeField] public int TickDriftWarnMultiplier { get; set; } = 2;
+        // Desync-diagnostic hash history. Default 60 (≈ rollback window + RTT margin) accumulates a
+        // per-tick layered hash breakdown for local desync localization; 0 disables. Diagnostic-only, not
+        // wire-propagated. Carries a P2P per-tick hash cost — set 0 to drop it in a shipped player build.
+        [field: SerializeField] public int DiagnosticHistoryTicks { get; set; } = 60;
 
         // Multi-stage. StageId authorable (default single stage);
         // MatchConfigData is runtime-only (set by lobby/host at match start), not inspector-authored.

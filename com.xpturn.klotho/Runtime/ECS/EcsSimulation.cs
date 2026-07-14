@@ -23,6 +23,14 @@ namespace xpTURN.Klotho.ECS
         private byte[] _hashBuffer = Array.Empty<byte>();
         private IDataAssetRegistryBuilder _registryBuilder;
 
+        // Desync-diagnostic hash history. _breakdown is the reusable layered-hash scratch that
+        // GetStateHash fills when history is enabled; _hashHistory is the numeric ring, built lazily once
+        // the participant set is stable. All inert (no cost / no allocation) when _hashHistoryCapacity==0.
+        private readonly StateHashBreakdown _breakdown = new StateHashBreakdown();
+        private int _hashHistoryCapacity;
+        private StateHashRing _hashHistory;
+        private int[] _flushSlotOrder = Array.Empty<int>();
+
         public int CurrentTick => _frame.Tick;
 
         // Reused payload for GetActiveMatchEnd — callers (resync backstop) do not retain it.
@@ -76,6 +84,22 @@ namespace xpTURN.Klotho.ECS
         /// inert (default -1) in non-fault-injection builds.</para>
         /// </summary>
         public int ForceDesyncHashTick = -1;
+
+        /// <summary>
+        /// Positive-control state corruption (armed by the engine from FaultInjection.RegisterStateCorruption).
+        /// When <c>_frame.Tick == StateCorruptionTick</c> at the end of <see cref="Tick"/>, the mutator
+        /// mutates the live post-execution Frame — before the caller's SaveSnapshot/GetStateHash, so the
+        /// corruption is both hashed (→ divergence detected) and snapshotted. It re-fires on EVERY
+        /// (re-)execution of the tick (verified/rollback resim re-runs Tick()), mirroring the hash salt's
+        /// monotonic tick gate, so the divergence is not silently washed out; a FullState restore
+        /// past the tick stops re-execution and recovery is clean.
+        ///
+        /// <para>Compiled unconditionally (like <see cref="ForceDesyncHashTick"/>) for editor/player
+        /// serialization-layout parity; the mutator is only invoked under <c>#if KLOTHO_FAULT_INJECTION</c>
+        /// and only set by the engine under that define, so it is inert (null / -1) otherwise.</para>
+        /// </summary>
+        public int StateCorruptionTick = -1;
+        public System.Action<Frame> StateCorruptionMutator;
 
         public EcsSimulation(int maxEntities, int maxRollbackTicks = 10, int deltaTimeMs = 50, IKLogger logger = null, IDataAssetRegistryBuilder registryBuilder = null, IDataAssetRegistry assetRegistry = null)
         {
@@ -167,6 +191,14 @@ namespace xpTURN.Klotho.ECS
             // Phase.Update → PostUpdate → LateUpdate
             _systemRunner.RunUpdateSystems(ref _frame);
 
+#if KLOTHO_FAULT_INJECTION
+            // Positive-control state corruption: mutate the post-execution state of the armed tick on every
+            // (re-)execution (before Tick++ so _frame.Tick is the executed tick; before the caller's
+            // SaveSnapshot/GetStateHash so the corruption is hashed + snapshotted). See StateCorruptionTick.
+            if (StateCorruptionMutator != null && _frame.Tick == StateCorruptionTick)
+                StateCorruptionMutator(_frame);
+#endif
+
             _frame.Tick++;
         }
 
@@ -214,25 +246,36 @@ namespace xpTURN.Klotho.ECS
                 _snapshotParticipants[i].RestoreSnapshot(ref reader);
         }
 
-        public long GetStateHash()
+        public long GetStateHash() => GetStateHash(_hashHistoryCapacity > 0 ? _breakdown : null);
+
+        // Layered state hash. When <paramref name="breakdown"/> is non-null, records the frame-level
+        // hash, the per-component-type hashes/counts (via Frame.CalculateHash) and the per-participant
+        // system hashes as a byproduct. Snapshot participants are now hashed one at a time from a
+        // fresh FNV seed and folded individually (replacing the single concatenated HashBytes), matching
+        // SerializeFullStateWithHash so GetStateHash() stays equal to the FullState hash verified at
+        // resync restore. The fault-injection salt applies to Total only, leaving every layer hash intact
+        // (so the negative control reports "all layers match, Total differs").
+        public long GetStateHash(StateHashBreakdown breakdown)
         {
-            ulong frameHash = _frame.CalculateHash();
-            ulong hash = frameHash;
+            ulong total = _frame.CalculateHash(breakdown);
 
-            if (_snapshotParticipants.Count > 0)
+            int pc = _snapshotParticipants.Count;
+            breakdown?.EnsureSystemCapacity(pc);
+
+            for (int i = 0; i < pc; i++)
             {
-                int sysSize = 0;
-                for (int i = 0; i < _snapshotParticipants.Count; i++)
-                    sysSize += _snapshotParticipants[i].GetSnapshotSize();
-
-                if (_hashBuffer.Length < sysSize)
-                    _hashBuffer = new byte[sysSize];
+                int size = _snapshotParticipants[i].GetSnapshotSize();
+                if (_hashBuffer.Length < size)
+                    _hashBuffer = new byte[size];
 
                 var writer = new SpanWriter(_hashBuffer);
-                for (int i = 0; i < _snapshotParticipants.Count; i++)
-                    _snapshotParticipants[i].SaveSnapshot(ref writer);
+                _snapshotParticipants[i].SaveSnapshot(ref writer);
 
-                hash = FPHash.HashBytes(hash, new ReadOnlySpan<byte>(_hashBuffer, 0, writer.Position));
+                ulong sysHash = FPHash.HashBytes(FPHash.FNV_OFFSET,
+                    new ReadOnlySpan<byte>(_hashBuffer, 0, writer.Position));
+                total = FPHash.Hash(total, sysHash);
+                if (breakdown != null)
+                    breakdown.SystemHashes[i] = sysHash;
             }
 
 #if KLOTHO_FAULT_INJECTION
@@ -242,10 +285,13 @@ namespace xpTURN.Klotho.ECS
             // is taken at _frame.Tick == N+1. Hash-only (no state mutation) + monotonic tick gate → a
             // FullState restore past N stops the salt and recovery is clean.
             if (ForceDesyncHashTick >= 0 && _frame.Tick == ForceDesyncHashTick + 1)
-                hash ^= 0x5DE59C00DEADF00DUL;
+                total ^= 0x5DE59C00DEADF00DUL;
 #endif
 
-            return (long)hash;
+            if (breakdown != null)
+                breakdown.Total = (long)total;
+
+            return (long)total;
         }
 
         public void Reset()
@@ -272,10 +318,232 @@ namespace xpTURN.Klotho.ECS
             logger.Log(logLevel, $"[Physics][StaticGeometry] {label}: count={count} fp=0x{fp:X16}", null);
         }
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-        public void SnapshotHashesToQueue() => _frame.SnapshotHashesToQueue();
-        public void FlushHashHistory(IKLogger logger, int dumpTick) => _frame.FlushHashHistory(logger, dumpTick);
-#endif
+        // ── diagnostic hash history ─────────────────────────────────────
+
+        /// <summary>True when the per-tick hash-history ring is active.</summary>
+        public bool HashHistoryEnabled => _hashHistoryCapacity > 0;
+
+        /// <summary>
+        /// Sets the hash-history retention window (ticks); 0 disables. Called by the engine from
+        /// <c>ISimulationConfig.DiagnosticHistoryTicks</c>. The ring is built lazily on first record, when
+        /// the registered-type and participant counts are stable.
+        /// </summary>
+        public void SetHashHistoryCapacity(int capacityTicks)
+        {
+            _hashHistoryCapacity = capacityTicks > 0 ? capacityTicks : 0;
+            if (_hashHistoryCapacity == 0)
+                _hashHistory = null;
+        }
+
+        // Builds/resizes the ring to the current type + participant counts (one-time on the steady path)
+        // and sizes the reusable breakdown so GetStateHash fills it allocation-free.
+        private void EnsureHashRing()
+        {
+            int typeCount = ComponentStorageRegistry.RegisteredTypeIdsSorted.Length;
+            int pc = _snapshotParticipants.Count;
+            if (_hashHistory == null || _hashHistory.TypeCount != typeCount || _hashHistory.ParticipantCount != pc)
+            {
+                _hashHistory = new StateHashRing(_hashHistoryCapacity, typeCount, pc);
+                if (_flushSlotOrder.Length < _hashHistoryCapacity)
+                    _flushSlotOrder = new int[_hashHistoryCapacity];
+            }
+            _breakdown.EnsureComponentCapacity(typeCount);
+            _breakdown.EnsureSystemCapacity(pc);
+        }
+
+        /// <summary>
+        /// Records the current breakdown for <paramref name="tick"/> into the ring (copy only). The caller
+        /// must have just computed <see cref="GetStateHash()"/> for this state — used at the SD paths and
+        /// P2P check ticks that already hash, so there is no extra hash cost.
+        /// </summary>
+        public void RecordHashHistory(int tick)
+        {
+            if (_hashHistoryCapacity == 0) return;
+            EnsureHashRing();
+            _hashHistory.Record(tick, _breakdown);
+        }
+
+        /// <summary>
+        /// Reads the recorded total/frame hash for <paramref name="tick"/> from the diagnostic history
+        /// ring. False when history is disabled, the tick was never recorded, or its slot has been
+        /// overwritten by a later tick (wraparound — the slot's tick label no longer matches). Read-only:
+        /// this is the shape the L1 probe responder serves from, and it lets tests pin ring
+        /// coherence after a rollback re-record without reaching into the internal ring.
+        /// </summary>
+        public bool TryGetHashHistory(int tick, out long total, out ulong frameHash)
+        {
+            total = 0;
+            frameHash = 0;
+            return _hashHistory != null && _hashHistory.TryGet(tick, out total, out frameHash);
+        }
+
+        /// <summary>
+        /// Computes the layered hash for the current state and records it for <paramref name="tick"/>. Used
+        /// at P2P non-check / rollback-resim ticks where the hash is not otherwise computed — the new
+        /// per-tick cost the config buys. Re-recording during rollback resim keeps the ring on the
+        /// corrected timeline so L1 does not mis-attribute the divergence to a misprediction point.
+        /// </summary>
+        public void ComputeAndRecordHashHistory(int tick)
+        {
+            if (_hashHistoryCapacity == 0) return;
+            EnsureHashRing();
+            GetStateHash(_breakdown);
+            _hashHistory.Record(tick, _breakdown);
+        }
+
+        // Last tick a history dump was emitted for. Replaces the old "clear the ring after dumping"
+        // de-duplication — see FlushHashHistory.
+        private int _lastFlushedDumpTick = int.MinValue;
+
+        /// <summary>
+        /// Dumps the accumulated hash history to the log, oldest first. No-op when history is disabled or
+        /// empty, or when this tick has already been dumped. Cold path (post-desync) — string formatting
+        /// is allowed here (the zero-GC boundary is "after detection"). Each line carries the total, the
+        /// frame hash, every component-type hash/count and every snapshot-participant hash.
+        ///
+        /// <para><b>The ring is NOT cleared.</b> It used to be, purely to keep a re-firing desync from
+        /// re-dumping the same lines — but the ring is also the only thing the online probe can
+        /// serve a REMOTE peer from, and the answer is asked for an RTT after the flush. In P2P both
+        /// peers desync on the same tick and both flush, so clearing here wiped exactly the data the
+        /// other peer was about to ask for, on both sides at once (SD never showed this: the server does
+        /// not desync, so it never flushed). The ring is fixed-size and overwrites itself by tick label,
+        /// so keeping it costs nothing — only the LOG needed de-duplication, and a dumped-tick marker
+        /// does that without destroying the data.</para>
+        /// </summary>
+        public void FlushHashHistory(IKLogger logger, int dumpTick)
+        {
+            if (logger == null || _hashHistory == null || !logger.IsEnabled(KLogLevel.Information)) return;
+            if (dumpTick == _lastFlushedDumpTick) return;   // same episode re-firing — dump once
+
+            int n = _hashHistory.GetOrderedSlots(_flushSlotOrder);
+            if (n == 0) return;
+
+            _lastFlushedDumpTick = dumpTick;
+
+            logger.KInformation($"[Desync][Diag][History] dumpTick={dumpTick} depth={n}");
+            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var sb = new System.Text.StringBuilder(256);
+            for (int i = 0; i < n; i++)
+            {
+                int slot = _flushSlotOrder[i];
+                var comp = _hashHistory.ComponentHashesAt(slot);
+                var counts = _hashHistory.ComponentCountsAt(slot);
+                var sys = _hashHistory.SystemHashesAt(slot);
+
+                sb.Clear();
+                sb.Append("[Desync][Diag][HashLine] tick=").Append(_hashHistory.TickAt(slot))
+                  .Append(" total=0x").Append(_hashHistory.TotalAt(slot).ToString("X16"))
+                  .Append(" frame=0x").Append(_hashHistory.FrameHashAt(slot).ToString("X16"));
+                for (int t = 0; t < typeIds.Length && t < comp.Length; t++)
+                {
+                    string name = ComponentStorageRegistry.GetType(typeIds[t])?.Name ?? "?";
+                    sb.Append(' ').Append(name).Append('=').Append(counts[t]).Append("/0x").Append(comp[t].ToString("X16"));
+                }
+                for (int p = 0; p < sys.Length; p++)
+                    sb.Append(" sys[").Append(p).Append(']').Append(_snapshotParticipants[p].GetType().Name).Append("=0x").Append(sys[p].ToString("X16"));
+
+                // Raw Log (not the interpolated-handler extension) so the pre-built line passes through.
+                logger.Log(KLogLevel.Information, sb.ToString(), null);
+            }
+        }
+
+        // ── online probe access to the history ring ─────────────────────
+        //
+        // FlushHashHistory dumps the ring to the log and clears it; the probe instead needs the numbers
+        // themselves, and needs them to OUTLIVE the flush and the rollback re-sim that follow a
+        // detection. These accessors are the only way out of the ring for a caller outside this class.
+
+        /// <summary>Live capacity of the history ring (0 when history is disabled).</summary>
+        public int HashHistoryCapacity => _hashHistory?.Capacity ?? 0;
+
+        /// <summary>Component-type slots per recorded tick — the length of a breakdown's component arrays.</summary>
+        public int HashHistoryTypeCount => _hashHistory?.TypeCount ?? 0;
+
+        /// <summary>Snapshot-participant slots per recorded tick — the length of a breakdown's system array.</summary>
+        public int HashHistoryParticipantCount => _hashHistory?.ParticipantCount ?? 0;
+
+        /// <summary>
+        /// Fills <paramref name="ticksOut"/> with every tick currently recorded, oldest first, and
+        /// returns the count. <paramref name="ticksOut"/> must be at least
+        /// <see cref="HashHistoryCapacity"/> long.
+        /// </summary>
+        public int GetHashHistoryTicks(int[] ticksOut)
+        {
+            if (_hashHistory == null || ticksOut == null) return 0;
+            if (_flushSlotOrder.Length < _hashHistory.Capacity)
+                _flushSlotOrder = new int[_hashHistory.Capacity];
+
+            int n = _hashHistory.GetOrderedSlots(_flushSlotOrder);
+            if (ticksOut.Length < n) return 0;
+            for (int i = 0; i < n; i++)
+                ticksOut[i] = _hashHistory.TickAt(_flushSlotOrder[i]);
+            return n;
+        }
+
+        /// <summary>
+        /// Points the spans at the recorded breakdown for <paramref name="tick"/>. False when history is
+        /// disabled, the tick was never recorded, or its slot has since been overwritten.
+        /// <para>The spans alias the ring's storage: a subsequent record for the same slot changes them.
+        /// Read or copy them before returning to the tick loop — this is what the probe's synchronous
+        /// capture (before the rollback re-sim overwrites the slots) and the responder's serve path
+        /// (which packs straight into the wire payload) both do.</para>
+        /// </summary>
+        public bool TryGetHashHistoryBreakdown(int tick, out ReadOnlySpan<ulong> componentHashes,
+            out ReadOnlySpan<int> componentCounts, out ReadOnlySpan<ulong> systemHashes, out long total)
+        {
+            if (_hashHistory != null)
+                return _hashHistory.TryGetBreakdown(tick, out componentHashes, out componentCounts, out systemHashes, out total);
+
+            componentHashes = default;
+            componentCounts = default;
+            systemHashes = default;
+            total = 0;
+            return false;
+        }
+
+        /// <summary>
+        /// Registry typeId for a positional index into a breakdown's component arrays, or -1 when out of
+        /// range. The wire carries typeIds, not positions: a position is only meaningful against the
+        /// exact registry that produced it.
+        /// </summary>
+        public static int ComponentTypeIdAt(int index)
+        {
+            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            return (uint)index < (uint)typeIds.Length ? typeIds[index] : -1;
+        }
+
+        /// <summary>Type name for a registry typeId, or null when it is not registered on this build.</summary>
+        public static string ComponentTypeName(int typeId) => ComponentStorageRegistry.GetType(typeId)?.Name;
+
+        /// <summary>Number of registered snapshot participants — the valid range of a System-layer index.</summary>
+        public int SnapshotParticipantCount => _snapshotParticipants.Count;
+
+        /// <summary>Name of the i-th snapshot participant, or null when out of range.</summary>
+        public string SnapshotParticipantName(int index)
+            => (uint)index < (uint)_snapshotParticipants.Count ? _snapshotParticipants[index].GetType().Name : null;
+
+        /// <summary>
+        /// Logs the current state's layered hash — per-component-type AND per-snapshot-participant
+        /// (the former blind spot) — so a desync log surfaces the diverging layer without waiting for
+        /// the offline dump. Cold path. Computes a fresh breakdown, independent of whether history is
+        /// enabled (used at SD detection, where the live sim is exactly at the diverged tick).
+        /// </summary>
+        public void LogStateBreakdown(IKLogger logger, string label, KLogLevel logLevel = KLogLevel.Information)
+        {
+            if (logger == null || !logger.IsEnabled(logLevel)) return;
+
+            GetStateHash(_breakdown);   // fills + sizes _breakdown
+
+            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            logger.KLog(logLevel, $"[Desync][Diag][{label}] tick={_frame.Tick} total=0x{_breakdown.Total:X16} frame=0x{_breakdown.FrameHash:X16} components={typeIds.Length} systems={_snapshotParticipants.Count}");
+            for (int i = 0; i < typeIds.Length; i++)
+            {
+                string name = ComponentStorageRegistry.GetType(typeIds[i])?.Name ?? "?";
+                logger.KLog(logLevel, $"[Desync][Diag][{label}] layer=Component type={name}({typeIds[i]}) count={_breakdown.ComponentCounts[i]} hash=0x{_breakdown.ComponentHashes[i]:X16}");
+            }
+            for (int i = 0; i < _snapshotParticipants.Count; i++)
+                logger.KLog(logLevel, $"[Desync][Diag][{label}] layer=System participant={i}({_snapshotParticipants[i].GetType().Name}) hash=0x{_breakdown.SystemHashes[i]:X16}");
+        }
 
         public void RestoreFromFullState(byte[] stateData)
         {
@@ -344,16 +612,19 @@ namespace xpTURN.Klotho.ECS
             BinaryPrimitives.WriteInt32LittleEndian(
                 new Span<byte>(combined, 0, 4), frameLength);
 
-            // Serialize participants
-            int participantStart = writer.Position;
+            // Serialize participants — fold each one individually from a fresh FNV seed, matching
+            // GetStateHash's per-participant fold so the two hashes stay equal.
+            ulong total = frameHash;
             for (int i = 0; i < _snapshotParticipants.Count; i++)
+            {
+                int pStart = writer.Position;
                 _snapshotParticipants[i].SaveSnapshot(ref writer);
+                ulong sysHash = FPHash.HashBytes(FPHash.FNV_OFFSET,
+                    new ReadOnlySpan<byte>(combined, pStart, writer.Position - pStart));
+                total = FPHash.Hash(total, sysHash);
+            }
 
-            // Participant hash
-            ulong hash = FPHash.HashBytes(frameHash,
-                new ReadOnlySpan<byte>(combined, participantStart, writer.Position - participantStart));
-
-            return (combined, (long)hash);
+            return (combined, (long)total);
         }
 
         /// <summary>
@@ -375,6 +646,16 @@ namespace xpTURN.Klotho.ECS
         /// </summary>
         public bool TryGetSnapshotFrame(int tick, out Frame frame)
             => _ringBuffer.TryGetFrame(tick, _frame.Tick, out frame);
+
+        /// <summary>
+        /// Reads the retained snapshot-participant (system) bytes for <paramref name="tick"/> off the ring
+        /// without disturbing the live participants. Pairs with <see cref="TryGetSnapshotFrame"/>
+        /// so a diagnostic capture can reconstruct the full T₀ state (frame + system) after the live
+        /// simulation has already advanced past T₀. Returns false when the tick is unavailable or the
+        /// simulation has no snapshot participants.
+        /// </summary>
+        public bool TryGetSnapshotSystemState(int tick, out ReadOnlySpan<byte> systemState)
+            => _ringBuffer.TryGetSystemState(tick, _frame.Tick, out systemState);
 
         public int GetNearestRollbackTick(int targetTick) => GetNearestSnapshotTick(targetTick);
 

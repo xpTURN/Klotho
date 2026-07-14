@@ -8,11 +8,6 @@ using xpTURN.Klotho.Deterministic;
 using xpTURN.Klotho.Deterministic.Math;
 using xpTURN.Klotho.Serialization;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-using System.Collections.Generic;
-using System.Text;
-#endif
-
 namespace xpTURN.Klotho.ECS
 {
     // All component storages for the frame state are laid out in a single byte[] heap.
@@ -305,63 +300,45 @@ namespace xpTURN.Klotho.ECS
 
         // --- Hash (via dispatch, iterating typeId in ascending order) ---
 
-        public ulong CalculateHash()
+        public ulong CalculateHash() => CalculateHash(null);
+
+        // Layered fold. Each component type is hashed from a fresh FNV seed so its per-type value is
+        // independently reproducible (matches LogComponentHashes and the offline diff tool), then folded
+        // into the running frame hash. Byte-hash work is identical to the previous chained fold; the only
+        // extra work is one ulong fold per type (~30) and, when a breakdown is supplied, writing the
+        // per-type hash/count. When breakdown is non-null the per-type hashes and counts are recorded as a
+        // byproduct. This changes the scalar hash value vs the previous chain, which is safe under the
+        // same-build-per-match deployment model. SerializeWithHash folds identically so that
+        // GetStateHash() stays equal to the FullState-serialization hash used at resync verification.
+        public ulong CalculateHash(StateHashBreakdown breakdown)
         {
-            ulong hash = FPHash.FNV_OFFSET;
-            hash = FPHash.Hash(hash, Tick);
-            hash = FPHash.Hash(hash, Entities.Count);
+            ulong frameHash = FPHash.FNV_OFFSET;
+            frameHash = FPHash.Hash(frameHash, Tick);
+            frameHash = FPHash.Hash(frameHash, Entities.Count);
 
             var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            breakdown?.EnsureComponentCapacity(typeIds.Length);
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
                 ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
-                ComponentStorageRegistry.GetHashDispatch(typeId)(_heap, in layout, Entities, ref hash);
+
+                ulong h = FPHash.FNV_OFFSET;
+                ComponentStorageRegistry.GetHashDispatch(typeId)(_heap, in layout, Entities, ref h);
+                frameHash = FPHash.Hash(frameHash, h);
+
+                if (breakdown != null)
+                {
+                    breakdown.ComponentHashes[i] = h;
+                    breakdown.ComponentCounts[i] = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
+                }
             }
 
-            return hash;
+            if (breakdown != null)
+                breakdown.FrameHash = frameHash;
+
+            return frameHash;
         }
-
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-        private const int HashHistoryCapacity = 60;
-        private readonly List<(int tick, string formattedLine)> _hashHistoryQueue = new List<(int, string)>(HashHistoryCapacity);
-        private readonly StringBuilder _hashHistoryBuilder = new StringBuilder(512);
-
-        public void SnapshotHashesToQueue()
-        {
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
-            _hashHistoryBuilder.Clear();
-            _hashHistoryBuilder.Append("entityCount=").Append(Entities.Count);
-            for (int i = 0; i < typeIds.Length; i++)
-            {
-                int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
-                int count = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
-
-                ulong hash = FPHash.FNV_OFFSET;
-                ComponentStorageRegistry.GetHashDispatch(typeId)(_heap, in layout, Entities, ref hash);
-
-                var typeName = ComponentStorageRegistry.GetType(typeId)?.Name ?? "?";
-                _hashHistoryBuilder.Append(' ').Append(typeName).Append('=').Append(count).Append('/').AppendFormat("0x{0:X16}", hash);
-            }
-
-            if (_hashHistoryQueue.Count >= HashHistoryCapacity)
-                _hashHistoryQueue.RemoveAt(0);
-            _hashHistoryQueue.Add((Tick, _hashHistoryBuilder.ToString()));
-        }
-
-        public void FlushHashHistory(IKLogger logger, int dumpTick)
-        {
-            if (logger == null || _hashHistoryQueue.Count == 0) return;
-            logger.KDebug($"[CompHash][History] dumpTick={dumpTick} bufferDepth={_hashHistoryQueue.Count}");
-            for (int i = 0; i < _hashHistoryQueue.Count; i++)
-            {
-                var entry = _hashHistoryQueue[i];
-                logger.KDebug($"[CompHash][HashLine] tick={entry.tick} {entry.formattedLine}");
-            }
-            _hashHistoryQueue.Clear();
-        }
-#endif
 
         // Diagnostic — per-typeId hash and count breakdown for desync investigation.
         // Default Debug level is for steady-state monitoring (filtered out in normal logs);
@@ -546,12 +523,15 @@ namespace xpTURN.Klotho.ECS
         /// </summary>
         public ulong SerializeWithHash(ref SpanWriter writer)
         {
-            ulong hash = FPHash.FNV_OFFSET;
-
             writer.WriteInt32(Tick);
             writer.WriteInt32(DeltaTimeMs);
-            hash = FPHash.Hash(hash, Tick);
-            hash = FPHash.Hash(hash, Entities.Count);
+
+            // Must fold identically to CalculateHash (per-type from a fresh FNV seed, then fold)
+            // so the returned hash equals CalculateHash(), keeping GetStateHash() == the FullState hash
+            // verified after a resync restore.
+            ulong frameHash = FPHash.FNV_OFFSET;
+            frameHash = FPHash.Hash(frameHash, Tick);
+            frameHash = FPHash.Hash(frameHash, Entities.Count);
 
             Entities.Serialize(ref writer);
             var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
@@ -563,11 +543,13 @@ namespace xpTURN.Klotho.ECS
                 ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
 
                 writer.WriteInt32(typeId);
+                ulong h = FPHash.FNV_OFFSET;
                 ComponentStorageRegistry.GetSerializeAndHashDispatch(typeId)(
-                    _heap, in layout, Entities, ref writer, ref hash);
+                    _heap, in layout, Entities, ref writer, ref h);
+                frameHash = FPHash.Hash(frameHash, h);
             }
 
-            return hash;
+            return frameHash;
         }
 
         public void DeserializeFrom(byte[] data)

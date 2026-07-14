@@ -208,6 +208,7 @@ Docs: [Docs/Samples/Brawler.md](Docs/Samples/Brawler.md)
 | [Docs/LobbyIntegrationGuide.md](Docs/LobbyIntegrationGuide.md) | Lobby ↔ dedicated server ↔ client integration (mockup) — ticket carriage · validation hooks · identity propagation · match-result reporting |
 | [Docs/EntitlementLifecycle.md](Docs/EntitlementLifecycle.md) | Trusted player data (entitlements) lifecycle reference — origin · store · preserve · propagate · read · dispose · invariants |
 | [Docs/SynchronizationDesign.md](Docs/SynchronizationDesign.md) | Synchronization design direction (determinism · two-chain model · prediction/rollback · timing · authority models · recovery ladder) |
+| [Docs/DesyncDiagnostics.md](Docs/DesyncDiagnostics.md) | Desync root-cause localization & log-analysis guide (diagnostic funnel: class → tick → layer · reading the logs · online Probe verdict · `DiagnosticHistoryTicks` · safety guarantees) |
 | [Docs/GameDevWorkflow.md](Docs/GameDevWorkflow.md) | Game-developer workflow (step-by-step) |
 | [Docs/GameDevAPI.md](Docs/GameDevAPI.md) | Game-developer API status |
 | [Docs/SimulationConfigGuide.md](Docs/SimulationConfigGuide.md) | SimulationConfig recommended-value guide (per genre / platform) |

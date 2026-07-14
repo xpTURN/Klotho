@@ -94,7 +94,7 @@ namespace xpTURN.Klotho.Core.Tests
             public void SetReady(bool ready) { }
             public void SendCommand(ICommand command) { }
             public void RequestCommandsForTick(int tick) { }
-            public void SendSyncHash(int tick, long hash) { }
+            public void SendSyncHash(int tick, long hash, long cmdHash) { }
             public void InvalidateLocalSyncHashes(int fromTick) { }
             public void InvalidateSyncHashes(int fromTick) { }
             public void Update() { }

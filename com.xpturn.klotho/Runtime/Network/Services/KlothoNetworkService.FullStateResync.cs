@@ -82,7 +82,7 @@ namespace xpTURN.Klotho.Network
             _logger?.KInformation($"[KlothoNetworkService][HandleFullStateRequest] Full state request received: peerId={peerId}, requestTick={msg.RequestTick}");
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (_lastResyncResponseTime.TryGetValue(peerId, out long lastTime)
-                && now - lastTime < RESYNC_RESPONSE_COOLDOWN_MS)
+                && now - lastTime < ResyncPolicy.RESYNC_RESPONSE_COOLDOWN_MS)
             {
                 _logger?.KWarning($"[KlothoNetworkService] FullStateRequest from peer {peerId} throttled (cooldown)");
                 return;

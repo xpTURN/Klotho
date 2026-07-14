@@ -282,6 +282,21 @@ namespace xpTURN.Klotho.Replay
         public void RecordCommands(int tick, List<ICommand> commands, ICommandFactory factory)
         {
             int size = factory.GetSerializedCommandsSize(commands);
+
+            // Rollback re-promotion re-records whole windows every rollback; most
+            // re-records are byte-identical. Overwrite in place when the new serialization is the same
+            // length as the existing entry — keeps the buffer from growing on each rollback (the dominant
+            // term). A different length (e.g. empty-fill → real command) falls through to append; that
+            // growth is bounded by the correction count. Old bytes of an appended re-record stay dead in
+            // the buffer (see FinalizeRecording compaction, option (c), if that ever matters).
+            if (_tickOffsets.TryGetValue(tick, out var existing) && existing.length == size)
+            {
+                int rewritten = factory.SerializeCommandsTo(_buffer.AsSpan(existing.offset, size));
+                _tickOffsets[tick] = (existing.offset, rewritten);
+                UpdateTotalTicks(tick);
+                return;
+            }
+
             EnsureCapacity(_bufferPosition + size);
             int written = factory.SerializeCommandsTo(_buffer.AsSpan(_bufferPosition));
             _tickOffsets[tick] = (_bufferPosition, written);

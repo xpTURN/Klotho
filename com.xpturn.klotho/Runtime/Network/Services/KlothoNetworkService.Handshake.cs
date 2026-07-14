@@ -353,6 +353,13 @@ namespace xpTURN.Klotho.Network
             _peerConnectedAtMs.Remove(peerId);
             _lateJoinCatchups.Remove(peerId);
 
+            // Rate-limit windows are keyed by peerId, and peerIds are recycled. Leaving an entry
+            // behind hands the next peer to get this id the previous peer's window, so its FIRST
+            // request is dropped — a reconnecting guest would then stall until its own resync timeout.
+            // Unconditional (spectators and pending peers are throttled too, and are not in _peerToPlayer).
+            _lastResyncResponseTime.Remove(peerId);
+            _probeServeState.Remove(peerId);
+
             if (_peerToPlayer.TryGetValue(peerId, out int playerId))
             {
                 var player = FindPlayerById(playerId);

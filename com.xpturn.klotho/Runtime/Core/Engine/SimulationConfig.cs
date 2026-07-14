@@ -130,6 +130,9 @@ namespace xpTURN.Klotho.Core
         /// <inheritdoc />
         public int TickDriftWarnMultiplier { get; set; } = 2;
 
+        /// <inheritdoc />
+        public int DiagnosticHistoryTicks { get; set; } = 60;
+
         // --- Multi-stage ---
 
         /// <inheritdoc />

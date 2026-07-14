@@ -33,6 +33,31 @@ namespace xpTURN.Klotho.Core
             return tick <= _lastVerifiedTick ? FrameState.Verified : FrameState.Predicted;
         }
 
+        /// <summary>
+        /// Records the verified tick to the replay AT PROMOTION TIME.
+        /// Re-fetches GetCommandList(tick) at the record point — never reuse a commands reference captured
+        /// before _simulation.Tick / event dispatch, which may clobber the shared list cache. Serializes
+        /// immediately, so it is safe before the promotion event handlers run.
+        /// P2P promotion points ONLY (ExecuteTick inline branch + TryAdvanceVerifiedChain below). NOT the
+        /// SD-client path (ServerDrivenClient records entry.Commands — a pre-validated batch, different source).
+        ///
+        /// Audit — "promotion (P2P verified chain advance) == recording" is the contract. Every OTHER direct
+        /// <c>_lastVerifiedTick =</c> assignment is a NON-recording state jump and intentionally does NOT
+        /// call this helper (the tail-invariant pin, GetCommandsForTick(t).Count ≥ 1 over 0..TotalTicks,
+        /// catches a promoted-but-unrecorded tick if that ever regresses). Audited non-recording sites:
+        ///   • field init / resets to -1 — KlothoEngine.cs:207, :785, Replay.cs:44, Spectator.cs:36
+        ///   • Rollback.cs:159 (rewind — the subsequent chain re-advance re-records via this helper)
+        ///   • FullStateResync.cs:404 (corrective reset — truncates recording BEFORE this; buffer cleared)
+        ///   • Replay.cs:234 (replay PLAYBACK — IsRecording is false)
+        ///   • Spectator.cs:205/242/318/336/374/392 (spectator engine — IsRecording structurally false, never Start())
+        ///   • ServerDriven.cs:119 · ServerDrivenClient.cs:673/981/1039 (SD model — records at its own path)
+        /// </summary>
+        private void RecordVerifiedTick(int tick)
+        {
+            if (_replaySystem.IsRecording)
+                _replaySystem.RecordTick(tick, _inputBuffer.GetCommandList(tick));
+        }
+
         private void TryAdvanceVerifiedChain()
         {
             int tick = _lastVerifiedTick + 1;
@@ -47,12 +72,13 @@ namespace xpTURN.Klotho.Core
                     break;
                 }
                 _lastVerifiedTick = tick;
+                RecordVerifiedTick(tick);   // record at promotion (post-resim = corrected set), before event dispatch
 
                 // Deferred sync-hash send: this check tick was executed speculatively and has now
                 // reached verified with its predictions confirmed byte-equal (a mismatch would
                 // have rolled back first) — the stashed hash is the verified hash.
-                if (_deferredHashSendTicks.Remove(tick) && _localHashes.TryGetValue(tick, out long deferredHash))
-                    _networkService?.SendSyncHash(tick, deferredHash);
+                if (_deferredHashSendTicks.Remove(tick) && _localHashes.TryGetValue(tick, out var deferred))
+                    _networkService?.SendSyncHash(tick, deferred.state, deferred.cmd);
 
                 OnFrameVerified?.Invoke(tick);
                 FireVerifiedInputBatch();

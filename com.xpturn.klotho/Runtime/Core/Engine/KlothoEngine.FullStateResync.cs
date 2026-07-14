@@ -9,8 +9,10 @@ namespace xpTURN.Klotho.Core
 {
     public partial class KlothoEngine
     {
-        // Full state resync
-        private const int RESYNC_TIMEOUT_MS = 5000;
+        // Full state resync. internal so the resync-policy invariant
+        // (ResyncPolicy.RESYNC_RESPONSE_COOLDOWN_MS < RESYNC_TIMEOUT_MS) can be pinned by a test:
+        // a serve cooldown at or above this retry interval would drop every legitimate retry.
+        internal const int RESYNC_TIMEOUT_MS = 5000;
 
         private enum ResyncState { None, Requested, Applying }
         private ResyncState _resyncState = ResyncState.None;
@@ -136,7 +138,13 @@ namespace xpTURN.Klotho.Core
 
             // Host self-apply — mirrors HandleFullStateReceived post-processing (host does not receive
             // its own broadcast). CorrectiveReset allows retreat, so the result is never Skipped.
+            // Capture the pre-reset verified tick BEFORE ApplyFullState (ResetTransient below overwrites
+            // _lastVerifiedTick to CurrentTick-1, which would include unrecorded predicted ticks). F47:
+            // the reset's state jump has no replay record, so truncate here too — the host originates
+            // every corrective reset and must not leave its own replay running past the jump (M1).
+            int preResetTotalTicks = ComputeReplayTotalTicks();
             ApplyFullState(CurrentTick, _cachedFullState, _cachedFullStateHash, ApplyReason.CorrectiveReset);
+            TruncateReplayForStateJump(ApplyReason.CorrectiveReset, preResetTotalTicks, CurrentTick);
             ResetTransientSyncStateAfterFullState(CurrentTick);
             _lastMatchedSyncTick = CurrentTick;
             _prevMatchedSyncTick = 0;
@@ -399,6 +407,9 @@ namespace xpTURN.Klotho.Core
         {
             _inputBuffer.Clear();
             _pendingCommands.Clear();
+            // State-jump watermark, NOT a promotion — does not call RecordVerifiedTick.
+            // For corrective reset / resync, recording has already been truncated (StopRecording) BEFORE
+            // this runs, so IsRecording is false here; the cleared buffer is never recorded.
             _lastVerifiedTick = tick - 1;
             _lastMismatchedSyncTick = -1; // new baseline — stale mismatch records no longer apply
             _hasPendingRollback = false;
@@ -415,6 +426,28 @@ namespace xpTURN.Klotho.Core
             // so the post-apply recompute is not compared against a pre-reset remote hash across the
             // reset boundary (false mismatch). P2P-only — this method is never reached on the SD path.
             _networkService?.InvalidateSyncHashes(tick);
+        }
+
+        /// <summary>
+        /// Truncates the replay recording at a mid-match state jump (corrective reset / resync) so the
+        /// recording never holds ticks past the last verified one — the jump has no replay record and
+        /// replaying past it diverges (F47). Shared by every state-jump entry point that records on the
+        /// P2P line: the host's <see cref="TryCorrectiveReset"/> self-apply and the guest's
+        /// <see cref="HandleFullStateReceived"/>. Session-start applies (LateJoin / InitialFullState) are
+        /// NOT truncated — recording boundaries, not mid-match jumps; reconnect recovery flows as
+        /// ResyncRequest and IS truncated (also a state jump).
+        /// <para><paramref name="preResetTotalTicks"/> MUST be captured BEFORE ApplyFullState —
+        /// <see cref="ResetTransientSyncStateAfterFullState"/> overwrites _lastVerifiedTick to tick-1,
+        /// which would include unrecorded predicted ticks. A second call after the first truncation is a
+        /// no-op (IsRecording already false), so repeated attempts never double-finalize.</para>
+        /// </summary>
+        private void TruncateReplayForStateJump(ApplyReason reason, int preResetTotalTicks, int resetTick)
+        {
+            if (!_replaySystem.IsRecording) return;
+            if (reason != ApplyReason.CorrectiveReset && reason != ApplyReason.ResyncRequest) return;
+            int truncateAt = preResetTotalTicks < 0 ? 0 : preResetTotalTicks;
+            _replaySystem.StopRecording(truncateAt);
+            _logger?.KWarning($"[KlothoEngine][Replay] truncated at {reason}: resetTick={resetTick}, totalTicks={truncateAt}");
         }
 
         /// <summary>
@@ -479,6 +512,10 @@ namespace xpTURN.Klotho.Core
             ApplyReason reason = isCorrectiveReset
                 ? ApplyReason.CorrectiveReset
                 : (isResync ? ApplyReason.ResyncRequest : ApplyReason.LateJoin);
+            // Capture the pre-reset verified tick BEFORE ApplyFullState — the post-apply
+            // ResetTransientSyncStateAfterFullState overwrites _lastVerifiedTick to tick-1 (which would
+            // include unrecorded predicted ticks). Same clamp value as ComputeReplayTotalTicks.
+            int preResetTotalTicks = ComputeReplayTotalTicks();
             var applyResult = ApplyFullState(tick, stateData, stateHash, reason);
 
             if (applyResult == FullStateApplyResult.Skipped)
@@ -495,6 +532,12 @@ namespace xpTURN.Klotho.Core
             }
 
             bool hashMatched = applyResult == FullStateApplyResult.Applied;
+
+            // Truncate the replay at a corrective reset / resync (F47): the reset's state jump has no
+            // replay record, so replaying past it diverges. Applied OR HashMismatch (both applied state;
+            // Skipped already returned). Shared seam — see TruncateReplayForStateJump (reason gate,
+            // pre-reset capture, Stop() double-finalize guard).
+            TruncateReplayForStateJump(reason, preResetTotalTicks, tick);
 
             if (!hashMatched && !_networkService.IsHost)
             {
@@ -563,7 +606,13 @@ namespace xpTURN.Klotho.Core
 
             _networkService.SendFullStateResponse(peerId, CurrentTick, _cachedFullState, _cachedFullStateHash);
 
-            _logger?.KWarning($"[KlothoEngine][FullStateResync] FullState sent: peer={peerId}, tick={CurrentTick}, size={_cachedFullState.Length}");
+            // requestTick is logged, never acted on: the state is always served from CurrentTick
+            // (provider invariant — the requester's catchup is computed from the served tick, not
+            // the asked-for one). Its meaning varies by caller, so it is not a "divergence tick":
+            // an SD desync sends the diverged tick, a retry sends the verified frontier, a P2P
+            // guest sends its own CurrentTick. servedTick - requestTick shows how far behind the
+            // requester was.
+            _logger?.KWarning($"[KlothoEngine][FullStateResync] FullState sent: peer={peerId}, servedTick={CurrentTick}, requestTick={requestTick}, size={_cachedFullState.Length}");
         }
 
         #endregion
@@ -659,6 +708,20 @@ namespace xpTURN.Klotho.Core
         {
             _logger?.KError($"[KlothoEngine][FullStateResync] Desync detected at tick {tick}! Player {playerId}: local={localHash}, remote={remoteHash}");
             OnDesyncDetected?.Invoke(localHash, remoteHash);
+
+            // Capture the ring HERE, first, while it still describes the divergence. The rung-1
+            // rollback below re-sims over those same slots, and the probe's answer arrives an RTT later,
+            // long after that — so the diff runs against this capture, not against the live ring. Gated
+            // inside (one episode per peer, budget of 3) so the re-fires that follow a desync up the
+            // ladder do not each allocate a ring-sized copy.
+            TryBeginDesyncProbe(playerId, tick, localHash, remoteHash);
+
+            // Dump the diagnostic hash history BEFORE any recovery trigger. The ring holds the
+            // layered breakdown around the diverged tick; a rung-1 rollback below re-sims and overwrites
+            // those slots, so flushing first is the only way P2P surfaces the diverging
+            // component/system layer from a local log. Dumps once per diverged tick and leaves
+            // the ring intact — the peer on the other side of this desync is about to probe it.
+            _diagHistorySim?.FlushHashHistory(_logger, tick);
 
             // A mismatch at/before the current anchor means the anchor was a tick some
             // peer flags as diverged — promoted before this mismatch arrived (order dependency).

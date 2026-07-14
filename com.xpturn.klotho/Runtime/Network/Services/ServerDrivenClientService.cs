@@ -12,7 +12,7 @@ namespace xpTURN.Klotho.Network
     /// Handles server connection, handshake, GameStart, and receiving/firing server messages.
     /// SubscribeEngine(): subscribes to engine.OnCatchupComplete.
     /// </summary>
-    public class ServerDrivenClientService : IServerDrivenNetworkService
+    public class ServerDrivenClientService : IServerDrivenNetworkService, IDesyncProbeNetwork
     {
         private IKLogger _logger;
         private INetworkTransport _transport;
@@ -459,7 +459,7 @@ namespace xpTURN.Klotho.Network
             // Not needed in SD mode
         }
 
-        public void SendSyncHash(int tick, long hash)
+        public void SendSyncHash(int tick, long hash, long cmdHash)
         {
             // no-op: compared against server hash via local resimulation
         }
@@ -575,6 +575,44 @@ namespace xpTURN.Klotho.Network
             {
                 _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.Reliable);
             }
+        }
+
+        // ── online desync probe ───────────────────────────────────
+        // The client asks (the server is the only peer it compares against) and reports its conclusion.
+        // It never serves: nobody probes a client.
+
+#pragma warning disable CS0067 // interface-mandated (IDesyncProbeNetwork); an SD client neither serves probe requests nor receives verdicts — see doc
+        public event Action<int, DesyncProbeRequestMessage> OnDesyncProbeRequested;
+        public event Action<int, DesyncProbeResponseMessage> OnDesyncProbeResponse;
+        public event Action<int, DesyncVerdictReportMessage> OnDesyncVerdictReported;
+#pragma warning restore CS0067
+
+        public void SendDesyncProbeRequest(int targetPeerId, DesyncProbeRequestMessage msg)
+        {
+            if (msg == null) return;
+            using (var serialized = _messageSerializer.SerializePooled(msg))
+            {
+                _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
+            }
+        }
+
+        /// <summary>No-op: a client is never the responder.</summary>
+        public void SendDesyncProbeResponse(int targetPeerId, DesyncProbeResponseMessage msg) { }
+
+        public void SendDesyncVerdict(DesyncVerdictReportMessage msg)
+        {
+            if (msg == null) return;
+            using (var serialized = _messageSerializer.SerializePooled(msg))
+            {
+                _transport.Send(0, serialized.Data, serialized.Length, DeliveryMethod.ReliableOrdered);
+            }
+        }
+
+        /// <summary>Always the server (peer 0) — the only peer whose hashes this client ever sees.</summary>
+        public bool TryResolveProbePeer(int playerId, out int peerId)
+        {
+            peerId = 0;
+            return true;
         }
 
         public void SendBootstrapReady(int playerId)
@@ -737,6 +775,10 @@ namespace xpTURN.Klotho.Network
                 case CommandRejectedMessage rejectMsg:
                     _logger?.KInformation($"[SDClientService] CommandRejected received: tick={rejectMsg.Tick}, cmdTypeId={rejectMsg.CommandTypeId}, reason={rejectMsg.ReasonEnum}");
                     OnCommandRejected?.Invoke(rejectMsg.Tick, rejectMsg.CommandTypeId, rejectMsg.ReasonEnum);
+                    break;
+
+                case DesyncProbeResponseMessage probeRes:
+                    OnDesyncProbeResponse?.Invoke(peerId, probeRes);
                     break;
 
                 case RecommendedExtraDelayUpdateMessage extraDelayMsg:

@@ -209,7 +209,15 @@ namespace xpTURN.Klotho.Core
         private readonly List<int> _activePlayerIds = new List<int>();
 
         private readonly List<ICommand> _pendingCommands = new List<ICommand>();
-        private readonly Dictionary<int, long> _localHashes = new Dictionary<int, long>();
+        // Per-tick stashed hashes: state hash + command digest of the executed set. The command digest
+        // rides along so the deferred send classifies a desync (input vs state divergence) without
+        // recomputing the command list, and a rollback resim overwrites both together (kept consistent).
+        private readonly Dictionary<int, (long state, long cmd)> _localHashes = new Dictionary<int, (long, long)>();
+
+        // Diagnostic hash-history sink. Non-null only when the simulation is an EcsSimulation AND
+        // ISimulationConfig.DiagnosticHistoryTicks > 0. Cached so the per-tick cadence sites avoid a
+        // repeated interface cast; a null-conditional call is a no-op when diagnostics are off.
+        private xpTURN.Klotho.ECS.EcsSimulation _diagHistorySim;
 
         // Reusable lists to avoid GC.
         private readonly List<ICommand> _tickCommandsCache = new List<ICommand>();
@@ -524,6 +532,28 @@ namespace xpTURN.Klotho.Core
             OnPlayerConfigReceived?.Invoke(playerId, firstTime);
         }
 
+        // Canonical command digest of a tick's executed command set. Reuses the existing per-command
+        // serialization over the already-canonically-ordered list (GetCommandList / s_commandComparer),
+        // so an equal digest across peers means an identical command set. Returns 0 when no factory is
+        // wired, in which case both peers report 0 (same build) and classification falls back to
+        // state-only. Called only at check ticks / verified compares — not a per-tick steady cost.
+        private long ComputeCommandDigest(List<ICommand> executedCommands)
+        {
+            if (_commandFactory == null || executedCommands == null) return 0;
+            int size = _commandFactory.GetSerializedCommandsSize(executedCommands);
+            byte[] buf = StreamPool.GetBuffer(size);
+            try
+            {
+                int written = _commandFactory.SerializeCommandsTo(buf.AsSpan());
+                return (long)xpTURN.Klotho.Deterministic.FPHash.HashBytes(
+                    xpTURN.Klotho.Deterministic.FPHash.FNV_OFFSET, new ReadOnlySpan<byte>(buf, 0, written));
+            }
+            finally
+            {
+                StreamPool.ReturnBuffer(buf);
+            }
+        }
+
         public void SetCommandFactory(ICommandFactory commandFactory)
         {
             if (commandFactory != null)
@@ -658,6 +688,18 @@ namespace xpTURN.Klotho.Core
             _simulation.OnPlayerJoinedNotification += HandlePlayerJoinedNotification;
             _simulation.Initialize();
 
+            // Arm the diagnostic hash-history ring when configured. Diagnostic-only and local, so it
+            // is not part of SimulationConfigMessage; each peer honors its own DiagnosticHistoryTicks.
+            if (_simConfig.DiagnosticHistoryTicks > 0 && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsDiag)
+            {
+                ecsDiag.SetHashHistoryCapacity(_simConfig.DiagnosticHistoryTicks);
+                _diagHistorySim = ecsDiag;
+            }
+
+            // The probe rides on top of the diagnostic hash-history ring: it serves answers from it and captures it at
+            // detection. A service without the probe surface leaves this unwired and diagnosis stays local.
+            SubscribeDesyncProbe();
+
             // Event system. SD server collects only Synced events (e.g. CommandRejectedSimEvent) for
             // network-layer unicast feedback; Regular events have no server-side subscribers and are
             // dropped at RaiseEvent to avoid GC churn. Other modes use the full collector.
@@ -774,6 +816,32 @@ namespace xpTURN.Klotho.Core
             {
                 desyncSim.ForceDesyncHashTick = xpTURN.Klotho.Diagnostics.FaultInjection.ForceClientDesyncAtTick;
                 _logger?.KWarning($"[FaultInjection][SD] Client desync armed: playerId={LocalPlayerId}, atTick={desyncSim.ForceDesyncHashTick}");
+            }
+
+            // Positive control (any mode): arm a real component-state mutator on the targeted
+            // player's sim. Unlike the hash salt above this mutates component state, so the diagnostic
+            // localizes the actual diverging component/system. Tick-keyed + re-execution idempotent
+            // (applied in EcsSimulation.Tick on every (re-)execution of the tick).
+            if (xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionMutator != null
+                && xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionTick >= 0
+                && xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionPlayerIds.Contains(LocalPlayerId)
+                && _simulation is xpTURN.Klotho.ECS.EcsSimulation corruptSim)
+            {
+                corruptSim.StateCorruptionTick = xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionTick;
+                corruptSim.StateCorruptionMutator = xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionMutator;
+                _logger?.KWarning($"[FaultInjection] State corruption armed: playerId={LocalPlayerId}, atTick={corruptSim.StateCorruptionTick}");
+            }
+            // Config armed the tick for this player but the game never registered a mutator: the scenario
+            // will run and quietly corrupt nothing, so the operator would read a clean run as a passing
+            // one. Warned HERE and not at config load, because the game registers the mutator after the
+            // config is read — this is the first point where "still null" actually means missing.
+            else if (xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionMutator == null
+                && xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionTick >= 0
+                && xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionPlayerIds.Contains(LocalPlayerId))
+            {
+                _logger?.KError(
+                    $"[FaultInjection] State corruption INERT: playerId={LocalPlayerId} armed at tick={xpTURN.Klotho.Diagnostics.FaultInjection.StateCorruptionTick} " +
+                    $"but no StateCorruptionMutator was registered — the game must supply the mutation (core owns only the tick/player gate). Nothing will be corrupted.");
             }
 #endif
             if (!isSdClient)
@@ -897,6 +965,10 @@ namespace xpTURN.Klotho.Core
                 return;
 
             _networkService.Update();
+
+            // Expire probe round trips whose answer never arrived. Wall-clock, off the deterministic
+            // path — a diagnosis timing out changes nothing a peer simulates.
+            SweepDesyncProbes();
 
             if (State != KlothoState.Running)
                 return;
@@ -1366,12 +1438,25 @@ namespace xpTURN.Klotho.Core
             State = KlothoState.Ending;
         }
 
+        /// <summary>
+        /// Single source for the replay TotalTicks clamp: the last tick actually RECORDED (the
+        /// recorder's CurrentTick). Trailing unverified (predicted) ticks past it are not authoritatively
+        /// reproducible, so they must not extend the replay. This is the recorded tick in BOTH modes —
+        /// unlike _lastVerifiedTick, which on the SD client is entry.Tick (= executionTick + 1, one past
+        /// the recorded executionTick) and would extend the replay by one never-recorded tail tick. The
+        /// corrective-reset truncation uses the SAME value (captured BEFORE ApplyFullState overwrites _lastVerifiedTick).
+        /// </summary>
+        private int ComputeReplayTotalTicks() => ((IReplayRecorder)_replaySystem).CurrentTick;
+
         public void Stop()
         {
             if (_replaySystem.IsRecording)
             {
-                int totalTicks = CurrentTick + _simConfig.InputDelayTicks;
-                _replaySystem.StopRecording(totalTicks);
+                // Clamp to the verified line (was CurrentTick + InputDelayTicks — an
+                // over-count that replayed never-reproducible predicted/empty tail ticks). < 0 (nothing
+                // verified) → empty replay, avoiding a negative TotalTicks/DurationMs.
+                int totalTicks = ComputeReplayTotalTicks();
+                _replaySystem.StopRecording(totalTicks < 0 ? 0 : totalTicks);
             }
 
             _dynamicInputDelayPolicy?.Detach();
@@ -1425,6 +1510,8 @@ namespace xpTURN.Klotho.Core
             // a Stop -> Initialize cycle re-subscribes the same simulation/replay instances and
             // the handlers fire twice (e.g. HandleHashMismatchForCorrectiveReset would consume
             // the corrective-reset budget twice per mismatch).
+            UnsubscribeDesyncProbe();
+
             if (_simulation != null)
                 _simulation.OnPlayerJoinedNotification -= HandlePlayerJoinedNotification;
             if (_replaySystem != null)
@@ -1457,10 +1544,10 @@ namespace xpTURN.Klotho.Core
                 }
             }
 
-            if (_replaySystem.IsRecording)
-            {
-                _replaySystem.RecordTick(CurrentTick, commands);
-            }
+            // Replay recording moved from here (execution time) to the verification-promotion
+            // points (the inline branch below + TryAdvanceVerifiedChain) via RecordVerifiedTick.
+            // Recording at execution missed predicted ticks and left
+            // stale empty-fills uncorrected after late real commands rolled the state back.
 
             // Save per-tick state snapshots for use in rollback.
             SaveSnapshot(CurrentTick);
@@ -1500,11 +1587,23 @@ namespace xpTURN.Klotho.Core
             if (_networkService != null && CurrentTick % _simConfig.GetEffectiveSyncCheckInterval() == 0)
             {
                 long hash = _simulation.GetStateHash();
-                _localHashes[CurrentTick] = hash;
+                // Must stay adjacent to the GetStateHash above: Record copies the breakdown that
+                // call filled, and SendSyncHash below can synchronously drive the whole desync-detection
+                // chain (compare → HandleNetworkDesync), which must not slip between compute and record.
+                _diagHistorySim?.RecordHashHistory(CurrentTick);
+                long cmdHash = ComputeCommandDigest(commands);   // Digest of the executed set
+                _localHashes[CurrentTick] = (hash, cmdHash);
                 if (CurrentTick == _lastVerifiedTick + 1 && !_hasPendingRollback)
-                    _networkService.SendSyncHash(CurrentTick, hash);
+                    _networkService.SendSyncHash(CurrentTick, hash, cmdHash);
                 else
                     _deferredHashSendTicks.Add(CurrentTick);
+            }
+            else if (_networkService != null)
+            {
+                // P2P per-tick history (config-gated). Off ⇒ no-op ⇒ L1 stays check-tick granularity.
+                // Networked engines only: a replay engine runs ExecuteTick with a null service and must
+                // not pay a per-tick hash for a diagnostic ring nothing reads.
+                _diagHistorySim?.ComputeAndRecordHashHistory(CurrentTick);
             }
 
             // TimeSync: update advantage history, idle input, and local tick.
@@ -1551,6 +1650,7 @@ namespace xpTURN.Klotho.Core
             if (CurrentTick == _lastVerifiedTick + 1)
             {
                 _lastVerifiedTick = CurrentTick;
+                RecordVerifiedTick(CurrentTick);   // Record at promotion, before event dispatch
                 OnFrameVerified?.Invoke(CurrentTick);
                 FireVerifiedInputBatch();
             }
@@ -1610,8 +1710,15 @@ namespace xpTURN.Klotho.Core
             // skipping entirely would leave no comparison and stall anchor promotion.
             if (_networkService != null && CurrentTick % _simConfig.GetEffectiveSyncCheckInterval() == 0)
             {
-                _localHashes[CurrentTick] = _simulation.GetStateHash();
+                long hash = _simulation.GetStateHash();
+                _diagHistorySim?.RecordHashHistory(CurrentTick);   // Adjacent to the compute (contract)
+                _localHashes[CurrentTick] = (hash, ComputeCommandDigest(_tickCommandsCache));   // Command digest
                 _deferredHashSendTicks.Add(CurrentTick);
+            }
+            else if (_networkService != null)
+            {
+                // P2P per-tick history; networked engines only (replay pays no diagnostic hash).
+                _diagHistorySim?.ComputeAndRecordHashHistory(CurrentTick);
             }
 
             // TimeSync must keep advancing even during prediction. If it halts, SenderTick stops

@@ -135,7 +135,6 @@ namespace xpTURN.Klotho.Network
         private const int NUM_SYNC_PACKETS = 5;
         private const int SYNC_TIMEOUT_MS = 5000;
         private const int PING_INTERVAL_MS = 1000;
-        private const long RESYNC_RESPONSE_COOLDOWN_MS = 2000;
 
         private IKLogger _logger;
         private INetworkTransport _transport;
@@ -144,7 +143,9 @@ namespace xpTURN.Klotho.Network
 
         private readonly List<PlayerInfo> _players = new List<PlayerInfo>();
         private readonly Dictionary<int, int> _peerToPlayer = new Dictionary<int, int>();
-        private readonly Dictionary<(int tick, int playerId), long> _syncHashes = new Dictionary<(int tick, int playerId), long>();
+        // Value = (state hash, command digest). The command digest lets CompareAndReportSyncHash
+        // classify a mismatch as input vs state divergence without any recovery-path involvement.
+        private readonly Dictionary<(int tick, int playerId), (long state, long cmd)> _syncHashes = new Dictionary<(int tick, int playerId), (long, long)>();
         private readonly Dictionary<int, PeerSyncState> _peerSyncStates = new Dictionary<int, PeerSyncState>();
         private readonly HashSet<int> _pendingPeers = new HashSet<int>();
         private readonly Dictionary<int, long> _peerConnectedAtMs = new Dictionary<int, long>();
@@ -1112,11 +1113,12 @@ namespace xpTURN.Klotho.Network
             // Implement resend requests as needed
         }
 
-        public void SendSyncHash(int tick, long hash)
+        public void SendSyncHash(int tick, long hash, long cmdHash)
         {
             // Store our own hash so arriving remote hashes can be compared against it —
             // the transport does not loop back and SyncHashMessage is not relayed.
-            _syncHashes[(tick, LocalPlayerId)] = hash;
+            var local = (hash, cmdHash);
+            _syncHashes[(tick, LocalPlayerId)] = local;
 
             // Compare against remote hashes that arrived before ours was computed
             // (faster peers, or our deferred send after speculative execution).
@@ -1124,13 +1126,14 @@ namespace xpTURN.Klotho.Network
             {
                 if (kvp.Key.tick != tick || kvp.Key.playerId == LocalPlayerId)
                     continue;
-                CompareAndReportSyncHash(tick, kvp.Key.playerId, hash, kvp.Value);
+                CompareAndReportSyncHash(tick, kvp.Key.playerId, local, kvp.Value);
             }
 
             var msg = _syncHashMessageCache;
             msg.Tick = tick;
             msg.Hash = hash;
             msg.PlayerId = LocalPlayerId;
+            msg.CommandHash = cmdHash;
 
             BroadcastMessagePooled(msg, DeliveryMethod.Unreliable);
         }
@@ -1436,6 +1439,14 @@ namespace xpTURN.Klotho.Network
                 case ReactiveExtraDelayReportMessage reactiveReport:
                     HandleReactiveExtraDelayReport(peerId, reactiveReport);
                     break;
+
+                case DesyncProbeRequestMessage probeReq:
+                    HandleDesyncProbeRequest(peerId, probeReq);
+                    break;
+
+                case DesyncProbeResponseMessage probeRes:
+                    HandleDesyncProbeResponse(peerId, probeRes);
+                    break;
             }
         }
 
@@ -1537,26 +1548,34 @@ namespace xpTURN.Klotho.Network
 
         private void HandleSyncHashMessage(SyncHashMessage msg)
         {
-            _syncHashes[(msg.Tick, msg.PlayerId)] = msg.Hash;
+            _syncHashes[(msg.Tick, msg.PlayerId)] = (msg.Hash, msg.CommandHash);
 
             // Compare when the local hash for this tick has already been computed;
             // otherwise SendSyncHash performs the comparison once it is (deferred send path).
-            if (_syncHashes.TryGetValue((msg.Tick, LocalPlayerId), out long localHash))
-                CompareAndReportSyncHash(msg.Tick, msg.PlayerId, localHash, msg.Hash);
+            if (_syncHashes.TryGetValue((msg.Tick, LocalPlayerId), out var local))
+                CompareAndReportSyncHash(msg.Tick, msg.PlayerId, local, (msg.Hash, msg.CommandHash));
         }
 
         /// <summary>
         /// Single comparison point for local vs remote sync hashes. Fires OnDesyncDetected on
         /// mismatch and always fires OnSyncHashCompared — the engine promotes its last-matched
         /// sync anchor on matched comparisons (event-based promotion, no grace window).
+        /// On a state mismatch it also emits the classification line: differing command digests ⇒
+        /// input divergence (engine-side), equal digests ⇒ state divergence (game-logic determinism).
+        /// The classification is diagnostic logging only — it does not alter OnDesyncDetected.
         /// </summary>
-        private void CompareAndReportSyncHash(int tick, int remotePlayerId, long localHash, long remoteHash)
+        private void CompareAndReportSyncHash(int tick, int remotePlayerId,
+            (long state, long cmd) local, (long state, long cmd) remote)
         {
-            bool matched = localHash == remoteHash;
+            bool matched = local.state == remote.state;
             if (!matched)
             {
-                _logger?.KWarning($"[KlothoNetworkService][SyncHash] Desync at tick {tick}: local=0x{localHash:X16}, remote(player{remotePlayerId})=0x{remoteHash:X16}");
-                OnDesyncDetected?.Invoke(remotePlayerId, tick, localHash, remoteHash);
+                string cls = local.cmd != remote.cmd ? "InputDivergence" : "StateDivergence";
+                _logger?.KWarning(
+                    $"[Desync][Diag] tick={tick} class={cls} remotePlayer={remotePlayerId} " +
+                    $"local.state=0x{local.state:X16} remote.state=0x{remote.state:X16} " +
+                    $"local.cmd=0x{local.cmd:X16} remote.cmd=0x{remote.cmd:X16}");
+                OnDesyncDetected?.Invoke(remotePlayerId, tick, local.state, remote.state);
             }
             OnSyncHashCompared?.Invoke(tick, remotePlayerId, matched);
         }

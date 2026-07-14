@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.7] - 2026-07-14
+
+### Desync diagnostics
+
+- **When peers disagree, the engine now pinpoints where they diverged instead of only reporting that they did.** State hashing is layered: each tick's hash breaks down into the whole-frame hash, a hash and count per component type, and a hash per snapshot-participant system — so a divergence can be attributed to the exact component type or system that differs, not just a mismatched total. The breakdown is a byproduct of the hash the engine already computes, so the steady per-tick path stays allocation-free.
+- **A short rolling window of recent per-tick hashes is retained during play**, so a divergence can be read against the ticks around it rather than only at the tick it surfaced. It is on by default and can be tuned down or disabled.
+- **On detection, an online probe exchanges hashes between the disagreeing peers to localize the divergence.** A peer asks the other for its per-tick hashes across the disputed window, narrows to the first tick they disagree on, then requests that tick's component/system breakdown — concluding with a verdict that names the tick and the diverging layer. Peer-to-peer, it also classifies whether the peers executed **different inputs** (a propagation problem) or the **same inputs produced a different result** (a determinism problem), by digesting the confirmed command set alongside the state. A server-driven client settles the same question directly against the server's verified state. The probe path is budgeted and rate-limited; a forged or flooding probe can at most produce a misleading log line. See the [Desync Diagnostics](Docs/DesyncDiagnostics.md) guide for reading the resulting logs and verdict.
+
+### Replay fidelity
+
+- **A predicted tick that is later verified is now recorded to the replay.** Recording happens at the moment a tick is confirmed, so a tick that first ran as a prediction — and matched on arrival — no longer leaves a hole in the replay, and a late real command that corrects a predicted tick overwrites the recorded entry instead of leaving a stale one.
+- **A corrective reset or resync now ends the replay cleanly at the last verified tick before the jump.** A full-state reset moves the simulation onto a new lineage with no recorded transition, so recording past it made playback diverge; the recording now stops at the pre-reset boundary. This holds on every path a reset originates — the host that initiates it, a peer that receives it, and a server-driven client that resyncs — and a completed replay no longer trails one never-recorded tick past its end.
+
+### Fixes
+
+- **The diagnostic response path no longer trusts wire-supplied lengths or tick ranges.** A crafted response could satisfy a payload's length check through 32-bit overflow and drive a multi-gigabyte allocation, and a crafted request's tick window could spin the responder in an unbounded loop — stalling the responding peer, and on a dedicated server the whole room. Both are now bounded.
+- **A peer-to-peer divergence verdict pairs the local and remote hashes from the same tick.** The remote hash had been taken from the detection tick while the local hash came from the (often earlier) first diverging tick, so the logged pair could be internally inconsistent; the verdict now carries the diverging tick's remote total.
+- **A departed peer's probe bookkeeping is cleared on disconnect**, so a recycled peer id cannot inherit a stale entry and suppress a later diagnosis.
+- **A dedicated server rate-limits full-state requests**, so a single client cannot force repeated full-state rebuilds.
+
+### API changes
+
+- **`SendSyncHash` now also carries the command-set hash** — `SendSyncHash(int tick, long hash, long cmdHash)`. Custom `IKlothoNetworkService` / `IServerDrivenNetworkService` implementers must add the parameter. The extra hash drives the input-vs-state divergence classification and does not affect recovery.
+
 ## [0.5.6] - 2026-07-12
 
 ### Match results reported to the lobby

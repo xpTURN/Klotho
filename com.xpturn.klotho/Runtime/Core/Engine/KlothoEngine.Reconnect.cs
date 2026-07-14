@@ -40,6 +40,12 @@ namespace xpTURN.Klotho.Core
             _desyncCountByPeer.Remove(playerId);
             _lastCountedDesyncTickByPeer.Remove(playerId);
             _lastMismatchedTickByPeer.Remove(playerId);
+            // The requester-side probe de-dup guard is keyed by peerId, and peerIds are recycled. Prune the
+            // departed peer so a recycled id does not inherit a stale entry (mirrors the service-side
+            // _probeServeState disconnect cleanup). Best-effort: an unresolvable peer leaves its harmless
+            // (diagnostic-only) entry behind.
+            if (_probeNetwork != null && _probeNetwork.TryResolveProbePeer(playerId, out int probePeerId))
+                _lastProbedTickByPeer.Remove(probePeerId);
             _logger?.KTrace($"[KlothoEngine][Roster] PlayerLeft: playerId={playerId}, rosterCount={_activePlayerIds.Count}, CurrentTick={CurrentTick}");
         }
 

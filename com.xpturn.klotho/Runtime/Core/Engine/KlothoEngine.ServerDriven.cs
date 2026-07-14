@@ -100,6 +100,9 @@ namespace xpTURN.Klotho.Core
 
             // 4. Calculate state hash.
             long stateHash = _simulation.GetStateHash();
+            // The server hashes every tick, so recording the breakdown is a free byproduct.
+            // Kept adjacent to the compute: Record copies the breakdown that call just filled.
+            _diagHistorySim?.RecordHashHistory(CurrentTick);
             _logger?.KDebug($"[KlothoEngine][SD] Hash: tick={CurrentTick + 1}, hash=0x{stateHash:X16}");
 
             // 5. Broadcast verified message — send _frame.Tick(=CurrentTick+1) to match the client hash.

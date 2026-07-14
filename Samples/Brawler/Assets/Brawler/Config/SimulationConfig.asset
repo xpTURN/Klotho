@@ -44,4 +44,5 @@ MonoBehaviour:
   <RollbackWindowTicks>k__BackingField: 200
   <EventDispatchWarnMs>k__BackingField: 5
   <TickDriftWarnMultiplier>k__BackingField: 2
+  <DiagnosticHistoryTicks>k__BackingField: 60
   <StageId>k__BackingField: 0

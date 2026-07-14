@@ -143,6 +143,22 @@ namespace xpTURN.Klotho.Network
         // PastTick burst tracker — emits [Metrics][BurstDuration] when reject silence > threshold,
         // or on disconnect / Phase transition for final flush.
         private readonly Dictionary<int, PastTickBurstState> _pastTickBursts = new Dictionary<int, PastTickBurstState>();
+
+        // FullStateRequest rate limit. A request is ~5 bytes but the response is the whole state,
+        // so an unthrottled client can amplify its uplink into the server's downlink and force a
+        // re-serialize (+ heap alloc) on the room worker thread every tick. Mirrors the P2P host
+        // guard, sharing ResyncPolicy.RESYNC_RESPONSE_COOLDOWN_MS.
+        // Keyed by peerId (players AND spectators — no exception, or the spectator slot stays an
+        // amplification hole). Room-worker-thread only (inbound drain, disconnect and Engine.Update
+        // all run there), so no lock. Dropped requests only bump DropsSinceLastServe: logging per
+        // drop would hand the attacker an O(N) string-alloc + sink-write path, which is the very
+        // cost the cooldown exists to deny.
+        private struct PeerResyncState
+        {
+            public long LastServeMs;
+            public int DropsSinceLastServe;
+        }
+        private readonly Dictionary<int, PeerResyncState> _resyncState = new Dictionary<int, PeerResyncState>();
         private const long BURST_SILENCE_THRESHOLD_MS = 1000;
 
         // Reconnect support
@@ -567,7 +583,7 @@ namespace xpTURN.Klotho.Network
             // Not needed in SD mode
         }
 
-        public void SendSyncHash(int tick, long hash)
+        public void SendSyncHash(int tick, long hash, long cmdHash)
         {
             // The server is the source of truth for hashes — no-op
         }
@@ -1029,7 +1045,7 @@ namespace xpTURN.Klotho.Network
                     break;
 
                 case FullStateRequestMessage fullReqMsg:
-                    OnFullStateRequested?.Invoke(peerId, fullReqMsg.RequestTick);
+                    HandleFullStateRequest(peerId, fullReqMsg);
                     break;
 
                 case PlayerConfigMessage playerConfigMsg:
@@ -1043,7 +1059,43 @@ namespace xpTURN.Klotho.Network
                 case ReactiveExtraDelayReportMessage reactiveReport:
                     HandleReactiveExtraDelayReport(peerId, reactiveReport);
                     break;
+
+                case DesyncProbeRequestMessage probeReq:
+                    HandleDesyncProbeRequest(peerId, probeReq);
+                    break;
+
+                case DesyncVerdictReportMessage verdictMsg:
+                    HandleDesyncVerdictReport(peerId, verdictMsg);
+                    break;
             }
+        }
+
+        // Per-peer cooldown before another FullState is served to the same peer (see _resyncState).
+        // Dropping is safe without a reject message: every requester already re-sends on its own
+        // resync timeout, which is longer than the cooldown, so a legitimate retry always lands
+        // outside the window. The first request from a peer is never throttled (no entry yet).
+        private void HandleFullStateRequest(int peerId, FullStateRequestMessage msg)
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            bool known = _resyncState.TryGetValue(peerId, out var state);
+
+            if (known && now - state.LastServeMs < ResyncPolicy.RESYNC_RESPONSE_COOLDOWN_MS)
+            {
+                state.DropsSinceLastServe++;
+                _resyncState[peerId] = state;
+                return;
+            }
+
+            int throttled = known ? state.DropsSinceLastServe : 0;
+            _resyncState[peerId] = new PeerResyncState { LastServeMs = now, DropsSinceLastServe = 0 };
+
+            // The only log on this path, so it is bounded by the cooldown and cannot be spammed.
+            // Information for a routine serve (a late-joining spectator resyncs this way) to match
+            // the P2P host; Warning once drops appeared, which is what a flooding peer looks like —
+            // throttledSinceLastServe then carries the count, so no separate threshold alarm.
+            _logger?.KLog(throttled > 0 ? KLogLevel.Warning : KLogLevel.Information,
+                $"[ServerNetworkService] FullState request: peerId={peerId}, requestTick={msg.RequestTick}, throttledSinceLastServe={throttled}");
+            OnFullStateRequested?.Invoke(peerId, msg.RequestTick);
         }
 
         // Client reported its effective extra-delay. Store and re-evaluate the push so the
@@ -1618,6 +1670,14 @@ namespace xpTURN.Klotho.Network
             _logger?.KInformation($"[ServerNetworkService] Peer disconnected: peerId={peerId}");
 
             _pendingPeers.Remove(peerId);
+
+            // Unconditional: spectators and pending peers are not in _peerToPlayer, yet they are
+            // rate-limited too. Leaving the entry behind would let a recycled peerId inherit the
+            // previous peer's cooldown and get its FIRST request dropped (a spectator/late-joiner
+            // would then stall until its resync timeout).
+            _resyncState.Remove(peerId);
+            _probeServeState.Remove(peerId);
+            _verdictReportState.Remove(peerId);
 
             if (_peerToPlayer.TryGetValue(peerId, out int playerId))
             {

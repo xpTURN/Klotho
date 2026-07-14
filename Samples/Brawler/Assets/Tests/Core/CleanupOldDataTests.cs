@@ -73,8 +73,8 @@ namespace xpTURN.Klotho.Core.Tests
         private static InputBuffer ReadInputBuffer(KlothoEngine engine)
             => (InputBuffer)_inputBufferField.GetValue(engine);
 
-        private static Dictionary<int, long> ReadLocalHashes(KlothoEngine engine)
-            => (Dictionary<int, long>)_localHashesField.GetValue(engine);
+        private static Dictionary<int, (long state, long cmd)> ReadLocalHashes(KlothoEngine engine)
+            => (Dictionary<int, (long state, long cmd)>)_localHashesField.GetValue(engine);
 
         // ── F-2: Initial state — cap=-1 skips cleanup entirely ─────────────
 
@@ -91,7 +91,7 @@ namespace xpTURN.Klotho.Core.Tests
 
             var buffer = ReadInputBuffer(engine);
             var localHashes = ReadLocalHashes(engine);
-            localHashes[0] = 0xAAAAL;
+            localHashes[0] = (0xAAAAL, 0L);   // widened to (state, cmd) — command digest rides along
 
             // Harness StartPlaying pre-fills InputBuffer with the input-delay window
             // (KlothoEngine.cs:603-613). Use the post-setup count as the unchanged-baseline

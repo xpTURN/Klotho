@@ -159,6 +159,47 @@ namespace xpTURN.Klotho.Diagnostics
         /// </summary>
         public static readonly HashSet<int> ForceClientDesyncPlayerIds = new HashSet<int>();
 
+        /// <summary>
+        /// The positive control: execution tick whose post-execution state the listed players
+        /// corrupt via <see cref="StateCorruptionMutator"/>. Unlike <see cref="ForceClientDesyncAtTick"/>
+        /// (a hash-only salt — the negative control), this mutates real component state, so the diagnostic
+        /// funnel must localize the actual diverging component/system. -1 disables. Execution-tick semantics
+        /// like <see cref="ForceClientDesyncAtTick"/>: arming tick T diverges the hash reported at tick T+1.
+        /// </summary>
+        public static int StateCorruptionTick = -1;
+
+        /// <summary>
+        /// The positive control: players (by LocalPlayerId) that apply <see cref="StateCorruptionMutator"/>.
+        /// Each instance self-filters by LocalPlayerId; others are untouched.
+        /// </summary>
+        public static readonly HashSet<int> StateCorruptionPlayerIds = new HashSet<int>();
+
+        /// <summary>
+        /// The positive control: test-supplied typed mutation over the ECS Frame (e.g. set a TransformComponent field
+        /// on a known entity). core owns only the WHEN (tick + player gate); the game/test owns the WHAT.
+        /// null disables. MUST be re-execution idempotent — SET a field to a fixed value, do not accumulate:
+        /// verified/rollback resim re-runs the tick, and a "fire once" mutation would be washed out so the
+        /// desync never surfaces and the test silently passes.
+        /// </summary>
+        public static System.Action<xpTURN.Klotho.ECS.Frame> StateCorruptionMutator;
+
+        /// <summary>
+        /// Registers a positive-control state-corruption mutator. Fires on the post-execution
+        /// state of <paramref name="tick"/> for every listed player, on every (re-)execution. The mutator
+        /// MUST be re-execution idempotent (see <see cref="StateCorruptionMutator"/>). Consumed by
+        /// KlothoEngine (arming, LocalPlayerId gate) + EcsSimulation.Tick (application) under
+        /// KLOTHO_FAULT_INJECTION.
+        /// </summary>
+        public static void RegisterStateCorruption(int tick, IEnumerable<int> playerIds, System.Action<xpTURN.Klotho.ECS.Frame> mutator)
+        {
+            StateCorruptionTick = tick;
+            StateCorruptionMutator = mutator;
+            StateCorruptionPlayerIds.Clear();
+            if (playerIds != null)
+                foreach (int id in playerIds)
+                    StateCorruptionPlayerIds.Add(id);
+        }
+
 #if KLOTHO_FAULT_INJECTION
         /// <summary>Reset all toggles to defaults. Call from test [SetUp] / [TearDown] for hygiene.</summary>
         public static void Reset()
@@ -175,6 +216,9 @@ namespace xpTURN.Klotho.Diagnostics
             DropFullStateResponsePlayerIds.Clear();
             ForceClientDesyncAtTick = -1;
             ForceClientDesyncPlayerIds.Clear();
+            StateCorruptionTick = -1;
+            StateCorruptionMutator = null;
+            StateCorruptionPlayerIds.Clear();
         }
 #endif
     }

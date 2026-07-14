@@ -98,6 +98,14 @@ namespace xpTURN.Klotho.Network
         SimulationConfig = 90,
         PlayerConfig = 91,
 
+        // Desync diagnostics (online probe). Request/Response are a diagnostic round trip between
+        // the peer that detected a desync and the peer it disagrees with; VerdictReport carries the
+        // SD client's diff conclusion to the server for logging. All three are diagnostic-only:
+        // nothing on these paths feeds the recovery ladder or rewinds a live simulation.
+        DesyncProbeRequest = 93,
+        DesyncProbeResponse = 94,
+        DesyncVerdictReport = 95,
+
         // Sample/game-specific reserved range — instead of adding sample-specific values to the Runtime enum,
         // samples freely cast values past this point for their own use (avoids reversed dependency direction)
         UserDefined_Start = 200,

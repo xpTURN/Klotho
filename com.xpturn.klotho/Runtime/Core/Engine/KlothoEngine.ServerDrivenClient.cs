@@ -2,6 +2,7 @@ using System;
 using xpTURN.Klotho.Logging;
 using System.Collections.Generic;
 
+using xpTURN.Klotho.Diagnostics;
 using xpTURN.Klotho.Input;
 using xpTURN.Klotho.Network;
 
@@ -333,9 +334,10 @@ namespace xpTURN.Klotho.Core
             _simulation.Tick(_tickCommandsCache);
 
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
+            // Prediction-tick hash is dev-only diagnostics; NOT recorded into the history — the
+            // verified resim re-executes and re-records this tick, so a predicted value would be
+            // overwritten anyway and buys no prod signal.
             _logger?.KDebug($"[SD][HASH] PredTick: tick={CurrentTick} hash=0x{_simulation.GetStateHash():X16}");
-            if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimSnap)
-                ecsSimSnap.SnapshotHashesToQueue();
 #endif
 
             _eventBuffer.ClearTick(CurrentTick);
@@ -584,6 +586,9 @@ namespace xpTURN.Klotho.Core
 
                 // Hash validation
                 long resimHash = _simulation.GetStateHash();
+                // Verified resim hashes every tick, so recording is a free byproduct. This is
+                // the SD client's prod accumulation path (the prediction tick is intentionally skipped).
+                _diagHistorySim?.RecordHashHistory(executionTick);
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
                 _logger?.KDebug($"[SD][DIAG] VerifiedHash: executionTick={executionTick} hash=0x{resimHash:X16}");
 #endif
@@ -593,16 +598,45 @@ namespace xpTURN.Klotho.Core
                     _logger?.KError(
                         $"[KlothoEngine][SD] Determinism failure: tick={entry.Tick}, local=0x{resimHash:X16}, server=0x{entry.StateHash:X16}");
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-                    // Diagnostic — per-component hash to identify which component(s) diverged.
+                    // Command-digest classification — the SD client holds both its executed set (_tickCommandsCache)
+                    // and the server's confirmed set (entry.Commands), so it compares locally with no new
+                    // message. Differing digests ⇒ the confirmed inputs the client resimulated were
+                    // not the server's (input propagation/buffer — upgrades the former count-only warning);
+                    // equal digests ⇒ same inputs, diverged result (determinism violation).
+                    long localCmdDigest = ComputeCommandDigest(_tickCommandsCache);
+                    long serverCmdDigest = ComputeCommandDigest(entry.Commands);
+                    string desyncClass = localCmdDigest != serverCmdDigest ? "InputDivergence" : "StateDivergence";
+                    _logger?.KError(
+                        $"[Desync][Diag] tick={entry.Tick} class={desyncClass} " +
+                        $"local.cmd=0x{localCmdDigest:X16} server.cmd=0x{serverCmdDigest:X16}");
+
+                    // Ask the server for its breakdown at this tick so the layer can be named, and
+                    // report the conclusion back so it lands in the SERVER's log. The class is already
+                    // settled above (both digests are in hand), so only the layer is missing — that is why
+                    // there is no tick-search round trip here, unlike P2P.
+                    //
+                    // The scalars are captured now, inside this branch: the response is an RTT away, and by
+                    // then _tickCommandsCache has been refilled by the next verified tick and the commands
+                    // it pointed at have gone back to the pool.
+                    //
+                    // executionTick, not entry.Tick: BOTH history rings key this state under the tick that
+                    // PRODUCED it, while the wire calls it entry.Tick = executionTick + 1. Asking the server
+                    // for entry.Tick misses our own capture and reads the wrong slot out of the server's.
+                    TryBeginDesyncProbeSD(executionTick, entry.Tick, resimHash, entry.StateHash,
+                        localCmdDigest != serverCmdDigest ? DesyncClass.Input : DesyncClass.State);
+
+                    // Diagnostic — surface the diverging layer + recent history locally, in prod too.
+                    // The live sim is exactly at the diverged tick here, so LogStateBreakdown
+                    // pinpoints the component/system layer directly (includes the system layer, the old
+                    // per-component dump did not); FlushHashHistory dumps the surrounding ticks. Both
+                    // no-op cheaply when the log level / history are disabled.
                     if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimDiag)
                     {
                         if (!_fullStateRequestPending)
                             ecsSimDiag.FlushHashHistory(_logger, entry.Tick);
-                        ecsSimDiag.LogComponentHashes(_logger, "DesyncLocal");
+                        ecsSimDiag.LogStateBreakdown(_logger, "DesyncLocal");
                         ecsSimDiag.LogStaticFingerprint(_logger, "DesyncLocal");
                     }
-#endif
 
                     if (!_fullStateRequestPending)
                     {
@@ -960,6 +994,12 @@ namespace xpTURN.Klotho.Core
 
             int previousTick = CurrentTick;
 
+            // F47 (L1): capture the pre-reset recorded frontier BEFORE ApplyFullState. A resync replaces
+            // state wholesale (a jump with no replay record), so the recording must be truncated here — the
+            // SD-client analog of the P2P host/guest corrective-reset truncation. Applied below, past the
+            // early-return gates.
+            int preResetTotalTicks = ComputeReplayTotalTicks();
+
             // Determinism failure or Reconnect recovery path.
             var applyResult = ApplyFullState(tick, stateData, stateHash, ApplyReason.ResyncRequest);
 
@@ -993,6 +1033,12 @@ namespace xpTURN.Klotho.Core
                 // AutoAbort off: warn the game layer, then fall through to normal post-processing.
                 OnResyncFailed?.Invoke();
             }
+
+            // F47 (L1): truncate the recording at the pre-reset frontier before the state jump lands in the
+            // bookkeeping below. Placed after the Skipped / HashMismatch+AutoAbort early-returns so only an
+            // actually-applied resync truncates; the helper's reason gate + IsRecording guard keep it inert
+            // otherwise. The reconnect resim loop below does not RecordTick, so nothing re-extends the replay.
+            TruncateReplayForStateJump(ApplyReason.ResyncRequest, preResetTotalTicks, tick);
 
             // Preserve local inputs that are not yet confirmed.
             _inputBuffer.ClearBefore(tick);

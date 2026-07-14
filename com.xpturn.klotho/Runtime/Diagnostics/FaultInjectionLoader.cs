@@ -62,7 +62,11 @@ namespace xpTURN.Klotho.Diagnostics
                 $"forceSpawnRetry=[{string.Join(",", FaultInjection.ForceSpawnRetryPlayerIds)}], " +
                 $"forceTickOffsetDelta={FaultInjection.ForceTickOffsetDelta}, " +
                 $"dropFullState=[{string.Join(",", FaultInjection.DropFullStateResponsePlayerIds)}], " +
-                $"forceClientDesync={FaultInjection.ForceClientDesyncAtTick}@[{string.Join(",", FaultInjection.ForceClientDesyncPlayerIds)}]");
+                $"forceClientDesync={FaultInjection.ForceClientDesyncAtTick}@[{string.Join(",", FaultInjection.ForceClientDesyncPlayerIds)}], " +
+                // No "mutator missing" check here: the game registers StateCorruptionMutator AFTER loading
+                // the config, so at this point it is legitimately still null. The engine warns at arming
+                // time, which is the first moment the answer is actually knowable.
+                $"stateCorruption={FaultInjection.StateCorruptionTick}@[{string.Join(",", FaultInjection.StateCorruptionPlayerIds)}]");
             return true;
 #else
             return false;
@@ -85,6 +89,13 @@ namespace xpTURN.Klotho.Diagnostics
             [JsonProperty] public List<int> DropFullStateResponsePlayerIds { get; set; }
             [JsonProperty] public int? ForceClientDesyncAtTick { get; set; }
             [JsonProperty] public List<int> ForceClientDesyncPlayerIds { get; set; }
+
+            // The positive control. Only the WHEN and WHO live here — the WHAT is a typed
+            // mutation over the game's own components, so the game registers
+            // FaultInjection.StateCorruptionMutator. Arming the tick without a mutator is inert, which
+            // is the honest failure: core cannot invent a corruption for components it does not know.
+            [JsonProperty] public int? StateCorruptionAtTick { get; set; }
+            [JsonProperty] public List<int> StateCorruptionPlayerIds { get; set; }
         }
 
         [JsonObject(MemberSerialization.OptIn)]
@@ -186,6 +197,14 @@ namespace xpTURN.Klotho.Diagnostics
                 FaultInjection.ForceClientDesyncPlayerIds.Clear();
                 foreach (int id in s.ForceClientDesyncPlayerIds)
                     FaultInjection.ForceClientDesyncPlayerIds.Add(id);
+            }
+
+            if (s.StateCorruptionAtTick.HasValue) FaultInjection.StateCorruptionTick = s.StateCorruptionAtTick.Value;
+            if (s.StateCorruptionPlayerIds != null)
+            {
+                FaultInjection.StateCorruptionPlayerIds.Clear();
+                foreach (int id in s.StateCorruptionPlayerIds)
+                    FaultInjection.StateCorruptionPlayerIds.Add(id);
             }
         }
 #endif

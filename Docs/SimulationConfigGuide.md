@@ -18,6 +18,7 @@
 | `SDInputLeadTicks` | Less server-arrival slack · risk of unapplied input | Higher perceived input latency · greater stability | — (SD only) |
 | `InterpolationDelayTicks` | Fresher remote entities · more jitter exposure | Smoother interpolation · more delay | — (View) |
 | `QuorumMissDropTicks` | Faster presumed-drop recovery · false-positive rollback thrash on jitter | Slower recovery · more jitter-tolerant | — (P2P only) |
+| `DiagnosticHistoryTicks` | `0` disables · desync localization falls back to check-tick granularity | Deeper layered hash history · **new** per-tick hash cost under P2P | — (diagnostic-only · not wire-propagated) |
 
 **Key formulas (SD mode):**
 ```
@@ -186,7 +187,7 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
    - `Tick gap` warnings → revisit `TickIntervalMs` suitability or simulation cost.
    - `Accumulator clamped` → frame drops or `TickIntervalMs` set too low.
    - SD `MaxUnackedInputs exceeded` → adjust `InputResendIntervalMs` or raise `SDInputLeadTicks`.
-3. **On desync**: temporarily lower `SyncCheckInterval` (e.g., 10 → 5) for faster detection.
+3. **On desync**: temporarily lower `SyncCheckInterval` (e.g., 10 → 5) for faster detection. Keep `DiagnosticHistoryTicks > 0` (default 60) so the engine localizes the divergence to a component type / system participant and auto-probes the peer for a verdict — see [DesyncDiagnostics.md](./DesyncDiagnostics.md). Under P2P this buys a per-tick hash; set `0` only if that steady cost is unaffordable (localization then degrades to check-tick granularity).
 4. **Interpolation jitter**: raise `InterpolationDelayTicks` one step at a time and enable `EnableErrorCorrection`.
 5. **Reactive escalation ceiling**: `SimulationConfig.Validate()` enforces `ReactiveMax ≤ MaxRollbackTicks / 2`. If you lower `MaxRollbackTicks` (e.g. fighting at 8), `ReactiveMax` is clamped to that half (≤4) with a warning — raise `MaxRollbackTicks` first if you need a wider reactive window.
 6. **On `OnMatchAborted(ChainStallTimeout)` false positives**: verify `SessionConfig.ReconnectTimeoutMs` against the recovery floor. Effective threshold = `max(ReconnectTimeoutMs / TickIntervalMs + 100, SessionConfig.MinStallAbortTicks)`. If `ReconnectTimeoutMs < 30s`, `MinStallAbortTicks` (default 600 = 30s @ 50ms) acts as the floor — raise both for high-latency/long-recovery scenarios.
@@ -220,6 +221,7 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
 ## 7. References
 
 - Field semantics / defaults: [`Specification.md §2.2`](./Specification.md#22-default-configuration-values)
+- Desync diagnosis / log analysis (`DiagnosticHistoryTicks`): [`DesyncDiagnostics.md`](./DesyncDiagnostics.md)
 - Real-world SD example: [`Samples/Brawler/Server/simulationconfig.json`](../Samples/Brawler/Server/simulationconfig.json)
 - Per-mode message flow: [`Specification.md §9`](./Specification.md)
 - Brawler sample bootstrap: [`Samples/Brawler.E.Bootstrap.md`](./Samples/Brawler.E.Bootstrap.md)

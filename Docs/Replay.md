@@ -71,7 +71,7 @@ Recording is wired into `KlothoEngine` — you don't call `RecordTick` yourself.
 
 1. calls `StartRecording(activePlayerCount, simConfig, randomSeed)` at boot,
 2. calls `SetInitialStateSnapshot(snapshot, hash)` with the tick-0 full state (**required** — playback throws `InvalidDataException` if it's missing),
-3. calls `RecordTick(CurrentTick, commands)` on every verified tick (P2P, Server-Driven, and late-join paths alike).
+3. records each tick's commands **at the moment that tick is confirmed (verified)** — P2P, Server-Driven, and late-join paths alike. Because recording is tied to *confirmation* rather than to execution, a tick whose inputs were corrected by a late-arriving command or a rollback is recorded with its **corrected** inputs, and only ticks that actually confirmed end up in the file (see *Recording length* below).
 
 Your game's job is just to attach optional metadata and save the file:
 
@@ -88,6 +88,16 @@ engine.SaveReplayToFile(path, dumpJson: false);   // delegates to ReplaySystem.S
 `SaveReplayToFile` serializes `CurrentReplayData` (metadata + initial snapshot + command stream) and writes it. `GetCurrentReplayData()` returns the in-memory `IReplayData` if you want to keep or upload it without a file.
 
 > Recording adds negligible overhead — it copies the command list that the engine already has each tick. The one cost is the initial full-state snapshot, taken once at tick 0.
+
+### Recording length & when a replay ends early
+
+A replay's length (`metadata.TotalTicks`) is the **last tick the match confirmed (verified)** — not necessarily the last tick you saw drawn on screen. A replay that is shorter than the match *felt* is usually fine: it means "everything recorded is faithful," not "something broke." Two cases produce this:
+
+- **The unconfirmed tail is dropped (normal).** A networked client runs a few *predicted* ticks ahead of the inputs it has actually confirmed. If a session ends while some predicted ticks are still unconfirmed, those ticks aren't authoritatively reproducible — their confirming inputs never arrived — so recording stops at the last confirmed tick. The last fraction of a second shown locally may not be in the file, by design: it couldn't be replayed faithfully, so it isn't claimed.
+
+- **A desync recovery truncates the replay.** If the match hit a divergence that rollback couldn't absorb and recovered by dropping in an authoritative state wholesale — a **full-state resync** or **corrective reset** — recording **ends at that point**. Everything up to the reset is a faithful replay; the reset itself is a state *jump* with no input representation, so replaying past it would inevitably diverge. The engine cuts the replay at the last confirmed tick **before** the reset — the result is **shorter but 100% reproducible**, instead of longer and wrong. It is logged as `[KlothoEngine][Replay] truncated at ResyncRequest` (or `CorrectiveReset`) with the cut tick. Such a replay covers the match right up to the moment the desync was corrected — exactly the stretch worth reviewing. (Ordinary **late-join / reconnect / initial-state** deliveries are *not* truncations — only desync-recovery resets are.)
+
+> **Practical read:** if a saved replay is shorter than expected, look for a resync / corrective-reset near the cut tick in the logs. A truncated replay is *honest* ("valid up to here"), not corrupt — it plays cleanly to its end and simply finishes early. The recovery point and everything after it are intentionally absent. If you need to reproduce what happened *after* a reset, that belongs to a fresh recording, not this file.
 
 ---
 

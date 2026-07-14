@@ -16,5 +16,14 @@ namespace xpTURN.Klotho.Network
 
         [KlothoOrder]
         public int PlayerId;
+
+        /// <summary>
+        /// FNV digest of the tick's canonically-ordered executed command set. Compared alongside
+        /// <see cref="Hash"/> to classify a desync: differing CommandHash ⇒ input divergence (propagation
+        /// / buffer / ordering — engine-side); equal CommandHash with differing <see cref="Hash"/> ⇒ state
+        /// divergence (determinism violation — game-side). Diagnostic-only; never drives recovery.
+        /// </summary>
+        [KlothoOrder]
+        public long CommandHash;
     }
 }

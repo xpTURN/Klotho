@@ -155,6 +155,8 @@ namespace xpTURN.Klotho.Core
                 _activePlayerIds.AddRange(engineSnapshot.ActivePlayerIds);
 
             // Clamp the verified chain to before the rollback point.
+            // Rewind, NOT a promotion — does not call RecordVerifiedTick. The subsequent
+            // chain re-advance (TryAdvanceVerifiedChain) re-records the re-simulated (corrected) set.
             if (_lastVerifiedTick >= resolvedTick)
                 _lastVerifiedTick = resolvedTick - 1;
             _lastBatchedTick = Math.Min(_lastBatchedTick, resolvedTick - 1);
@@ -232,8 +234,17 @@ namespace xpTURN.Klotho.Core
                     // above); the chain re-advance performs the deferred send.
                     if (_networkService != null && resimTick % _simConfig.GetEffectiveSyncCheckInterval() == 0)
                     {
-                        _localHashes[resimTick] = _simulation.GetStateHash();
+                        long resimHash = _simulation.GetStateHash();
+                        _diagHistorySim?.RecordHashHistory(resimTick);   // Adjacent to the compute (contract)
+                        _localHashes[resimTick] = (resimHash, ComputeCommandDigest(_tickCommandsCache));   // Command digest
                         _deferredHashSendTicks.Add(resimTick);
+                    }
+                    else
+                    {
+                        // Re-record the corrected-timeline breakdown for every resim tick so L1 sees
+                        // the post-rollback values, not the pre-rollback speculative ones.
+                        // No network gate needed here: an engine rollback only occurs in networked play.
+                        _diagHistorySim?.ComputeAndRecordHashHistory(resimTick);
                     }
 
                     resimTick++;

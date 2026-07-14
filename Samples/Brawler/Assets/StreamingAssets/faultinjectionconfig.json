@@ -1,23 +1,23 @@
 {
-  "_comment": "Fault injection toggles for scenario matrix. All fields optional — missing = leave default. Empty arrays clear the corresponding HashSet. Active only when KLOTHO_FAULT_INJECTION is defined.",
+  "_comment": "Fault injection toggles for scenario matrix. All fields optional — missing = leave default. Empty arrays clear the corresponding HashSet. Active only when KLOTHO_FAULT_INJECTION is defined. Key set mirrors FaultInjectionLoader.Schema (StateCorruptionMutator is code-only, registered by the game).",
 
-  "EmulatedRttMs": 200,
+  "EmulatedRttMs": 0,
   "EmulatedRttSchedule": [
-    { "atSec": 10.0, "rttMs": 300 },
-    { "atSec": 15.0, "rttMs": 500 },
-    { "atSec": 30.0, "rttMs": 200 },
-    { "atSec": 45.0, "rttMs": 200 }
   ],
-  
   "EmulatedDisconnectSchedule": [],
+
+  "ServerGcPauseMs": 0,
+  "ServerGcPauseAtTick": -1,
 
   "DropSpawnCommandPlayerIds": [],
   "SuppressBootstrapAckPlayerIds": [],
   "ForceSpawnRetryPlayerIds": [],
-  "ServerGcPauseMs": 0,
-  "ServerGcPauseAtTick": -1,
   "ForceTickOffsetDelta": 0,
+  "DropFullStateResponsePlayerIds": [],
 
   "ForceClientDesyncAtTick": -1,
-  "ForceClientDesyncPlayerIds": []
+  "ForceClientDesyncPlayerIds": [],
+
+  "StateCorruptionAtTick": -1,
+  "StateCorruptionPlayerIds": []
 }

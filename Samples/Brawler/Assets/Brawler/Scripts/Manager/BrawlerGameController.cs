@@ -354,7 +354,44 @@ namespace Brawler
         {
             var path = System.IO.Path.Combine(Application.streamingAssetsPath, "faultinjectionconfig.json");
             FaultInjectionLoader.TryLoadAndApply(path, _logger);
+
+#if KLOTHO_FAULT_INJECTION
+            // The positive control. The config arms the WHEN and WHO; the mutation itself has to
+            // come from here, because core has no idea what a Brawler component is.
+            //
+            // This is the counterpart to ForceClientDesync, and the difference matters: that one only
+            // salts the total hash, so every layer still agrees and the diagnostic funnel is SUPPOSED to
+            // answer "cannot localize" (the negative control). This one moves real component state, so the
+            // funnel must name TransformComponent — if it names something else, or nothing, the diagnosis
+            // is lying.
+            if (FaultInjection.StateCorruptionTick >= 0)
+                FaultInjection.StateCorruptionMutator = CorruptFirstTransform;
+#endif
         }
+
+#if KLOTHO_FAULT_INJECTION
+        // Fixed sentinel, SET not accumulated: the corrupted tick is re-executed on every verified resim
+        // and rollback, and a mutation that drifted per execution would wash the divergence out.
+        //
+        // Corrupts Transform.Scale (NOT Position). No Brawler/core system writes Scale, so the
+        // injected divergence PERSISTS across ticks instead of being overwritten by the movement system on
+        // the next tick. That makes the desync recur at every sync check and escalate the P2P desync ladder
+        // (count N/3) to a FullStateResync (ApplyReason.ResyncRequest) — the path where the replay is truncated
+        // on a corrective reset. (A Position SET washes out in a single rollback: desync peak 1, never escalates,
+        // and the replay records full-length.) It is still a TransformComponent mutation,
+        // so the diagnostic funnel still localizes the divergence to TransformComponent.
+        private static readonly FPVector3 CorruptedScale =
+            new FPVector3(FP64.FromInt(7), FP64.FromInt(7), FP64.FromInt(7));
+
+        private static void CorruptFirstTransform(Frame frame)
+        {
+            var filter = frame.Filter<TransformComponent>();
+            if (!filter.Next(out var entity)) return;   // nothing to corrupt — leave the state alone
+
+            ref var transform = ref frame.Get<TransformComponent>(entity);
+            transform.Scale = CorruptedScale;
+        }
+#endif
 
         private void OnEnable()
         {
