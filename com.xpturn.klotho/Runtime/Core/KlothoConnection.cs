@@ -363,6 +363,15 @@ namespace xpTURN.Klotho.Core
         {
             _pendingSimConfig = msg;
 
+            // Diagnostic: confirm the per-component maxCount overrides reached this client over the wire
+            // (ServerDriven server push). The client's ComponentMemoryPeakSampling is not wire-propagated,
+            // so its component-memory report is off by default — this log is the direct signal that the
+            // reduced-slot config was received and will be applied to the client's layout.
+            if (msg.MaxCountOverrideTypeIds != null && msg.MaxCountOverrideTypeIds.Count > 0)
+                _logger?.KInformation(
+                    $"[KlothoConnection] maxCount overrides received: {msg.MaxCountOverrideTypeIds.Count} entries — " +
+                    $"typeIds=[{string.Join(",", msg.MaxCountOverrideTypeIds)}] values=[{string.Join(",", msg.MaxCountOverrideValues)}]");
+
             if (_result != null)
             {
                 // Normal Join: SyncComplete already processed → augment _result immediately

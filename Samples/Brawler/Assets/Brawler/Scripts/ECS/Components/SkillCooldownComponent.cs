@@ -3,7 +3,7 @@ using xpTURN.Klotho.ECS;
 
 namespace Brawler
 {
-    [KlothoComponent(104)]
+    [KlothoComponent(104, MaxCount = 96)]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct SkillCooldownComponent : IComponent
     {

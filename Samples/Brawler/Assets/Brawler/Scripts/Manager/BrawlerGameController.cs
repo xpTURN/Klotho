@@ -553,6 +553,13 @@ namespace Brawler
                 simulationConfig = sc;
             }
 
+            // Reservation-pruning denylist — always applied (mirrors the dedicated server). This P2P
+            // host is the layout authority; the denylist is wire-propagated to the guest via
+            // SimulationConfigMessage, so setting it here alone keeps both peers' layouts identical. Uniform
+            // via ISimulationConfig (runtime override — does NOT persist to the authored asset). Fail-safe:
+            // the denylist prunes only what it lists — currently the single MovementComponent.
+            simulationConfig.SetRuntimePrunedComponentTypeIds(BrawlerPrunedComponents.ResolveTypeIds());
+
             _session = _flow.StartHostAndListen(simulationConfig, _sessionConfig, "Game",
                 _brawlerSettings._hostAddress, _brawlerSettings._port);
             if (_session == null)

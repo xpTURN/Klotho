@@ -360,7 +360,9 @@ namespace xpTURN.Klotho.Core
                 simConfig.GetSnapshotCapacity(), // ring capacity = MaxRollbackTicks + 2
                 simConfig.TickIntervalMs,
                 setup.Logger,
-                assetRegistry: setup.AssetRegistry);
+                assetRegistry: setup.AssetRegistry,
+                maxCountOverrides: simConfig.ComponentMaxCountOverrides,
+                prunedComponentTypeIds: simConfig.PrunedComponentTypeIds);
 
             // 2. Register systems via callback
             setup.SimulationCallbacks?.RegisterSystems(simulation);
@@ -760,7 +762,9 @@ namespace xpTURN.Klotho.Core
 
             var simulation = new EcsSimulation(
                 simCfg.MaxEntities, simCfg.GetSnapshotCapacity(), simCfg.TickIntervalMs,
-                _logger, assetRegistry: _pendingSetup.AssetRegistry);
+                _logger, assetRegistry: _pendingSetup.AssetRegistry,
+                maxCountOverrides: simCfg.ComponentMaxCountOverrides,
+                prunedComponentTypeIds: simCfg.PrunedComponentTypeIds);
             callbacks.Simulation?.RegisterSystems(simulation);
             simulation.LockAssetRegistry();
 

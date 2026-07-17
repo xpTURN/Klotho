@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using xpTURN.Klotho.Network;
 using xpTURN.Klotho.Logging;
 
@@ -133,6 +134,9 @@ namespace xpTURN.Klotho.Core
         /// <inheritdoc />
         public int DiagnosticHistoryTicks { get; set; } = 60;
 
+        /// <inheritdoc />
+        public bool ComponentMemoryPeakSampling { get; set; } = false;
+
         // --- Multi-stage ---
 
         /// <inheritdoc />
@@ -140,6 +144,43 @@ namespace xpTURN.Klotho.Core
 
         /// <inheritdoc />
         public byte[] MatchConfigData { get; set; } = null;
+
+        // --- Component storage ---
+
+        /// <summary>
+        /// Per-component maxCount overrides (typeId → cap). JSON authoring: <c>{"11":12,"25":20}</c>.
+        /// Exposed to the core as <see cref="ISimulationConfig.ComponentMaxCountOverrides"/> (IReadOnly).
+        /// </summary>
+        public Dictionary<int, int> ComponentMaxCountOverrides { get; set; } = new Dictionary<int, int>();
+
+        IReadOnlyDictionary<int, int> ISimulationConfig.ComponentMaxCountOverrides => ComponentMaxCountOverrides;
+
+        /// <summary>
+        /// Reservation-pruning denylist. Empty = no pruning (reserve all registered types).
+        /// Prefer the type-based builder <see cref="PruneComponent{T}"/> over hardcoding typeIds.
+        /// </summary>
+        public List<int> PrunedComponentTypeIds { get; set; } = new List<int>();
+
+        IReadOnlyCollection<int> ISimulationConfig.PrunedComponentTypeIds => PrunedComponentTypeIds;
+
+        /// <summary>
+        /// Type-based denylist declaration — resolves T's typeId via the registry so the game
+        /// never hardcodes a magic int. Engine <c>[KlothoCoreComponent]</c> types are force-excluded by the
+        /// registry, so listing one is a no-op. List only types NO registered system touches. Call at setup
+        /// (before EcsSimulation ctor).
+        /// </summary>
+        public SimulationConfig PruneComponent<T>() where T : unmanaged, xpTURN.Klotho.ECS.IComponent
+        {
+            int id = xpTURN.Klotho.ECS.ComponentStorageRegistry.GetTypeId<T>();
+            if (!PrunedComponentTypeIds.Contains(id)) PrunedComponentTypeIds.Add(id);
+            return this;
+        }
+
+        /// <inheritdoc />
+        // Code-built config has no serialized backing, so the runtime injection simply replaces the list
+        // (both the concrete List accessors and the ISimulationConfig getter then observe it).
+        public void SetRuntimePrunedComponentTypeIds(int[] typeIds)
+            => PrunedComponentTypeIds = typeIds != null ? new List<int>(typeIds) : new List<int>();
 
         /// <summary>
         /// Per-room shallow copy. Used when a per-room match config is stamped (StageId/MatchConfigData)

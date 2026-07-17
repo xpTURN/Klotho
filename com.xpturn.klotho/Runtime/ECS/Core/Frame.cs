@@ -73,9 +73,22 @@ namespace xpTURN.Klotho.ECS
         {
             // Pass TypeIdCache<T>.Layout directly as an in argument — avoids intermediate struct copy
             ComponentStorageRegistry.GetTypeId<T>();   // Populate Id+Layout cache on first call
+            // Reservation-pruning guard: a pruned type has a default layout (TotalSize 0) whose
+            // CountOffset 0 aliases heap[0] (the first reserved type's count) — reading it would be a silent
+            // misread, not a clean crash. Fail fast at this single chokepoint (covers Add/Get/Has/GetSingleton/
+            // Filter). Release-active: the aliasing hazard exists in release and the check is one int compare.
+            if (ComponentStorageRegistry.TypeIdCache<T>.Layout.TotalSize == 0)
+                ThrowPrunedComponent<T>();
             return new ComponentStorageFlat<T>(_heap,
                 in ComponentStorageRegistry.TypeIdCache<T>.Layout);
         }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ThrowPrunedComponent<T>() where T : unmanaged, IComponent
+            => throw new InvalidOperationException(
+                $"Component {typeof(T).Name}(typeId={ComponentStorageRegistry.TypeIdCache<T>.Id}) is registered " +
+                $"but excluded from this simulation's reserved set (denylisted). " +
+                $"Remove it from ISimulationConfig.PrunedComponentTypeIds, or drop the Add/Get/Filter access.");
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref T Get<T>(EntityRef entity) where T : unmanaged, IComponent
@@ -86,6 +99,21 @@ namespace xpTURN.Klotho.ECS
 
         public bool Has<T>(EntityRef entity) where T : unmanaged, IComponent
             => GetStorage<T>().Has(entity.Index);
+
+        // Reads the live entity count for a component type by typeId, without a generic parameter.
+        // Reads the same bytes as ComponentStorageFlat<T>.Count (same CountOffset). Used by the
+        // component-memory diagnostics to tally every type in a typeId loop. Read-only.
+        public int GetLiveCount(int typeId)
+        {
+            // GetLayout has no bounds check (=> ref _layouts[typeId]); guard out-of-range before it.
+            // (uint) cast folds the negative case in. This guard must precede the TotalSize check.
+            if ((uint)typeId > (uint)ComponentStorageRegistry.MaxTypeId) return 0;
+            ref readonly var l = ref ComponentStorageRegistry.GetLayout(typeId);
+            // In-range gap (unregistered slot) has a default layout whose CountOffset (0) aliases the
+            // first registered type's count — must skip, not read.
+            if (l.TotalSize == 0) return 0;
+            return MemoryMarshal.Cast<byte, int>(_heap.AsSpan(l.CountOffset, 4))[0];
+        }
 
         // --- Singleton component access ---
         // Intended for components marked [KlothoSingletonComponent], whose engine-side

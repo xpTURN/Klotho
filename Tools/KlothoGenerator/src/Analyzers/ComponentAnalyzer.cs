@@ -23,6 +23,7 @@ namespace xpTURN.Klotho.Generator.Analyzers
         private const string KlothoSerializableStructAttribute = "xpTURN.Klotho.Serialization.KlothoSerializableStructAttribute";
         private const string StructLayoutAttribute = "System.Runtime.InteropServices.StructLayoutAttribute";
         private const string KlothoSingletonComponentAttribute = "xpTURN.Klotho.ECS.KlothoSingletonComponentAttribute";
+        private const string KlothoCoreComponentAttribute = "xpTURN.Klotho.ECS.KlothoCoreComponentAttribute";
         private const string IntPtrType = "System.IntPtr";
         private const string UIntPtrType = "System.UIntPtr";
         private const string BoolType = "System.Boolean";
@@ -85,6 +86,29 @@ namespace xpTURN.Klotho.Generator.Analyzers
             bool isSingleton = symbol.GetAttributes().Any(
                 a => a.AttributeClass?.ToDisplayString() == KlothoSingletonComponentAttribute);
 
+            bool isCore = symbol.GetAttributes().Any(
+                a => a.AttributeClass?.ToDisplayString() == KlothoCoreComponentAttribute);
+
+            // MaxCount named argument (read like StructLayout.Pack below). 0 = unspecified (= maxEntities).
+            int maxCount = 0;
+            foreach (var na in attrData.NamedArguments)
+            {
+                if (na.Key == "MaxCount" && na.Value.Value is int mc)
+                {
+                    maxCount = mc;
+                    break;
+                }
+            }
+
+            // A singleton forces slotCapacity 1, so MaxCount is ignored — warn on the conflicting write.
+            if (isSingleton && maxCount > 0)
+            {
+                result.Diagnostics.Add(Diagnostic.Create(
+                    DiagnosticDescriptors.SingletonMaxCountIgnored,
+                    location,
+                    symbol.Name));
+            }
+
             var info = new ComponentTypeInfo
             {
                 Namespace = symbol.ContainingNamespace.IsGlobalNamespace ? null : symbol.ContainingNamespace.ToDisplayString(),
@@ -92,6 +116,8 @@ namespace xpTURN.Klotho.Generator.Analyzers
                 FullTypeName = symbol.ToDisplayString(),
                 ComponentTypeId = componentTypeId,
                 IsSingleton = isSingleton,
+                IsCore = isCore,
+                MaxCount = isSingleton ? 0 : maxCount,
             };
 
             // Collect fields + field-level cross-runtime checks

@@ -9,6 +9,7 @@ namespace xpTURN.Klotho.ECS
     /// </summary>
     [KlothoComponent(5)]
     [KlothoSingletonComponent]
+    [KlothoCoreComponent]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct RandomSeedComponent : IComponent
     {

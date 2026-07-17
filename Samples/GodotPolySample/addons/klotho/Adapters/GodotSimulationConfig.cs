@@ -61,10 +61,43 @@ namespace xpTURN.Klotho.Godot
         // per-tick layered hash breakdown for local desync localization; 0 disables. Diagnostic-only, not
         // wire-propagated. Carries a P2P per-tick hash cost — set 0 to drop it in a shipped build.
         [Export] public int DiagnosticHistoryTicks { get; set; } = 60;
+        // Component-memory peak sampler gate (dev/measurement only). Default off (opt-in), distinct from
+        // DiagnosticHistoryTicks. Off ⇒ no subscription, zero cost. Per-peer local (not wire-propagated).
+        [Export] public bool ComponentMemoryPeakSampling { get; set; } = false;
 
         // Multi-stage. StageId authorable (default single stage);
         // MatchConfigData is runtime-only (set by lobby/host at match start), not [Export]-authored.
         [Export] public int StageId { get; set; } = 0;
         public byte[] MatchConfigData { get; set; } = null;
+
+        // Component storage. Godot exports parallel arrays (typeId[i] → maxCount[i]); it can't [Export]
+        // a typed Dictionary cleanly. Process-global: must be identical across every session in the
+        // process (see ISimulationConfig).
+        [Export] public int[] MaxCountOverrideTypeIds { get; set; } = System.Array.Empty<int>();
+        [Export] public int[] MaxCountOverrideValues { get; set; } = System.Array.Empty<int>();
+
+        public System.Collections.Generic.IReadOnlyDictionary<int, int> ComponentMaxCountOverrides
+        {
+            get
+            {
+                var d = new System.Collections.Generic.Dictionary<int, int>();
+                int n = System.Math.Min(MaxCountOverrideTypeIds?.Length ?? 0, MaxCountOverrideValues?.Length ?? 0);
+                for (int i = 0; i < n; i++)
+                    if (MaxCountOverrideValues[i] > 0) d[MaxCountOverrideTypeIds[i]] = MaxCountOverrideValues[i];
+                return d;
+            }
+        }
+
+        // Reservation-pruning denylist: component typeIds this session skips reserving. Empty = no
+        // pruning (reserve all). Process-global; carried on the same wire (SimulationConfigMessage).
+        [Export] public int[] PrunedComponentTypeIds { get; set; } = System.Array.Empty<int>();
+
+        // Runtime-only override (NOT [Export] → not persisted to .tres) — lets a host inject a code-resolved
+        // denylist without mutating the authored resource (same rationale as MatchConfigData). Non-null wins.
+        private int[] _runtimePrunedComponentTypeIds;
+
+        public void SetRuntimePrunedComponentTypeIds(int[] typeIds) => _runtimePrunedComponentTypeIds = typeIds;
+
+        System.Collections.Generic.IReadOnlyCollection<int> ISimulationConfig.PrunedComponentTypeIds => _runtimePrunedComponentTypeIds ?? PrunedComponentTypeIds;
     }
 }

@@ -219,6 +219,13 @@ namespace xpTURN.Klotho.Core
         // repeated interface cast; a null-conditional call is a no-op when diagnostics are off.
         private xpTURN.Klotho.ECS.EcsSimulation _diagHistorySim;
 
+        // Component-memory peak sampler. Non-null only when the simulation is an EcsSimulation AND
+        // ISimulationConfig.ComponentMemoryPeakSampling is set. Per-peer-local diagnostic (like
+        // _diagHistorySim): the flag is not in SimulationConfigMessage, so joining SD/P2P clients rebuild
+        // config without it and never arm — measure on the authoritative peer / replay instead.
+        // internal so unit tests can assert arming/peaks via InternalsVisibleTo(xpTURN.Klotho.Tests).
+        internal xpTURN.Klotho.ECS.Diagnostics.ComponentMemoryPeakSampler _memSampler;
+
         // Reusable lists to avoid GC.
         private readonly List<ICommand> _tickCommandsCache = new List<ICommand>();
         private readonly List<ICommand> _previousCommandsCache = new List<ICommand>();
@@ -582,6 +589,17 @@ namespace xpTURN.Klotho.Core
             _initialized = true;
         }
 
+        // Arm the component-memory peak sampler when opted in. Called from BOTH Initialize bodies
+        // (network + network-less) so replay/spectator are covered too — the network-less body has no
+        // hash-history arming, so a single call site would silently miss those paths. _simConfig is
+        // ctor-set, so the gate is valid in both bodies. Read-only over verified frames (zero
+        // sim/determinism impact); dumped + disposed in Stop.
+        private void ArmComponentMemorySampler()
+        {
+            if (_simConfig.ComponentMemoryPeakSampling && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsMem)
+                _memSampler = new xpTURN.Klotho.ECS.Diagnostics.ComponentMemoryPeakSampler(this, ecsMem);
+        }
+
         public void Initialize(ISimulation simulation, IKlothoNetworkService networkService, IKLogger logger)
         {
             ThrowIfAlreadyInitialized();
@@ -696,6 +714,8 @@ namespace xpTURN.Klotho.Core
                 _diagHistorySim = ecsDiag;
             }
 
+            ArmComponentMemorySampler();
+
             // The probe rides on top of the diagnostic hash-history ring: it serves answers from it and captures it at
             // detection. A service without the probe surface leaves this unwired and diagnosis stays local.
             SubscribeDesyncProbe();
@@ -759,6 +779,8 @@ namespace xpTURN.Klotho.Core
             (_inputBuffer as InputBuffer)?.SetLogger(logger);
 
             _simulation.Initialize();
+
+            ArmComponentMemorySampler();
 
             _eventBuffer = new EventBuffer(SnapshotCapacity, _logger);
             _eventCollector = new EventCollector();
@@ -1463,6 +1485,23 @@ namespace xpTURN.Klotho.Core
             _reliableTracker?.Detach();
 
             State = KlothoState.Finished;
+
+            // Dump the component-memory peak report once while the sim is still alive (Stop never nulls
+            // _simulation), then dispose the sampler (unsubscribe). Peak column = accumulated PeakCounts;
+            // reserved/live = final-frame snapshot. ringHeaps = RollbackCapacity + 1 (rollback ring + live
+            // frame). Guarded by _memSampler != null so a double Stop is idempotent (no re-dump).
+            if (_memSampler != null)
+            {
+                if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsMem)
+                {
+                    var report = xpTURN.Klotho.ECS.Diagnostics.ComponentMemoryAnalyzer.Capture(
+                        ecsMem.Frame, ecsMem.RollbackCapacity + 1, _memSampler.PeakCounts);
+                    report.ObservedTicks = _memSampler.ObservedTicks;
+                    _logger?.KLog(KLogLevel.Information, $"[Mem] component-memory peak report:\n{report.ToText()}");
+                }
+                _memSampler.Dispose();
+                _memSampler = null;
+            }
 
             if (_networkService != null)
             {

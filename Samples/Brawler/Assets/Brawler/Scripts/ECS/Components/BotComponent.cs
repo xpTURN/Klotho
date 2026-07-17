@@ -20,7 +20,7 @@ namespace Brawler
         Hard   = 2,
     }
 
-    [KlothoComponent(110)]
+    [KlothoComponent(110, MaxCount = 16)]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct BotComponent : IComponent
     {

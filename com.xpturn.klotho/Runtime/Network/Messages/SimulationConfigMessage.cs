@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using xpTURN.Klotho.Core;
 using xpTURN.Klotho.Serialization;
 
@@ -56,6 +57,12 @@ namespace xpTURN.Klotho.Network
         // --- Multi-stage — appended for append-only wire compat ---
         [KlothoOrder] public int StageId;
         [KlothoOrder] public byte[] MatchConfigData;
+        // --- Component storage — parallel arrays (KlothoSerializable has no dict support); append-only ---
+        [KlothoOrder] public List<int> MaxCountOverrideTypeIds = new List<int>();
+        [KlothoOrder] public List<int> MaxCountOverrideValues = new List<int>();
+        // --- Reservation-pruning denylist — build-fixed but wired so server-pushed clients
+        //     prune the identical set (keeping peer layouts uniform). Empty = no pruning. Append-only. ---
+        [KlothoOrder] public List<int> PrunedComponentTypeIds = new List<int>();
 
         /// <summary>
         /// Populates message fields from an ISimulationConfig.
@@ -94,6 +101,24 @@ namespace xpTURN.Klotho.Network
             TickDriftWarnMultiplier = config.TickDriftWarnMultiplier;
             StageId = config.StageId;
             MatchConfigData = config.MatchConfigData;
+
+            // Flatten the override dict to parallel arrays (typeId[i] → value[i]).
+            MaxCountOverrideTypeIds.Clear();
+            MaxCountOverrideValues.Clear();
+            if (config.ComponentMaxCountOverrides != null)
+            {
+                foreach (var kv in config.ComponentMaxCountOverrides)
+                {
+                    MaxCountOverrideTypeIds.Add(kv.Key);
+                    MaxCountOverrideValues.Add(kv.Value);
+                }
+            }
+
+            // Reservation-pruning denylist: flatten to a typeId list (empty = no pruning).
+            PrunedComponentTypeIds.Clear();
+            if (config.PrunedComponentTypeIds != null)
+                foreach (var id in config.PrunedComponentTypeIds)
+                    PrunedComponentTypeIds.Add(id);
         }
 
         /// <summary>
@@ -101,7 +126,7 @@ namespace xpTURN.Klotho.Network
         /// </summary>
         public Core.SimulationConfig ToSimulationConfig()
         {
-            return new Core.SimulationConfig
+            var config = new Core.SimulationConfig
             {
                 TickIntervalMs = TickIntervalMs,
                 MaxEntities = MaxEntities,
@@ -136,6 +161,17 @@ namespace xpTURN.Klotho.Network
                 StageId = StageId,
                 MatchConfigData = MatchConfigData,
             };
+
+            // Rebuild the override dict from the parallel arrays (defensive: min length guards a truncated wire).
+            int n = System.Math.Min(MaxCountOverrideTypeIds?.Count ?? 0, MaxCountOverrideValues?.Count ?? 0);
+            for (int i = 0; i < n; i++)
+                config.ComponentMaxCountOverrides[MaxCountOverrideTypeIds[i]] = MaxCountOverrideValues[i];
+
+            // Rebuild the reservation-pruning denylist (empty = no pruning).
+            if (PrunedComponentTypeIds != null)
+                config.PrunedComponentTypeIds.AddRange(PrunedComponentTypeIds);
+
+            return config;
         }
     }
 }

@@ -6,6 +6,7 @@ namespace xpTURN.Klotho.ECS
     // causing a DivideByZero in ComponentStorageFlat's MemoryMarshal.Cast.
     // Size=1 forces a 1-byte managed size (GetSerializedSize remains 0 since there are no serialized fields).
     [KlothoComponent(3)]
+    [KlothoCoreComponent]
     [StructLayout(LayoutKind.Sequential, Pack = 4, Size = 1)]
     public partial struct ErrorCorrectionTargetComponent : IComponent
     {

@@ -13,7 +13,7 @@ namespace Brawler
     // via full-state.
     //
     // Components must be unmanaged structs, so ownership is carried as fixed-width bitmasks, never byte[].
-    [KlothoComponent(107)]
+    [KlothoComponent(107, MaxCount = 16)]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct LoadoutSeedComponent : IComponent
     {

@@ -14,6 +14,15 @@ namespace xpTURN.Klotho.ECS
         public const int UserMinId = 100;
 
         public int ComponentTypeId { get; }
+
+        /// <summary>
+        /// Max concurrent instances — caps the dense/components slot count (SlotCapacity) at
+        /// <c>min(MaxCount, maxEntities)</c>. 0 = unspecified (= maxEntities, current behavior).
+        /// Conservative safe default only; level-dependent tuning belongs in the config override.
+        /// Ignored for [KlothoSingletonComponent] (singleton forces slotCapacity 1).
+        /// </summary>
+        public int MaxCount;
+
         public KlothoComponentAttribute(int componentTypeId) => ComponentTypeId = componentTypeId;
     }
 }

@@ -101,10 +101,15 @@ namespace xpTURN.Klotho.ECS
         public int StateCorruptionTick = -1;
         public System.Action<Frame> StateCorruptionMutator;
 
-        public EcsSimulation(int maxEntities, int maxRollbackTicks = 10, int deltaTimeMs = 50, IKLogger logger = null, IDataAssetRegistryBuilder registryBuilder = null, IDataAssetRegistry assetRegistry = null)
+        public EcsSimulation(int maxEntities, int maxRollbackTicks = 10, int deltaTimeMs = 50, IKLogger logger = null, IDataAssetRegistryBuilder registryBuilder = null, IDataAssetRegistry assetRegistry = null, IReadOnlyDictionary<int, int> maxCountOverrides = null, IReadOnlyCollection<int> prunedComponentTypeIds = null)
         {
             if (assetRegistry != null && registryBuilder != null)
                 throw new ArgumentException("Cannot specify both assetRegistry and registryBuilder.");
+
+            // Freeze the component layout with the config maxCount overrides + reservation-pruning denylist
+            // before any Frame is built (the Frame ctor's no-arg EnsureLayoutComputed is then idempotent).
+            // Single seam for the process-global layout inputs.
+            ComponentStorageRegistry.EnsureLayoutComputed(maxEntities, maxCountOverrides, prunedComponentTypeIds);
 
             _logger = logger;
             if (assetRegistry != null)

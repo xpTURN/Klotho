@@ -102,6 +102,14 @@ namespace xpTURN.Klotho.Generator.Analyzers
             DiagnosticSeverity.Error,
             isEnabledByDefault: true);
 
+        public static readonly DiagnosticDescriptor SingletonMaxCountIgnored = new DiagnosticDescriptor(
+            "KLSG_ECS006",
+            "MaxCount ignored on singleton",
+            "[KlothoComponent] struct '{0}' is a [KlothoSingletonComponent] (slotCapacity=1); its MaxCount is ignored",
+            "KlothoGenerator.ECS",
+            DiagnosticSeverity.Warning,
+            isEnabledByDefault: true);
+
         // --- StructLayout + cross-runtime guard rules ---
 
         public static readonly DiagnosticDescriptor KlothoStructLayoutMissing = new DiagnosticDescriptor(

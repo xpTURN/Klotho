@@ -1,14 +1,49 @@
 {
   "Mode": "ServerDriven",
+
   "TickIntervalMs": 16,
-  "InputDelayTicks": 2,
-  "MaxRollbackTicks": 50,
-  "SyncCheckInterval": 20,
-  "UsePrediction": false,
   "MaxEntities": 256,
-  "SDInputLeadTicks": 2,
+  "CatchupMaxTicksPerFrame": 200,
+
+  "InputDelayTicks": 2,
+
+  "MaxRollbackTicks": 50,
+
+  "SyncCheckInterval": 20,
+  "ResyncMaxRetries": 3,
+  "DesyncThresholdForResync": 3,
+  "CorrectiveResetCooldownMs": 5000,
+  "CorrectiveResetMaxAttempts": 2,
+  "AutoAbortOnRecoveryExhausted": true,
+
+  "UsePrediction": false,
+
+  "HardToleranceMs": 0,
   "InputResendIntervalMs": 150,
   "MaxUnackedInputs": 30,
+  "ServerSnapshotRetentionTicks": 0,
+  "SDInputLeadTicks": 2,
+
   "EnableErrorCorrection": true,
-  "InterpolationDelayTicks": 2
+  "InterpolationDelayTicks": 2,
+
+  "QuorumMissDropTicks": 20,
+
+  "ReactiveWindowTicks": 80,
+  "ReactiveEscalateThreshold": 3,
+  "ReactiveStep": 4,
+  "ReactiveMax": 25,
+  "ServerPushGraceTicks": 40,
+  "ReactiveEscalateCooldownTicks": 80,
+  "ReactiveDeEscalateStableTicks": 160,
+
+  "RollbackBurstCount": 3,
+  "RollbackWindowTicks": 200,
+
+  "EventDispatchWarnMs": 5,
+  "TickDriftWarnMultiplier": 2,
+  "DiagnosticHistoryTicks": 60,
+  "ComponentMemoryPeakSampling": false,
+
+  "StageId": 0
 }

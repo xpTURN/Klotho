@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using xpTURN.Klotho.Network;
 
 namespace xpTURN.Klotho.Core
@@ -276,6 +277,15 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         int DiagnosticHistoryTicks { get; }
 
+        /// <summary>
+        /// Gate for the component-memory peak sampler (dev/measurement only). Default false (opt-in) —
+        /// distinct from <see cref="DiagnosticHistoryTicks"/> (desync hash history, opt-out). When true,
+        /// a <c>ComponentMemoryPeakSampler</c> may be wired to accumulate per-type high-water live counts
+        /// for component-storage sizing. Read-only, zero-GC on the steady path; off ⇒ no subscription.
+        /// Per-peer local diagnostic — not carried in <c>SimulationConfigMessage</c>.
+        /// </summary>
+        bool ComponentMemoryPeakSampling { get; }
+
         // --- Multi-stage ---
 
         /// <summary>
@@ -292,5 +302,40 @@ namespace xpTURN.Klotho.Core
         /// PlayerConfigMessage.ConfigData, at match scope). null/empty = none (no-regression default).
         /// </summary>
         byte[] MatchConfigData { get; }
+
+        // --- Component storage ---
+
+        /// <summary>
+        /// Per-component maxCount overrides (typeId → max concurrent instances) — caps dense/components
+        /// slots at <c>min(value, MaxEntities)</c>, layering in front of the build-baked
+        /// <see cref="ECS.KlothoComponentAttribute.MaxCount"/>. Empty = each type keeps its attribute cap.
+        /// Process-global layout input: must be uniform across all concurrent sessions/rooms in a process
+        /// (same trust model as <see cref="MaxEntities"/>). ServerDriven = server push via
+        /// SimulationConfigMessage; P2P = same asset. Immutable during a session.
+        /// </summary>
+        IReadOnlyDictionary<int, int> ComponentMaxCountOverrides { get; }
+
+        /// <summary>
+        /// Reservation-pruning denylist: component typeIds this session skips reserving.
+        /// null/empty = reserve every registered type (no pruning, current byte-identical behavior).
+        /// When non-empty, these typeIds (minus the engine <c>[KlothoCoreComponent]</c> base-set, which is
+        /// force-excluded by the registry) get NO storage layout — they are elided from heap/serialize/hash
+        /// entirely; everything else is reserved. Process-global layout input like
+        /// <see cref="ComponentMaxCountOverrides"/>: must be uniform across peers (build-fixed) and is carried
+        /// on the same wire (<c>SimulationConfigMessage</c>) so server-pushed clients prune the identical set.
+        /// Declare type-based (resolve via <c>ComponentStorageRegistry.GetTypeId&lt;T&gt;()</c>), never as raw
+        /// magic ints. Only list a type here when NO registered system touches it (a <c>Filter</c>/<c>Has</c>
+        /// opens its storage even at 0 instances — pruning a touched type throws at <c>GetStorage</c>).
+        /// </summary>
+        IReadOnlyCollection<int> PrunedComponentTypeIds { get; }
+
+        /// <summary>
+        /// Runtime-only prune-set injection: makes <see cref="PrunedComponentTypeIds"/> return
+        /// <paramref name="typeIds"/> WITHOUT mutating any authored/serialized backing (Unity .asset /
+        /// Godot .tres), so an editor/host code path can enable pruning for a session without persisting to
+        /// the saved config. null/empty = no pruning. Uniform across all implementations — the injection
+        /// site (e.g. a P2P host) calls this polymorphically on <see cref="ISimulationConfig"/>.
+        /// </summary>
+        void SetRuntimePrunedComponentTypeIds(int[] typeIds);
     }
 }

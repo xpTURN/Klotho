@@ -5,7 +5,7 @@ Klotho's simulation state lives in a compact, deterministic ECS. **Entities** ar
 > Audience: game developers building simulation logic on top of Klotho.
 > Goal: define components, write systems, query entities, and understand how the Frame snapshots/hashes for rollback.
 >
-> Related: [FEATURES.md](FEATURES.md) (ECS module index) · [Specification.md](Specification.md) §7 (formal state layout) · [DataAsset.md](DataAsset.md) (read-only shared config) · [HFSM.md](HFSM.md) (AI on top of ECS) · [Samples/Brawler.B.Systems.md](Samples/Brawler.B.Systems.md) (real systems)
+> Related: [FEATURES.md](FEATURES.md) (ECS module index) · [Specification.md](Specification.md) §7 (formal state layout) · [ECSMemoryOptimization.md](ECSMemoryOptimization.md) (frame-heap memory tuning) · [DataAsset.md](DataAsset.md) (read-only shared config) · [HFSM.md](HFSM.md) (AI on top of ECS) · [Samples/Brawler.B.Systems.md](Samples/Brawler.B.Systems.md) (real systems)
 
 ---
 
@@ -242,7 +242,26 @@ You normally hand this `sim` to `KlothoEngine` / the session driver rather than 
 
 ---
 
-## 9. Built-in Components & Systems
+## 9. Memory Footprint & Optimization
+
+`maxEntities` fixes the heap size up front (§8), and the `FrameRingBuffer` keeps N of those heaps — so **per-frame reservation is multiplied by the rollback-ring depth**. Each registered component type reserves a fixed heap slice regardless of how many instances are actually live:
+
+```text
+[ count(4) ][ sparse(maxEntities×4) ][ dense(slotCapacity×4) ][ components(slotCapacity×memSize) ]
+```
+
+`slotCapacity` defaults to `maxEntities`, so a few **large** components left at full capacity can dominate memory (a 700-byte nav-agent component with 8 live but 256 reserved slots is almost all waste). Two levers trim it:
+
+- **`maxCount` (slot cap)** — cap `slotCapacity` below `maxEntities` for types that never approach full population. Primary lever; high-`memSize` + low-utilization types recover the most.
+- **Pruning (unused-type removal)** — a **denylist** of types to skip reserving (everything not listed stays reserved — a fail-safe default), removing even the fixed `sparse` floor. Applies narrowly — a `Filter`/`Has` on the type keeps it reserved, so only list types no registered system touches.
+
+Both are **determinism inputs** (the layout must be identical on every peer), set before the first tick and propagated authority-peer → joining peers. Measure first with the `[Mem]` peak-sampling report, then cap the biggest offenders.
+
+> Full guide — heap formation, reading the `[Mem]` report, authoring `maxCount`, and when pruning pays off: **[ECSMemoryOptimization.md](ECSMemoryOptimization.md)**.
+
+---
+
+## 10. Built-in Components & Systems
 
 Klotho ships gameplay-agnostic building blocks you can use, extend, or ignore:
 
@@ -253,7 +272,7 @@ Klotho ships gameplay-agnostic building blocks you can use, extend, or ignore:
 
 ---
 
-## 10. Determinism Rules (must-read)
+## 11. Determinism Rules (must-read)
 
 These are the invariants that keep every peer's `CalculateHash()` identical:
 
@@ -267,7 +286,7 @@ When determinism breaks, the engine's recovery ladder (hash check → rollback �
 
 ---
 
-## 11. Debugging
+## 12. Debugging
 
 - **`EcsSimulation.LogComponentHashes(logger, label, level)`** / **`Frame.LogComponentHashes(...)`** — dumps per-typeId `count` + `hash` for the current frame. Diff a client log against the server's at a suspect tick to find which component type diverged.
 - **`Frame.SnapshotHashesToQueue()` / `FlushHashHistory(logger, dumpTick)`** (editor / dev builds) — keeps a rolling 60-tick history of per-type hashes and dumps it when a desync is detected, so you see the *first* tick that diverged, not just the symptom.
@@ -277,7 +296,7 @@ When determinism breaks, the engine's recovery ladder (hash check → rollback �
 
 ---
 
-## 12. Worked Example — a regen system end to end
+## 13. Worked Example — a regen system end to end
 
 ```csharp
 // 1) component
@@ -312,4 +331,4 @@ frame.Add(e, new HealthComponent { Current = 50, Max = 100 });
 frame.Add(e, new RegenComponent  { PerTick = 2 });
 ```
 
-That's the whole loop: define unmanaged components, write a system that filters and mutates them by `ref`, register it in a phase. The Frame snapshots and hashes itself — rollback and cross-peer determinism come for free as long as the [determinism rules](#10-determinism-rules-must-read) hold.
+That's the whole loop: define unmanaged components, write a system that filters and mutates them by `ref`, register it in a phase. The Frame snapshots and hashes itself — rollback and cross-peer determinism come for free as long as the [determinism rules](#11-determinism-rules-must-read) hold.

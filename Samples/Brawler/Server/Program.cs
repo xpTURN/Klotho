@@ -33,6 +33,7 @@ KlothoServerBootstrap.Initialize("Brawler");
 //                                   dev loopback constant, which only works when client and server
 //                                   share a machine — set the reachable LAN/public address for remote clients)
 bool isTest = args.Length > 0 && args[0] == "--test";
+bool memReport = args.Length > 0 && args[0] == "--memreport";
 bool multiRoom = args.Length > 0 && args[0] == "--multi";
 bool rttMetricsEnabled = Array.IndexOf(args, "--rtt-metrics") >= 0;
 
@@ -46,11 +47,31 @@ if (isTest)
     failures += SafeRunSuite("BrawlerMatchResultTests", BrawlerMatchResultTests.RunAll);
     return failures;
 }
+else if (memReport)
+    return RunMemReport(args);
 else if (multiRoom)
     RunMultiRoom(args, rttMetricsEnabled);
 else
     RunSingleRoom(args, rttMetricsEnabled);
 return 0;
+
+// --memreport: dump the full registered component set + per-frame reservation with NO maxCount caps,
+// without running a live match. Sizes the prune denylist — any registered type here that no registered
+// system touches is a prune candidate. live/peak read 0. Add --pruned to apply Brawler's denylist
+// (BrawlerPrunedComponents) and see the pruned layout (before/after comparison).
+static int RunMemReport(string[] argv)
+{
+    using var loggerFactory = CreateLoggerFactory(KLogLevel.Information);
+    var logger = loggerFactory.CreateLogger("MemReport");
+    var simConfig = SimulationConfigLoader.Load(argv, logger);
+    int[] pruned = Array.IndexOf(argv, "--pruned") >= 0 ? BrawlerPrunedComponents.ResolveTypeIds() : null;
+    ComponentStorageRegistry.EnsureLayoutComputed(simConfig.MaxEntities, null, pruned);
+    var frame = new Frame(simConfig.MaxEntities, logger);
+    int ringHeaps = simConfig.MaxRollbackTicks + 1;
+    var report = xpTURN.Klotho.ECS.Diagnostics.ComponentMemoryAnalyzer.Capture(frame, ringHeaps);
+    Console.WriteLine(report.ToText());
+    return 0;
+}
 
 static int SafeRunSuite(string name, Func<int> run)
 {
@@ -84,6 +105,11 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
 
     // Load config
     var simConfig = SimulationConfigLoader.Load(args, logger);
+    // Reservation-pruning denylist — always applied. Fail-safe: a denylist only ever prunes the
+    // types it explicitly lists — currently the single MovementComponent (the one registered type no
+    // Brawler system touches); every other peak=0 component is scanned by a registered engine system and
+    // so stays reserved. Add to that list to prune more; no gate needed.
+    simConfig.SetRuntimePrunedComponentTypeIds(BrawlerPrunedComponents.ResolveTypeIds());
     var sessionConfig = SessionConfigLoader.Load(args, logger);
 #if KLOTHO_FAULT_INJECTION
     xpTURN.Klotho.Diagnostics.FaultInjectionLoader.TryLoadAndApply(
@@ -236,6 +262,11 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
 
     // Load config
     var simConfig = SimulationConfigLoader.Load(args, logger);
+    // Reservation-pruning denylist — always applied. Fail-safe: a denylist only ever prunes the
+    // types it explicitly lists — currently the single MovementComponent (the one registered type no
+    // Brawler system touches); every other peak=0 component is scanned by a registered engine system and
+    // so stays reserved. Add to that list to prune more; no gate needed.
+    simConfig.SetRuntimePrunedComponentTypeIds(BrawlerPrunedComponents.ResolveTypeIds());
     var sessionConfig = SessionConfigLoader.Load(args, logger);
 #if KLOTHO_FAULT_INJECTION
     xpTURN.Klotho.Diagnostics.FaultInjectionLoader.TryLoadAndApply(

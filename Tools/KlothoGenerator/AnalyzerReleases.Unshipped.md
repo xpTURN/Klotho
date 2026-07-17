@@ -7,6 +7,7 @@ KLSG_ECS002 | KlothoGenerator.ECS | Error | Missing IComponent
 KLSG_ECS003 | KlothoGenerator.ECS | Error | Component not unmanaged
 KLSG_ECS004 | KlothoGenerator.ECS | Warning | Oversized component
 KLSG_ECS005 | KlothoGenerator.ECS | Error | Missing partial keyword
+KLSG_ECS006 | KlothoGenerator.ECS | Warning | MaxCount ignored on singleton component
 KLSG_DA001 | KlothoGenerator.DataAsset | Error | Missing partial keyword
 KLSG_DA002 | KlothoGenerator.DataAsset | Error | Missing IDataAsset
 KLSG_DA003 | KlothoGenerator.DataAsset | Error | Missing int constructor

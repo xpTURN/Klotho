@@ -214,6 +214,7 @@ Docs: [Docs/Samples/Brawler.md](Docs/Samples/Brawler.md)
 | [Docs/SimulationConfigGuide.md](Docs/SimulationConfigGuide.md) | SimulationConfig recommended-value guide (per genre / platform) |
 | [Docs/BaseLibraries.md](Docs/BaseLibraries.md) | List of base libraries used |
 | [Docs/ECS.md](Docs/ECS.md) | ECS guide (entities · components · systems · filters · Frame snapshot/hash · rollback) |
+| [Docs/ECSMemoryOptimization.md](Docs/ECSMemoryOptimization.md) | ECS memory optimization (frame-heap formation · runtime `[Mem]` analysis · per-component `maxCount` · unused-type pruning) |
 | [Docs/Serialization.md](Docs/Serialization.md) | Serialization & source generator (`SpanWriter/Reader` · `[KlothoComponent]`/`[KlothoSerializable]`/`[KlothoDataAsset]` codegen · supported types · diagnostics) |
 | [Docs/DeterministicMath.md](Docs/DeterministicMath.md) | Deterministic math (`FP64` 32.32 fixed-point · `FPVector*`/`FPQuaternion`/`FPMatrix` · trig · geometry · `DeterministicRandom`) |
 | [Docs/Replay.md](Docs/Replay.md) | Replay (record inputs · save/load · play/pause/seek/speed · determinism guarantees) |

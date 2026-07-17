@@ -9,6 +9,8 @@ namespace xpTURN.Klotho.Generator.Model
         public string FullTypeName { get; set; }
         public int ComponentTypeId { get; set; }
         public bool IsSingleton { get; set; }
+        public bool IsCore { get; set; }
+        public int MaxCount { get; set; }
         public List<ComponentFieldInfo> Fields { get; set; } = new List<ComponentFieldInfo>();
     }
 

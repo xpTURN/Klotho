@@ -244,7 +244,9 @@ namespace xpTURN.Klotho.Network
                 maxRollbackTicks: _config.SimulationMaxRollbackTicks,
                 deltaTimeMs: simConfig.TickIntervalMs,
                 logger: roomLogger,
-                assetRegistry: _config.AssetRegistry);
+                assetRegistry: _config.AssetRegistry,
+                maxCountOverrides: simConfig.ComponentMaxCountOverrides,
+                prunedComponentTypeIds: simConfig.PrunedComponentTypeIds);
             var callbacks = _config.CallbacksFactoryForMatch != null
                 ? _config.CallbacksFactoryForMatch(matchCtx, roomLogger)
                 : _config.CallbacksFactory(roomLogger);

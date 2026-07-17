@@ -4,7 +4,7 @@ using xpTURN.Klotho.Deterministic.Math;
 
 namespace Brawler
 {
-    [KlothoComponent(100)]
+    [KlothoComponent(100, MaxCount = 18)]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct CharacterComponent : IComponent
     {

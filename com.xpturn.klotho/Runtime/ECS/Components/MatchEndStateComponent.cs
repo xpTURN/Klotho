@@ -18,6 +18,7 @@ namespace xpTURN.Klotho.ECS
     // only the rare resync/restore backstop supplies a sentinel reason.
     [KlothoComponent(26)]
     [KlothoSingletonComponent]
+    [KlothoCoreComponent]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct MatchEndStateComponent : IComponent
     {

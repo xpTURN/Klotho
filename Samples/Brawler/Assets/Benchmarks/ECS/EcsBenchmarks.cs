@@ -3,6 +3,7 @@ using NUnit.Framework;
 using Unity.PerformanceTesting;
 using xpTURN.Klotho.Logging;
 using xpTURN.Klotho.ECS;
+using xpTURN.Klotho.ECS.Tests;   // DummyNonSingletonComponent — uncapped scale-fill (see SetUp)
 using Brawler;
 
 namespace xpTURN.Klotho.ECS.Benchmarks
@@ -53,7 +54,9 @@ namespace xpTURN.Klotho.ECS.Benchmarks
                 }
                 if (i < 60)
                 {
-                    _src.Add(e, new CharacterComponent { PlayerId = i });
+                    // Uncapped test component: the game components now carry a maxCount cap, so a
+                    // 60-instance scale fill must use a component without a production cap.
+                    _src.Add(e, new DummyNonSingletonComponent { Value = i });
                 }
             }
         }
@@ -136,10 +139,10 @@ namespace xpTURN.Klotho.ECS.Benchmarks
         [Test, Performance]
         public void Filter_MultiType_T1T2T3()
         {
-            // Health(100) ∩ Owner(100) ∩ Character(60) = 60 matches
+            // Health(100) ∩ Owner(100) ∩ DummyNonSingleton(60) = 60 matches
             Measure.Method(() =>
             {
-                var filter = _src.Filter<HealthComponent, OwnerComponent, CharacterComponent>();
+                var filter = _src.Filter<HealthComponent, OwnerComponent, DummyNonSingletonComponent>();
                 while (filter.Next(out var e))
                     _ = e.Index;
             })

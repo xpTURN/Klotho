@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 using xpTURN.Klotho.Core;
@@ -62,11 +63,52 @@ namespace xpTURN.Klotho
         // per-tick layered hash breakdown for local desync localization; 0 disables. Diagnostic-only, not
         // wire-propagated. Carries a P2P per-tick hash cost — set 0 to drop it in a shipped player build.
         [field: SerializeField] public int DiagnosticHistoryTicks { get; set; } = 60;
+        // Component-memory peak sampler gate (dev/measurement only). Default off (opt-in), distinct from
+        // DiagnosticHistoryTicks. Off ⇒ no subscription, zero cost. Per-peer local (not wire-propagated).
+        [field: SerializeField] public bool ComponentMemoryPeakSampling { get; set; } = false;
 
         // Multi-stage. StageId authorable (default single stage);
         // MatchConfigData is runtime-only (set by lobby/host at match start), not inspector-authored.
         [field: Header("Multi-stage")]
         [field: SerializeField] public int StageId { get; set; } = 0;
         public byte[] MatchConfigData { get; set; } = null;
+
+        // Component storage. Unity can't serialize Dictionary → author as a pair list.
+        // Process-global: must be identical across every session in the process (see ISimulationConfig).
+        [field: Header("Component storage (maxCount overrides)")]
+        [SerializeField] private ComponentMaxCountEntry[] _componentMaxCountOverrides = System.Array.Empty<ComponentMaxCountEntry>();
+
+        public IReadOnlyDictionary<int, int> ComponentMaxCountOverrides
+        {
+            get
+            {
+                var d = new Dictionary<int, int>();
+                if (_componentMaxCountOverrides != null)
+                    foreach (var e in _componentMaxCountOverrides)
+                        if (e.MaxCount > 0) d[e.TypeId] = e.MaxCount;
+                return d;
+            }
+        }
+
+        // Reservation-pruning denylist: component typeIds this session skips reserving. Empty = no
+        // pruning (reserve all). Process-global; carried on the same wire (SimulationConfigMessage).
+        [field: Header("Component storage (denylist / reservation pruning)")]
+        [SerializeField] private int[] _prunedComponentTypeIds = System.Array.Empty<int>();
+
+        // Runtime-only override (NOT serialized) — lets the P2P host inject a code-resolved denylist
+        // without mutating the .asset (Editor play mode would persist a serialized-field write, corrupting
+        // the saved setting — same reason MatchConfigData is runtime-only). Non-null wins over the array.
+        [System.NonSerialized] private int[] _runtimePrunedComponentTypeIds;
+
+        public void SetRuntimePrunedComponentTypeIds(int[] typeIds) => _runtimePrunedComponentTypeIds = typeIds;
+
+        public IReadOnlyCollection<int> PrunedComponentTypeIds => _runtimePrunedComponentTypeIds ?? _prunedComponentTypeIds;
+
+        [System.Serializable]
+        public struct ComponentMaxCountEntry
+        {
+            public int TypeId;
+            public int MaxCount;
+        }
     }
 }

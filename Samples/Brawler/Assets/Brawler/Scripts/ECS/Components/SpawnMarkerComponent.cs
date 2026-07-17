@@ -4,7 +4,7 @@ using xpTURN.Klotho.ECS;
 
 namespace Brawler
 {
-    [KlothoComponent(105)]
+    [KlothoComponent(105, MaxCount = 32)]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct SpawnMarkerComponent : IComponent
     {

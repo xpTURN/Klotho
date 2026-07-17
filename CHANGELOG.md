@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.6.0] - 2026-07-17
+
+### Component storage — sizing the ECS heap
+
+- **A component type can now cap how many instances it reserves, instead of every type sizing for the full entity budget.** Storage is laid out once and held for every frame the rollback ring retains, so a type that only ever holds a handful of instances but reserves for the whole entity count wastes that space on every retained frame. A `maxCount` caps a type's concurrent-instance slots, and the saving multiplies across the ring. It is authored two ways, combinable: a build-time default on the component (`[KlothoComponent(id, MaxCount = N)]`) as a conservative safe bound, and a per-type config override (`ISimulationConfig.ComponentMaxCountOverrides`) for game- or level-specific tuning that wins over the attribute. A type with neither reserves the full budget exactly as before. The cap only shrinks the reserved layout — it never enters the serialized state or the state hash — so a capped match is byte-identical to an uncapped one; and because the cap travels on the config wire, a server-pushed client and every peer size their heap identically. Exceeding a type's cap fails fast at the offending add (uniformly on every peer) rather than corrupting the heap, so a cap set too low surfaces immediately; singletons stay a single slot regardless.
+- **A game can now drop component types it never uses out of the reserved layout entirely.** A type no registered system ever touches still reserves its full per-frame footprint; listing it on a reservation denylist removes its storage layout completely — reclaiming the whole reservation, including the entity-indexed floor that a `maxCount` cap alone cannot shrink. The denylist names only the types to drop, so forgetting one merely reserves it (never a crash), and types are declared through the component registry rather than as raw ids. Engine-required types (transform, random seed, match-end state, and the like) are force-excluded, so a denylist can never accidentally strip a type the engine depends on. Reach for this sparingly: a type sitting at zero instances is not automatically removable, because a system that filters or checks for it opens its storage even at zero — and accessing a dropped type raises a clear error at a single chokepoint. Like the cap, the denylist is process-global and carried on the config wire, so server-pushed clients drop the identical set; an empty denylist is byte-identical to before.
+
+### Measuring before tuning
+
+- **A component-memory report shows where the ECS heap actually goes.** Per registered type it breaks down the reserved, live, and wasted bytes — per frame and multiplied across the rollback ring — with the totals that tell you which few types dominate, so caps are chosen from a measurement rather than a guess. An opt-in peak sampler accumulates each type's high-water live count over verified ticks — immune to prediction and rollback double-counting — and recommends a cap from the observed peak. The sampler is a development aid: off by default, allocation-free on the steady path when off, and per-peer local (it is not wire-propagated, so measure on the authoritative peer or a replay).
+
+### Breaking changes
+
+- **`ISimulationConfig` gained `ComponentMaxCountOverrides`, `PrunedComponentTypeIds`, and `ComponentMemoryPeakSampling` (all get-only) plus `SetRuntimePrunedComponentTypeIds(int[])`.** A custom implementation must add them; the built-in `SimulationConfig` and the Unity and Godot config assets already carry them, so only hand-rolled implementers are affected.
+
+### API additions
+
+- **`KlothoComponentAttribute` gained an optional `MaxCount`, and a new `[KlothoCoreComponent]` marks the engine-required types a denylist can never drop.** Existing components are unaffected — no `MaxCount` means the full entity budget as before.
+- **`EcsSimulation`'s constructor gained optional `maxCountOverrides` and `prunedComponentTypeIds` parameters** (both default to none, i.e. unchanged), and **`Frame` gained `GetLiveCount(int typeId)`** — a read-only live count by type id used by the memory diagnostics.
+- **The config wire (`SimulationConfigMessage`) now carries the per-type caps and the reservation denylist**, so a server pushes them to its clients; the fields are appended, but the reference lobby, dedicated server, and clients should run matching versions so every peer sizes its heap identically.
+
+### Samples
+
+- **Brawler caps its components and prunes one it never uses.** Its gameplay components carry conservative `MaxCount` bounds, its config trims the engine's core components to the game's actual counts, and it drops the single registered component no Brawler system touches — a worked before/after of both levers. The dedicated server gained a `--memreport` mode that dumps the full registered set and its per-frame reservation without running a match, for sizing the caps.
+
+> Guide: [ECS Memory Optimization](Docs/ECSMemoryOptimization.md) — measuring the heap, choosing caps, and when (not) to prune.
+
 ## [0.5.7] - 2026-07-14
 
 ### Desync diagnostics
