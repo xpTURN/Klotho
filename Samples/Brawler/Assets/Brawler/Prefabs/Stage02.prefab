@@ -305,6 +305,14 @@ PrefabInstance:
     serializedVersion: 3
     m_TransformParent: {fileID: 5946013468908198369}
     m_Modifications:
+    - target: {fileID: 1925487713877111961, guid: ff0af475bf7c84336ab5f5b951e0bd60, type: 3}
+      propertyPath: m_TagString
+      value: FPStatic
+      objectReference: {fileID: 0}
+    - target: {fileID: 2059962159865272206, guid: ff0af475bf7c84336ab5f5b951e0bd60, type: 3}
+      propertyPath: m_TagString
+      value: FPStatic
+      objectReference: {fileID: 0}
     - target: {fileID: 5872700144401724252, guid: ff0af475bf7c84336ab5f5b951e0bd60, type: 3}
       propertyPath: m_LocalPosition.x
       value: 0

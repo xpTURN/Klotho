@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.1] - 2026-07-21
+
+### Profiling the simulation tick
+
+- **A per-system profiler now shows where each tick's CPU and allocation actually go.** Per registered system it accumulates the execution count, the average and worst-case (peak) execution time, and the total and worst-case per-tick heap allocation — so the systems that dominate the frame budget, or leak garbage every tick, are named from a measurement rather than a guess. The peak column surfaces the occasional multi-millisecond hitch that an average hides, and the allocation column is a standing check on the "no per-tick garbage" rule: a system that should be allocation-free but isn't shows up immediately. It counts every execution, including re-simulated rollback ticks, because those are real cost. The profiler is a development aid: off by default, allocation-free on the steady path when off (the timing and allocation probes are not even called), and per-peer local — the flag is not wire-propagated, so measure on the authoritative peer or a replay. Like the component-memory report, it prints once at match end, on the same log channel.
+- **Warmup executions are kept out of the steady figures.** A system's first ticks pay one-time costs — JIT, lazy initialization, buffer growth — that would otherwise make a genuinely clean system look like it allocates forever. Each system's early executions fold into a separate warmup bucket, so the reported average, peak, and steady allocation reflect real gameplay while the warmup figure stays visible rather than discarded. A genuine mid- or late-match one-off (a match-end event, say) correctly stays in the steady column, since only the opening ticks are set aside.
+
+### Runtime allocation
+
+- **The physics broadphase no longer allocates on every tick.** It ordered its collision-pair lists with the standard library's `List.Sort(IComparer)` — which boxed the value-type comparator at the call site and, inside the sort, had the runtime build a throwaway `Comparison` delegate from the comparer on every call — so each of the three sort sites (the spatial-grid pairs, the dynamic-vs-static pairs, and the trigger pairs) leaked garbage every tick a match had moving bodies. The sorts now use an allocation-free in-place routine that keeps O(n log n) and produces the identical ordering, so the change touches only the garbage, never the simulation result — it is byte-identical and determinism-neutral. Measured on the Brawler sample, the physics system's per-tick allocation dropped from ~160 bytes to zero.
+
+### Breaking changes
+
+- **`ISimulationConfig` gained `SystemPerfMonitoring` (get-only).** A custom implementation must add it; the built-in `SimulationConfig` and the Unity and Godot config assets already carry it, so only hand-rolled implementers are affected. It is opt-in (default off) and per-peer local — not part of the config wire.
+
+### Samples
+
+- **Brawler's stage floors no longer drop a shielding player through the map.** Two floor tiles were missing the static-collider tag the exporter keys on, so they were silently left out of the exported physics data — a character that walked onto them with its trap knockback suppressed (while shielding) found no ground beneath it and fell to its death. The tiles are tagged and re-exported.
+
 ## [0.6.0] - 2026-07-17
 
 ### Component storage — sizing the ECS heap

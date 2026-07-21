@@ -66,6 +66,9 @@ namespace xpTURN.Klotho
         // Component-memory peak sampler gate (dev/measurement only). Default off (opt-in), distinct from
         // DiagnosticHistoryTicks. Off ⇒ no subscription, zero cost. Per-peer local (not wire-propagated).
         [field: SerializeField] public bool ComponentMemoryPeakSampling { get; set; } = false;
+        // Per-system perf monitor gate (dev/measurement only). Default off (opt-in). Off ⇒ no
+        // Stopwatch/GC calls, zero cost. Per-peer local (not wire-propagated). Dumped at engine Stop.
+        [field: SerializeField] public bool SystemPerfMonitoring { get; set; } = false;
 
         // Multi-stage. StageId authorable (default single stage);
         // MatchConfigData is runtime-only (set by lobby/host at match start), not inspector-authored.

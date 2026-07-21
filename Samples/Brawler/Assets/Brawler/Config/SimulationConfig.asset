@@ -46,6 +46,7 @@ MonoBehaviour:
   <TickDriftWarnMultiplier>k__BackingField: 2
   <DiagnosticHistoryTicks>k__BackingField: 60
   <ComponentMemoryPeakSampling>k__BackingField: 0
+  <SystemPerfMonitoring>k__BackingField: 0
   <StageId>k__BackingField: 0
   _componentMaxCountOverrides:
   - TypeId: 1
@@ -62,4 +63,4 @@ MonoBehaviour:
     MaxCount: 20
   - TypeId: 200
     MaxCount: 12
-  _prunedComponentTypeIds: []
+  _prunedComponentTypeIds: 

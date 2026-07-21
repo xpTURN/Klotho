@@ -226,6 +226,11 @@ namespace xpTURN.Klotho.Core
         // internal so unit tests can assert arming/peaks via InternalsVisibleTo(xpTURN.Klotho.Tests).
         internal xpTURN.Klotho.ECS.Diagnostics.ComponentMemoryPeakSampler _memSampler;
 
+        // Idempotency guard for the per-system perf dump at Stop. Unlike _memSampler (nulled after
+        // dump), the perf monitor is owned by EcsSimulation/SystemRunner and its config gate stays
+        // true after Stop, so a flag is needed to keep a double Stop from re-dumping.
+        private bool _sysPerfDumped;
+
         // Reusable lists to avoid GC.
         private readonly List<ICommand> _tickCommandsCache = new List<ICommand>();
         private readonly List<ICommand> _previousCommandsCache = new List<ICommand>();
@@ -600,6 +605,21 @@ namespace xpTURN.Klotho.Core
                 _memSampler = new xpTURN.Klotho.ECS.Diagnostics.ComponentMemoryPeakSampler(this, ecsMem);
         }
 
+        // Arm the per-system perf monitor when opted in. Called from BOTH Initialize bodies (network +
+        // network-less) so replay/spectator are covered too. No engine-side state to hold — the monitor
+        // is owned by SystemRunner (only the Stop-dump idempotency flag lives here); no Dispose needed.
+        // Determinism-neutral (records only into its own struct array); dumped at Stop.
+        // First N executions/system folded into the perf monitor's warmup buckets (excluded from the
+        // steady avg/peak/sum) so first-tick JIT, lazy init, and pool/list growth don't muddy the
+        // allocation-regression signal. ~120 ticks ≈ 3s at 40Hz — well past those one-time costs.
+        private const int SystemPerfWarmupExecutions = 120;
+
+        private void ArmSystemPerfMonitor()
+        {
+            if (_simConfig.SystemPerfMonitoring && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSys)
+                ecsSys.EnableSystemPerfMonitor(SystemPerfWarmupExecutions);
+        }
+
         public void Initialize(ISimulation simulation, IKlothoNetworkService networkService, IKLogger logger)
         {
             ThrowIfAlreadyInitialized();
@@ -715,6 +735,7 @@ namespace xpTURN.Klotho.Core
             }
 
             ArmComponentMemorySampler();
+            ArmSystemPerfMonitor();
 
             // The probe rides on top of the diagnostic hash-history ring: it serves answers from it and captures it at
             // detection. A service without the probe surface leaves this unwired and diagnosis stays local.
@@ -781,6 +802,7 @@ namespace xpTURN.Klotho.Core
             _simulation.Initialize();
 
             ArmComponentMemorySampler();
+            ArmSystemPerfMonitor();
 
             _eventBuffer = new EventBuffer(SnapshotCapacity, _logger);
             _eventCollector = new EventCollector();
@@ -1501,6 +1523,18 @@ namespace xpTURN.Klotho.Core
                 }
                 _memSampler.Dispose();
                 _memSampler = null;
+            }
+
+            // Sibling to the memreport dump: per-system perf profile (time + per-tick alloc, incl. resim).
+            // Guarded by _sysPerfDumped (the config gate stays true after Stop) so a double Stop is
+            // idempotent. Monitor is owned by SystemRunner — nothing to dispose here.
+            if (!_sysPerfDumped && _simConfig.SystemPerfMonitoring
+                && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsPerf)
+            {
+                _sysPerfDumped = true;
+                var log = ecsPerf.AppendSystemPerfLog();
+                if (log != null)
+                    _logger?.KLog(KLogLevel.Information, $"[SysPerf] per-system profile (incl. resim ticks):\n{log}");
             }
 
             if (_networkService != null)

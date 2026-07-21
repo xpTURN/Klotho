@@ -169,6 +169,19 @@ namespace xpTURN.Klotho.ECS
         public int GetSystems<T>(List<T> buffer) where T : class
             => _systemRunner.FindAll(buffer);
 
+        /// <summary>
+        /// Enables the per-system perf monitor (opt-in diagnostic; forwards to SystemRunner).
+        /// Determinism-neutral, off by default. Armed by KlothoEngine from the config gate.
+        /// </summary>
+        public void EnableSystemPerfMonitor(int warmupExecutions = 0)
+            => _systemRunner.EnablePerfMonitor(warmupExecutions);
+
+        /// <summary>
+        /// Per-system perf profile as text, or null when the monitor is off (caller guards on null).
+        /// Only-allocating path; called once at engine Stop.
+        /// </summary>
+        public string AppendSystemPerfLog() => _systemRunner.PerfMonitor?.ToText();
+
         public void Initialize()
         {
             _frame.Clear();

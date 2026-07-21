@@ -137,6 +137,9 @@ namespace xpTURN.Klotho.Core
         /// <inheritdoc />
         public bool ComponentMemoryPeakSampling { get; set; } = false;
 
+        /// <inheritdoc />
+        public bool SystemPerfMonitoring { get; set; } = false;
+
         // --- Multi-stage ---
 
         /// <inheritdoc />

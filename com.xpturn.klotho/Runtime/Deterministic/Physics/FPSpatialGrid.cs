@@ -17,6 +17,43 @@ namespace xpTURN.Klotho.Deterministic.Physics
             int c = a.Item1.CompareTo(b.Item1);
             return c != 0 ? c : a.Item2.CompareTo(b.Item2);
         }
+
+        // Allocation-free, deterministic in-place ascending sort for the small broadphase pair lists.
+        // List<T>.Sort(IComparer<T>) is avoided on purpose: passing this struct boxes it at the call
+        // site, and the runtime additionally allocates a Comparison<T> delegate (comparer.Compare)
+        // per sort with more than one element. Span<T>.Sort with a struct comparer would avoid both
+        // but needs CollectionsMarshal (net5+), which is not on the Unity netstandard2.1 profile.
+        // Heap sort keeps this O(n log n) with zero allocation; the total ordering above makes the
+        // result deterministic across peers (equal pairs collapse in the callers' dedup pass).
+        public static void Sort(List<(int, int)> list)
+        {
+            int n = list.Count;
+            if (n < 2) return;
+
+            for (int i = n / 2 - 1; i >= 0; i--)
+                SiftDown(list, i, n);
+            for (int end = n - 1; end > 0; end--)
+            {
+                (list[0], list[end]) = (list[end], list[0]);
+                SiftDown(list, 0, end);
+            }
+        }
+
+        private static void SiftDown(List<(int, int)> list, int root, int count)
+        {
+            while (true)
+            {
+                int child = 2 * root + 1;
+                if (child >= count) break;
+                if (child + 1 < count && Less(list[child], list[child + 1])) child++;
+                if (!Less(list[root], list[child])) break;
+                (list[root], list[child]) = (list[child], list[root]);
+                root = child;
+            }
+        }
+
+        private static bool Less((int, int) a, (int, int) b)
+            => a.Item1 != b.Item1 ? a.Item1 < b.Item1 : a.Item2 < b.Item2;
     }
 
     /// <summary>
@@ -28,8 +65,6 @@ namespace xpTURN.Klotho.Deterministic.Physics
         FP64 inverseCellSize;
         Dictionary<(int, int, int), List<int>> cells;
         List<(int, int)> pairs;
-
-        static readonly IntPairComparer PairComparer = default;
 
         public FPSpatialGrid(FP64 cellSize)
         {
@@ -90,7 +125,7 @@ namespace xpTURN.Klotho.Deterministic.Physics
                     }
             }
 
-            pairs.Sort(PairComparer);
+            IntPairComparer.Sort(pairs);
 
             for (int i = 0; i < pairs.Count; i++)
             {

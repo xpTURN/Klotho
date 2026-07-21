@@ -286,6 +286,13 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         bool ComponentMemoryPeakSampling { get; }
 
+        /// <summary>
+        /// Opt-in per-system execution profiler (execution time + per-tick heap allocation).
+        /// Per-peer local (NOT part of SimulationConfigMessage); diagnostic only — never affects
+        /// simulation state, hash, or wire. The profile is dumped at engine Stop.
+        /// </summary>
+        bool SystemPerfMonitoring { get; }
+
         // --- Multi-stage ---
 
         /// <summary>

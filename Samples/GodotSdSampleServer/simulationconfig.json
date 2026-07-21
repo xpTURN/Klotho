@@ -44,6 +44,10 @@
   "TickDriftWarnMultiplier": 2,
   "DiagnosticHistoryTicks": 60,
   "ComponentMemoryPeakSampling": false,
+  "SystemPerfMonitoring": false,
 
-  "StageId": 0
+  "StageId": 0,
+  
+  "ComponentMaxCountOverrides": {
+  }
 }

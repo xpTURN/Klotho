@@ -31,8 +31,6 @@ namespace xpTURN.Klotho.Deterministic.Physics
         FPContact[] _meshContactBuffer;
         bool _skipStaticGroundResponse;
 
-        static readonly IntPairComparer PairComparer = default;
-
         public FPPhysicsWorld(FP64 cellSize)
         {
             _grid = new FPSpatialGrid(cellSize);
@@ -360,7 +358,7 @@ namespace xpTURN.Klotho.Deterministic.Physics
 
             if (buildStatic)
             {
-                _staticPairs.Sort(PairComparer);
+                IntPairComparer.Sort(_staticPairs);
 
                 int write = 0;
                 for (int i = 0; i < _staticPairs.Count; i++)
@@ -531,7 +529,7 @@ namespace xpTURN.Klotho.Deterministic.Physics
             }
 
             // 5. Trigger callbacks
-            _triggerPairs.Sort(PairComparer);
+            IntPairComparer.Sort(_triggerPairs);
             _triggerSystem.ProcessCallbacks(_triggerPairs, onTriggerEnter, onTriggerStay, onTriggerExit);
 
             // 6. Collision response

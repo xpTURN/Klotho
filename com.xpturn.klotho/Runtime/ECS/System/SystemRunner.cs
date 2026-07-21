@@ -19,6 +19,18 @@ namespace xpTURN.Klotho.ECS
         private bool _dirty = true;
         private int _nextOrder;
 
+        // --- Per-system perf monitor (opt-in, off by default; determinism-neutral, zero-cost when off) ---
+        // Index convention: stat[0] is the builtin SavePrevTransforms pseudo-entry and stat[1..] are the
+        // ISystem entries in _sorted order. RebindPerf and the instrumentation loop both walk _sorted
+        // with the same `is ISystem` filter, so these consts are the single source of that mapping and
+        // keep the two loops from drifting out of alignment.
+        private const int BuiltinPrevXformIndex = 0;
+        private const int FirstSystemPerfIndex  = 1;
+
+        private Diagnostics.SystemPerfMonitor _perfMonitor;      // null = off (hard gate)
+        private bool _perfBindDirty;                             // rebind on next RunUpdateSystems
+        private string[] _perfNames = Array.Empty<string>();    // RebindPerf reuse buffer
+
         public void AddSystem(object system, SystemPhase phase)
         {
             if (system == null)
@@ -44,6 +56,9 @@ namespace xpTURN.Klotho.ECS
                 return cmp != 0 ? cmp : a.Order.CompareTo(b.Order);
             });
             _dirty = false;
+            // AddSystem sets _dirty only; the perf monitor must rebind after a re-sort or its
+            // index-parallel stats misalign. This is the only re-sort site.
+            if (_perfMonitor != null) _perfBindDirty = true;
         }
 
         /// <summary>
@@ -107,12 +122,77 @@ namespace xpTURN.Klotho.ECS
             Debug.Assert((int)SystemPhase.PreUpdate == 0,
                 "SystemPhase.PreUpdate must remain the first enum value (0). " +
                 "If the enum order changes, move SaveAllPreviousTransforms accordingly.");
+
+            if (_perfMonitor == null)
+            {
+                // Default path — no measurement, no Stopwatch/GC calls at all (hard gate).
+                SaveAllPreviousTransforms(ref frame);
+                for (int i = 0; i < _sorted.Length; i++)
+                {
+                    if (_sorted[i].System is ISystem sys)
+                        sys.Update(ref frame);
+                }
+                return;
+            }
+
+            // Instrumented path. Capture mem first, then time, so the GetAllocatedBytesForCurrentThread
+            // call cost is not counted in the timing window (GetTimestamp does not allocate).
+            if (_perfBindDirty) RebindPerf();
+
+            long m0 = GC.GetAllocatedBytesForCurrentThread();
+            long t0 = Stopwatch.GetTimestamp();
             SaveAllPreviousTransforms(ref frame);
+            long t1 = Stopwatch.GetTimestamp();
+            _perfMonitor.Record(BuiltinPrevXformIndex,
+                t1 - t0, GC.GetAllocatedBytesForCurrentThread() - m0);
+
+            int slot = FirstSystemPerfIndex;
             for (int i = 0; i < _sorted.Length; i++)
             {
                 if (_sorted[i].System is ISystem sys)
+                {
+                    long sm0 = GC.GetAllocatedBytesForCurrentThread();
+                    long st0 = Stopwatch.GetTimestamp();
                     sys.Update(ref frame);
+                    long st1 = Stopwatch.GetTimestamp();
+                    _perfMonitor.Record(slot++, st1 - st0,
+                        GC.GetAllocatedBytesForCurrentThread() - sm0);
+                }
             }
+        }
+
+        /// <summary>
+        /// Enables the per-system perf monitor (opt-in diagnostic). Idempotent within a session:
+        /// the first RunUpdateSystems binds the sorted-system name list. Determinism-neutral —
+        /// records only into the monitor's own struct array.
+        /// </summary>
+        public void EnablePerfMonitor(int warmupExecutions = 0)
+        {
+            _perfMonitor ??= new Diagnostics.SystemPerfMonitor();
+            _perfMonitor.WarmupExecutions = warmupExecutions;
+            _perfBindDirty = true;
+        }
+
+        /// <summary>The perf monitor, or null when the diagnostic is off.</summary>
+        public Diagnostics.SystemPerfMonitor PerfMonitor => _perfMonitor;
+
+        // Rebuild the monitor's name list from the current _sorted order (builtin entry first, then
+        // ISystem entries). Called on enable and after every re-sort. The _perfNames buffer is reused;
+        // Type.Name still allocates, so this is a rare-path (not steady-state) allocation.
+        private void RebindPerf()
+        {
+            int need = 1;   // builtin
+            for (int i = 0; i < _sorted.Length; i++)
+                if (_sorted[i].System is ISystem) need++;
+            if (_perfNames.Length < need) _perfNames = new string[need];
+
+            _perfNames[BuiltinPrevXformIndex] = "(builtin) SavePrevTransforms";
+            int slot = FirstSystemPerfIndex;
+            for (int i = 0; i < _sorted.Length; i++)
+                if (_sorted[i].System is ISystem s) _perfNames[slot++] = s.GetType().Name;
+
+            _perfMonitor.Bind(new ReadOnlySpan<string>(_perfNames, 0, slot));
+            _perfBindDirty = false;
         }
 
         private static void SaveAllPreviousTransforms(ref Frame frame)
