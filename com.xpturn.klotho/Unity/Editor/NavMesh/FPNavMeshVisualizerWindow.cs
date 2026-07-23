@@ -333,6 +333,10 @@ namespace xpTURN.Klotho.Editor
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.BeginHorizontal();
+            _overlay.ShowObstacleRings = EditorGUILayout.ToggleLeft("Obstacle Rings", _overlay.ShowObstacleRings, GUILayout.Width(120));
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
             _overlay.ShowTriangleIndices = EditorGUILayout.ToggleLeft("Tri Indices", _overlay.ShowTriangleIndices, GUILayout.Width(100));
             _overlay.ShowTriangleCenters = EditorGUILayout.ToggleLeft("Centers", _overlay.ShowTriangleCenters, GUILayout.Width(100));
             EditorGUILayout.EndHorizontal();
@@ -474,6 +478,12 @@ namespace xpTURN.Klotho.Editor
             DrawLabeledFloat("Agent Radius", ref _agentSim.DefaultRadius);
             DrawLabeledFloat("Accel", ref _agentSim.DefaultAcceleration);
             DrawLabeledToggle("Avoidance", ref _agentSim.EnableAvoidance);
+            // Bake inset carried by the loaded mesh boundary (R_sim = R_bake convention → set to
+            // the bake Agent Radius; 0 = uncorrected double clearance). Applied live.
+            float obstInset = _agentSim.ObstacleRadiusInset;
+            DrawLabeledFloat("Obst Inset", ref obstInset);
+            if (!Mathf.Approximately(obstInset, _agentSim.ObstacleRadiusInset))
+                _agentSim.SetObstacleRadiusInset(obstInset);
             EditorGUI.indentLevel = prevIndent;
 
             // Interaction mode

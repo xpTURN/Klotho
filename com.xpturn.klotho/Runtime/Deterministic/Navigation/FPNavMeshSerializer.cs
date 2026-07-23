@@ -11,7 +11,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// </summary>
     public static class FPNavMeshSerializer
     {
-        private const int VERSION = 2;
+        private const int VERSION = 3;
 
         // FPNavMeshTriangle: int(4)*12 + FPVector2(16) + FP64(8) + int(4) + FP64(8) + bool(1) + FP64*3(24) = 109 bytes
         // (+24 for minY, maxY, centerY added in VERSION 2)
@@ -24,11 +24,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // version(4) + vertCount(4) + vertices + triCount(4) + triangles
             // + boundsXZ(32) + cellCount(4) + cells + gridTriCount(4) + gridTris
             // + gridWidth(4) + gridHeight(4) + gridCellSize(8) + gridOrigin(16)
+            // + bake settings block(32 = radius/slopeDeg/height/climb, VERSION 3)
             return 4 + 4 + navMesh.Vertices.Length * 24
                 + 4 + navMesh.Triangles.Length * TRIANGLE_SIZE
                 + 32
                 + 4 + navMesh.GridCells.Length * 4
                 + 4 + navMesh.GridTriangles.Length * 4
+                + 32
                 + 32;
         }
 
@@ -66,6 +68,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             writer.WriteInt32(navMesh.GridHeight);
             writer.WriteFP(navMesh.GridCellSize);
             writer.WriteFP(navMesh.GridOrigin);
+
+            // Bake settings block (VERSION 3)
+            writer.WriteFP(navMesh.BakeAgentRadius);
+            writer.WriteFP(navMesh.BakeMaxSlopeDeg);
+            writer.WriteFP(navMesh.BakeAgentHeight);
+            writer.WriteFP(navMesh.BakeAgentClimb);
         }
 
         public static FPNavMesh Deserialize(string path)
@@ -123,11 +131,18 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FP64 gridCellSize = reader.ReadFP64();
             FPVector2 gridOrigin = reader.ReadFPVector2();
 
+            // Bake settings block (VERSION 3)
+            FP64 bakeAgentRadius = reader.ReadFP64();
+            FP64 bakeMaxSlopeDeg = reader.ReadFP64();
+            FP64 bakeAgentHeight = reader.ReadFP64();
+            FP64 bakeAgentClimb = reader.ReadFP64();
+
             return new FPNavMesh(
                 vertices, triangles, bounds,
                 gridCells, gridTriangles,
                 gridWidth, gridHeight,
-                gridCellSize, gridOrigin
+                gridCellSize, gridOrigin,
+                bakeAgentRadius, bakeMaxSlopeDeg, bakeAgentHeight, bakeAgentClimb
             );
         }
 
@@ -184,7 +199,11 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             sb.AppendLine($"  \"gridWidth\": {navMesh.GridWidth},");
             sb.AppendLine($"  \"gridHeight\": {navMesh.GridHeight},");
             sb.AppendLine($"  \"gridCellSize\": {navMesh.GridCellSize.ToFloat()},");
-            sb.AppendLine($"  \"gridOrigin\": [{navMesh.GridOrigin.x.ToFloat()},{navMesh.GridOrigin.y.ToFloat()}]");
+            sb.AppendLine($"  \"gridOrigin\": [{navMesh.GridOrigin.x.ToFloat()},{navMesh.GridOrigin.y.ToFloat()}],");
+            sb.AppendLine($"  \"bakeAgentRadius\": {navMesh.BakeAgentRadius.ToFloat()},");
+            sb.AppendLine($"  \"bakeMaxSlopeDeg\": {navMesh.BakeMaxSlopeDeg.ToFloat()},");
+            sb.AppendLine($"  \"bakeAgentHeight\": {navMesh.BakeAgentHeight.ToFloat()},");
+            sb.AppendLine($"  \"bakeAgentClimb\": {navMesh.BakeAgentClimb.ToFloat()}");
 
             sb.Append('}');
             return sb.ToString();

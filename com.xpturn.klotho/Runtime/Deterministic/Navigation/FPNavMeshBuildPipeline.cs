@@ -36,7 +36,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <param name="logError">Optional error sink (engine console). Null = silent.</param>
         public static FPNavMesh Build(
             FPVector3[] vertices, int[] indices, int[] areas, double cellSize,
-            Action<string> log = null, Action<string> logError = null)
+            Action<string> log = null, Action<string> logError = null,
+            double bakeAgentRadius = 0, double bakeMaxSlopeDeg = 0,
+            double bakeAgentHeight = 0, double bakeAgentClimb = 0)
         {
             // 1. Remove degenerate triangles (shrink indices + areas together)
             RemoveDegenerateTriangles(vertices, ref indices, ref areas, DEGENERATE_AREA_EPSILON);
@@ -104,7 +106,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             return new FPNavMesh(
                 vertices, triangles, boundsXZ,
                 gridCells, gridTriangles,
-                gridWidth, gridHeight, fpCellSize, gridOrigin);
+                gridWidth, gridHeight, fpCellSize, gridOrigin,
+                FP64.FromDouble(bakeAgentRadius), FP64.FromDouble(bakeMaxSlopeDeg),
+                FP64.FromDouble(bakeAgentHeight), FP64.FromDouble(bakeAgentClimb));
         }
 
         #region Degenerate triangle removal

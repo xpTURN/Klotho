@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>xpTURN.Klotho.Runtime.Tests</AssemblyName>
+    <RootNamespace>xpTURN.Klotho.Runtime.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <!-- NUnit 3.x: matches the classic-assert API (Assert.AreEqual/IsTrue/…) the moved Unity Test
+         Runner tests were written against. NUnit 4 removed those from Assert, so 3.x keeps the move
+         zero-conversion. -->
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pure-logic tests moved out of the Brawler Unity Test Runner (xpTURN.Klotho.Tests asmdef).
+         Compiled against the Server~ mirror of the Runtime assembly so they run under `dotnet test`
+         without the Unity editor. Runtime's AssemblyInfo.cs lists this assembly in InternalsVisibleTo. -->
+    <ProjectReference Include="../../com.xpturn.klotho/Server~/xpTURN.Klotho.Runtime/xpTURN.Klotho.Runtime.csproj" />
+  </ItemGroup>
+
+  <!-- KlothoGenerator source generator: some tests declare their own [KlothoComponent] partial structs
+       and rely on it to emit the IComponent members. In Unity the generator runs on the test asmdef;
+       analyzers do not flow through ProjectReference, so it must be wired in explicitly here too. -->
+  <ItemGroup>
+    <Analyzer Include="../../com.xpturn.klotho/Plugins/Analyzers/KlothoGenerator.dll" />
+  </ItemGroup>
+</Project>

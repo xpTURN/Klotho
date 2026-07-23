@@ -23,6 +23,32 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private readonly int[] _visitedBuffer = new int[VISITED_BUFFER_SIZE];
         private readonly int[] _corridorBuffer = new int[NavAgentComponent.MAX_CORRIDOR];
 
+        // --- Graph-local obstacle query (BFS here, reusing the navmesh topology directly) ---
+        // Forward triangle->segment CSR built alongside LoadObstacles (segment index aligns with
+        // FPNavAvoidance._obstacles). null until LoadNavMeshObstacles runs on a navmesh.
+        private int[] _triSegStart;   // CSR offsets, length triCount+1
+        private int[] _triSegList;    // segment indices grouped by owner triangle
+        // Generation of the avoidance obstacle load captured when the CSR was built, used as a
+        // desync guard: if the avoidance is re-loaded out from under us, the CSR is stale -> fall back.
+        private int _obstacleLoadGenerationCache = -1;
+
+        // BFS buffers (GC-0, generation-stamped — same pattern as FPNavMeshQuery.MoveAlongSurface).
+        // Frontier is a monotone-tail queue, so the cap equals the visited bound. Sized for horizon
+        // coverage (NOT copied from MOVE_MAX_QUEUE, which is a single-tick move size).
+        private const int BFS_FRONTIER_CAP = 256;
+        private int[] _bfsStamp;      // length triCount, generation stamp
+        private int _bfsGeneration;
+        private readonly int[] _bfsFrontier = new int[BFS_FRONTIER_CAP];
+        // ×3 = (max 3 boundary edges per triangle) × the frontier/visited cap: candCount is bounded by
+        // 3·BFS_FRONTIER_CAP == this length, so candidate collection can never truncate and needs no
+        // overflow counter (unlike the frontier). Keep this coupling — shrinking it turns the
+        // `candCount < _candidateSegs.Length` guard below into a silent, undiagnosed coverage cliff.
+        private readonly int[] _candidateSegs = new int[BFS_FRONTIER_CAP * 3];
+        private int _bfsFrontierOverflowCount;
+
+        /// <summary>Diagnostic: times the BFS frontier cap truncated a query (coverage cliff).</summary>
+        public int DebugBfsFrontierOverflowCount => _bfsFrontierOverflowCount;
+
         /// <summary>
         /// Upper bound for the position-correction pass buffers. entityCount beyond this is still
         /// moved by ProcessMovement but not collision-resolved (guarded, no overflow). Callers should
@@ -57,6 +83,18 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         public FP64 MultiFloorYThreshold = FP64.FromDouble(2.0);
 
         /// <summary>
+        /// Graph-local obstacle BFS climb cap: an agent's query never expands to a triangle whose
+        /// centerY differs from the seed triangle's by more than this. On meshes that record a
+        /// bake slope (FPNavMesh.BakeMaxSlopeDeg &gt; 0) the query auto-derives the sound bound
+        /// obstRange*sin(bakeMaxSlope) per agent and combines it with this value via min(), so the
+        /// default ∞ already gets the tightest safe cap; set this only to tighten FURTHER on a
+        /// specific stage. Never set it below the auto bound's formula — a smaller cap drops
+        /// genuinely reachable walls (clip hazard). Meshes without a recorded slope (0 = unknown,
+        /// e.g. synthetic fixtures) get no auto bound. Only used by the graph path.
+        /// </summary>
+        public FP64 MaxClimbWithinHorizon = FP64.MaxValue;
+
+        /// <summary>
         /// Consecutive off-corridor tick threshold. Triggers repath when exceeded continuously.
         /// </summary>
         public int OffCorridorRepathThreshold = 10;
@@ -88,6 +126,42 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
+        /// Extracts this system's NavMesh boundary as ORCA static obstacles into the current
+        /// avoidance. MUST be called AFTER SetAvoidance. No-op if avoidance or NavMesh is null.
+        /// Load-time only (not the hot path) — allocation here is fine. Idempotent: re-extracts
+        /// and replaces on each call (safe across stage changes).
+        /// </summary>
+        public void LoadNavMeshObstacles()
+        {
+            if (_avoidance == null)
+                return;
+
+            FPNavMeshObstacleExtractor.Extract(_navMesh, out var vertices, out var polygonOffsets,
+                out _triSegStart, out _triSegList);
+            _avoidance.LoadObstacles(vertices, polygonOffsets);
+            _obstacleLoadGenerationCache = _avoidance.ObstacleLoadGeneration;
+            // The baked asset records its own bake Agent Radius (VERSION 3): apply it as the
+            // obstacle inset so clearance is not double-charged (boundary inset + full radius).
+            // Riding the asset keeps lockstep peers symmetric by construction — no hand-synced
+            // constant. Consumers may still override the field after this call.
+            _avoidance.ObstacleRadiusInset = _navMesh?.BakeAgentRadius ?? FP64.Zero;
+
+            // Size the BFS visited-stamp to the navmesh (load-time; hot path stays GC-0). The
+            // frontier/candidate buffers are fixed-cap and allocated once with the system.
+            int triCount = _navMesh?.Triangles?.Length ?? 0;
+            if (_bfsStamp == null || _bfsStamp.Length < triCount)
+                _bfsStamp = new int[triCount];
+            _bfsGeneration = 0;
+        }
+
+        /// <summary>
+        /// Number of obstacle vertices currently loaded into the avoidance (0 if no avoidance).
+        /// Setup-time diagnostic: after wiring, a value of 0 while avoidance is set signals a
+        /// missing LoadNavMeshObstacles wiring (SD desync hazard) or a boundary-free NavMesh.
+        /// </summary>
+        public int DebugObstacleCount => _avoidance?.DebugObstacleCount ?? 0;
+
+        /// <summary>
         /// Constrains a position to the NavMesh (uses MoveAlongSurface internally).
         /// </summary>
         public FPVector3 ConstrainToNavMesh(FPVector3 newPos, FPVector3 oldPos, int currentTri)
@@ -110,11 +184,30 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             if (_avoidance != null)
             {
+                // Graph-local obstacle query is usable only when the CSR was built from THIS navmesh
+                // and no external LoadObstacles re-load has desynced it, verified by the generation guard.
+                bool graphAvailable = _triSegStart != null
+                    && _obstacleLoadGenerationCache == _avoidance.ObstacleLoadGeneration
+                    && _avoidance.DebugObstacleCount > 0;
+                FP64 timeHorizonObst = _avoidance.TimeHorizonObst; // read the same field the adopt gate uses (F2)
+
                 for (int i = 0; i < entityCount; i++)
                 {
                     ref var nav = ref frame.Get<NavAgentComponent>(entities[i]);
-                    if (nav.Status == (byte)FPNavAgentStatus.Moving)
+                    if (nav.Status != (byte)FPNavAgentStatus.Moving)
+                        continue;
+
+                    int seedTri = nav.CurrentTriangleIndex;
+                    if (graphAvailable && seedTri >= 0)
                     {
+                        FP64 obstRange = timeHorizonObst * nav.Speed + nav.Radius;
+                        int candCount = CollectGraphLocalObstacles(seedTri, nav.Position.ToXZ(), obstRange);
+                        nav.DesiredVelocity = _avoidance.ComputeNewVelocity(
+                            i, ref frame, entities, entityCount, dt, _candidateSegs, candCount, true);
+                    }
+                    else
+                    {
+                        // Fallback: no navmesh CSR / unlocalized agent (seed -1) -> brute-force scan.
                         nav.DesiredVelocity = _avoidance.ComputeNewVelocity(
                             i, ref frame, entities, entityCount, dt);
                     }
@@ -133,6 +226,126 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // non-avoidance configs stay bit-identical to before.
             if (_avoidance != null)
                 ResolveCollisions(ref frame, entities, entityCount);
+        }
+
+        /// <summary>
+        /// Graph-local obstacle candidate collection. BFS the navmesh adjacency from the
+        /// agent's seed triangle to within obstRange, gathering the boundary segments of every
+        /// visited triangle into <see cref="_candidateSegs"/> (unsorted). Only the topological
+        /// selection lives here; the exact point-segment gate, nearest-first sort, and line
+        /// generation stay in FPNavAvoidance. Returns the candidate count. GC-0.
+        ///
+        /// Expansion gates (all node-local, so the visited set is pop-order independent):
+        ///  - not blocked (a blocked neighbor is a wall; don't reach walls behind it),
+        ///  - step-delta floor: |centerY(nb) - centerY(cur)| ≤ MultiFloorYThreshold (per-edge, lets
+        ///    ramps through; NOT the seed-band that pathfinding movement uses),
+        ///  - climb cap: |centerY(nb) - centerY(seed)| ≤ MaxClimbWithinHorizon (∞ default),
+        ///  - XZ padding: the triangle's nearest point to the agent ≤ obstRange (padded, so a
+        ///    triangle whose center is out of range but whose wall edge is in range is still
+        ///    visited — the adopt gate then exactly re-tests each segment).
+        /// </summary>
+        private int CollectGraphLocalObstacles(int seedTri, FPVector2 agentXZ, FP64 obstRange)
+        {
+            var tris = _navMesh.Triangles;
+            if (seedTri < 0 || seedTri >= tris.Length || _triSegStart == null || _bfsStamp == null)
+                return 0;
+
+            FP64 obstRangeSqr = obstRange * obstRange;
+
+            // Effective climb cap: combine the manual cap with the sound bound derived from the
+            // mesh's recorded bake slope — within the horizon the agent walks at most obstRange,
+            // gaining at most obstRange*sin(maxSlope) height on a mesh baked with that slope limit,
+            // so higher walls are unreachable and cutting them only removes phantoms. Recorded
+            // slope 0 = unknown → no auto bound (manual cap / ∞ as before). min() keeps a manual
+            // cap meaningful only when it tightens further. FP64.Sin is LUT-based (deterministic).
+            FP64 climbCap = MaxClimbWithinHorizon;
+            if (_navMesh.BakeMaxSlopeDeg > FP64.Zero)
+            {
+                FP64 capAuto = obstRange * FP64.Sin(_navMesh.BakeMaxSlopeDeg * FP64.Deg2Rad);
+                if (capAuto < climbCap)
+                    climbCap = capAuto;
+            }
+
+            // Generation stamp: bump per query, wrap resets (no per-call clear).
+            _bfsGeneration++;
+            if (_bfsGeneration == int.MaxValue)
+            {
+                System.Array.Clear(_bfsStamp, 0, _bfsStamp.Length);
+                _bfsGeneration = 1;
+            }
+
+            int candCount = 0;
+            int head = 0, tail = 0;
+            _bfsFrontier[tail++] = seedTri;
+            _bfsStamp[seedTri] = _bfsGeneration;
+            FP64 seedCenterY = tris[seedTri].centerY;
+
+            while (head < tail)
+            {
+                int t = _bfsFrontier[head++];
+
+                // Collect this triangle's boundary segments (CSR[t]) — 1:1 partition, no dedup.
+                int segEnd = _triSegStart[t + 1];
+                for (int k = _triSegStart[t]; k < segEnd; k++)
+                {
+                    if (candCount < _candidateSegs.Length)
+                        _candidateSegs[candCount++] = _triSegList[k];
+                }
+
+                FP64 curCenterY = tris[t].centerY;
+                for (int e = 0; e < 3; e++)
+                {
+                    int nb = tris[t].GetNeighbor(e);
+                    if (nb < 0)
+                        continue; // boundary edge: adopted above via CSR, not an expansion target
+                    if (_bfsStamp[nb] == _bfsGeneration)
+                        continue;
+                    if (tris[nb].isBlocked)
+                        continue;
+
+                    FP64 nbCenterY = tris[nb].centerY;
+                    FP64 stepDelta = nbCenterY - curCenterY;
+                    if (stepDelta < FP64.Zero) stepDelta = -stepDelta;
+                    if (stepDelta > MultiFloorYThreshold)
+                        continue;
+
+                    FP64 climb = nbCenterY - seedCenterY;
+                    if (climb < FP64.Zero) climb = -climb;
+                    if (climb > climbCap)
+                        continue;
+
+                    if (TriangleNearestDistSqr(agentXZ, nb, tris) > obstRangeSqr)
+                        continue;
+
+                    _bfsStamp[nb] = _bfsGeneration;
+                    if (tail < _bfsFrontier.Length)
+                        _bfsFrontier[tail++] = nb;
+                    else
+                        _bfsFrontierOverflowCount++;
+                }
+            }
+            return candCount;
+        }
+
+        /// <summary>
+        /// Squared XZ distance from a point to a triangle (0 if inside; else nearest edge). Used as
+        /// the padded BFS expansion gate — never under-approximates for a point outside the
+        /// triangle, so an in-range wall edge is never skipped.
+        /// </summary>
+        private FP64 TriangleNearestDistSqr(FPVector2 p, int triIdx, FPNavMeshTriangle[] tris)
+        {
+            ref FPNavMeshTriangle tri = ref tris[triIdx];
+            FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
+            FPVector2 b = _navMesh.Vertices[tri.v1].ToXZ();
+            FPVector2 c = _navMesh.Vertices[tri.v2].ToXZ();
+            if (FPNavMeshQuery.PointInTriangle2D(p, a, b, c))
+                return FP64.Zero;
+            FP64 d = FPVector2.SqrDistance(p, FPNavMeshQuery.ClosestPointOnSegment2D(p, a, b));
+            FP64 d1 = FPVector2.SqrDistance(p, FPNavMeshQuery.ClosestPointOnSegment2D(p, b, c));
+            if (d1 < d) d = d1;
+            FP64 d2 = FPVector2.SqrDistance(p, FPNavMeshQuery.ClosestPointOnSegment2D(p, c, a));
+            if (d2 < d) d = d2;
+            return d;
         }
 
         private unsafe void ProcessPathRequest(ref NavAgentComponent nav, int currentTick)

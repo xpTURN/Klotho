@@ -19,6 +19,13 @@ namespace xpTURN.Klotho.Godot
         public const float EdgeBoundaryWidth = 3.0f;
         public const float VertexSize = 0.08f;
 
+        // ORCA static-obstacle rings (extracted from the NavMesh boundary)
+        public static readonly Color ObstacleRingOuter = new Color(1.0f, 0.15f, 0.55f, 0.95f); // CW: outer boundary
+        public static readonly Color ObstacleRingHole  = new Color(0.15f, 0.85f, 1.0f, 0.95f); // CCW: hole / pillar
+        public static readonly Color ObstacleConvex    = new Color(1.0f, 1.0f, 1.0f, 1.0f);    // convex obstacle vertex
+        public static readonly Color ObstacleReflex    = new Color(1.0f, 0.85f, 0.0f, 1.0f);   // reflex obstacle vertex
+        public const float ObstacleDotSize = 0.06f;
+
         // Path
         public static readonly Color CorridorFill = new Color(1.0f, 0.8f, 0.0f, 0.3f);
         public static readonly Color CorridorEdge = new Color(1.0f, 0.8f, 0.0f, 0.7f);

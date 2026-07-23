@@ -17,6 +17,7 @@ namespace xpTURN.Klotho.Godot
         public bool ShowTriangles = true;
         public bool ShowEdges = true;
         public bool ShowBoundaryEdges = true;
+        public bool ShowObstacleRings;
         public bool ShowVertices;
         public bool ShowTriangleIndices;
         public bool ShowTriangleCenters;
@@ -155,6 +156,40 @@ namespace xpTURN.Klotho.Godot
                 var c = GodotFPNavMeshVisualizerStyles.EdgeBoundary;
                 for (int i = 0; i < _data.BoundaryEdges.Count; i++)
                     AddLine(line, c, _data.BoundaryEdges[i].a, _data.BoundaryEdges[i].b);
+            }
+            if (ShowObstacleRings && _data.ObstacleRings != null)
+            {
+                for (int r = 0; r < _data.ObstacleRings.Count; r++)
+                {
+                    var ring = _data.ObstacleRings[r];
+                    int n = ring.Points.Length;
+                    if (n < 2) continue;
+
+                    // Ring edges — colored by winding (outer CW vs hole/pillar CCW).
+                    Color ringColor = ring.IsCCW
+                        ? GodotFPNavMeshVisualizerStyles.ObstacleRingHole
+                        : GodotFPNavMeshVisualizerStyles.ObstacleRingOuter;
+                    Vector3 centroid = Vector3.Zero;
+                    for (int i = 0; i < n; i++)
+                    {
+                        AddLine(line, ringColor, ring.Points[i], ring.Points[(i + 1) % n]);
+                        centroid += ring.Points[i];
+                    }
+                    centroid /= n;
+
+                    // Per-vertex convexity markers (convex = white, reflex = amber).
+                    for (int i = 0; i < n; i++)
+                    {
+                        Color dot = ring.Convex[i]
+                            ? GodotFPNavMeshVisualizerStyles.ObstacleConvex
+                            : GodotFPNavMeshVisualizerStyles.ObstacleReflex;
+                        AddCross(line, dot, ring.Points[i], GodotFPNavMeshVisualizerStyles.ObstacleDotSize);
+                    }
+
+                    // Ring label at the centroid (index · winding · vertex count). Stacked labels at
+                    // one spot reveal coincident/duplicate rings from raised (multi-level) geometry.
+                    _staticLabels.Add((centroid + Vector3.Up * 0.1f, $"r{r}·{(ring.IsCCW ? "H" : "O")}·{n}"));
+                }
             }
             if (ShowVertices)
             {

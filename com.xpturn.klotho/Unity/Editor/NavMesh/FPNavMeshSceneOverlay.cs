@@ -16,6 +16,7 @@ namespace xpTURN.Klotho.Editor
         public bool ShowTriangles = true;
         public bool ShowEdges = true;
         public bool ShowBoundaryEdges = true;
+        public bool ShowObstacleRings;
         public bool ShowVertices;
         public bool ShowTriangleIndices;
         public bool ShowTriangleCenters;
@@ -85,6 +86,9 @@ namespace xpTURN.Klotho.Editor
 
             if (ShowBoundaryEdges)
                 DrawBoundaryEdges();
+
+            if (ShowObstacleRings)
+                DrawObstacleRings();
 
             if (ShowVertices)
                 DrawVertices();
@@ -168,6 +172,46 @@ namespace xpTURN.Klotho.Editor
             {
                 var edge = _data.BoundaryEdges[i];
                 Handles.DrawLine(edge.a, edge.b, FPNavMeshVisualizerStyles.EdgeBoundaryWidth);
+            }
+        }
+
+        private void DrawObstacleRings()
+        {
+            if (_data.ObstacleRings == null) return;
+
+            for (int r = 0; r < _data.ObstacleRings.Count; r++)
+            {
+                var ring = _data.ObstacleRings[r];
+                int n = ring.Points.Length;
+                if (n < 2) continue;
+
+                // Ring edges — colored by winding (outer CW vs hole/pillar CCW).
+                Handles.color = ring.IsCCW
+                    ? FPNavMeshVisualizerStyles.ObstacleRingHole
+                    : FPNavMeshVisualizerStyles.ObstacleRingOuter;
+                Vector3 centroid = Vector3.zero;
+                for (int i = 0; i < n; i++)
+                {
+                    Handles.DrawLine(ring.Points[i], ring.Points[(i + 1) % n],
+                        FPNavMeshVisualizerStyles.ObstacleRingWidth);
+                    centroid += ring.Points[i];
+                }
+                centroid /= n;
+
+                // Per-vertex convexity dots (convex = white, reflex = amber).
+                for (int i = 0; i < n; i++)
+                {
+                    Handles.color = ring.Convex[i]
+                        ? FPNavMeshVisualizerStyles.ObstacleConvex
+                        : FPNavMeshVisualizerStyles.ObstacleReflex;
+                    Handles.DotHandleCap(0, ring.Points[i], Quaternion.identity,
+                        FPNavMeshVisualizerStyles.ObstacleDotSize, EventType.Repaint);
+                }
+
+                // Ring label at the centroid (index · winding · vertex count). Stacked labels at one
+                // spot reveal coincident/duplicate rings from raised (multi-level) geometry.
+                Handles.color = Color.white;
+                Handles.Label(centroid, $"r{r}·{(ring.IsCCW ? "H" : "O")}·{n}");
             }
         }
 

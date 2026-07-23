@@ -17,6 +17,14 @@ namespace xpTURN.Klotho.Editor
 
         public const float EdgeInternalWidth = 1.0f;
         public const float EdgeBoundaryWidth = 3.0f;
+
+        // ORCA static-obstacle rings (extracted from the NavMesh boundary)
+        public static readonly Color ObstacleRingOuter = new Color(1.0f, 0.15f, 0.55f, 0.95f); // CW: outer boundary
+        public static readonly Color ObstacleRingHole  = new Color(0.15f, 0.85f, 1.0f, 0.95f); // CCW: hole / pillar
+        public static readonly Color ObstacleConvex    = new Color(1.0f, 1.0f, 1.0f, 1.0f);    // convex obstacle vertex
+        public static readonly Color ObstacleReflex    = new Color(1.0f, 0.85f, 0.0f, 1.0f);   // reflex obstacle vertex
+        public const float ObstacleRingWidth = 2.5f;
+        public const float ObstacleDotSize   = 0.06f;
         public const float VertexSize = 0.08f;
 
         // Path

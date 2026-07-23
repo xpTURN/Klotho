@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.7.0] - 2026-07-23
+
+### Navigation — agents avoid walls, not just each other
+
+- **ORCA avoidance now steers agents around static geometry — walls, cliffs, and obstacle blocks — on top of the existing agent-agent avoidance.** Each nearby obstacle edge contributes a velocity half-plane (the RVO2 obstacle line, ported to FP64), so an agent's chosen velocity is one that clears both the crowd and the environment in the same solve. Unlike the reciprocal agent lines — which the solver relaxes when a crowd is over-constrained — obstacle lines are **hard constraints** the linear program never relaxes, so a velocity can never leak through a wall no matter how packed the surrounding agents are. Convex and non-convex (reflex) obstacle rings are both handled. It is opt-in and layers onto the same avoidance object, so a game that only wants agent-agent avoidance is unchanged.
+- **Obstacles come from two interchangeable sources in one flat format.** The NavMesh's own boundary is the first: a new extractor walks the open boundary edges — orienting each edge by the mesh interior rather than assuming a triangle winding, and chaining them around shared vertices through the walkable fan so pinch and bowtie vertices resolve correctly — and emits obstacle rings with outer boundaries and holes wound consistently, automatically. The second is caller-supplied convex polygon rings, for procedurally placed blocks that never went through a bake. Both feed the same load call, and a single helper on the agent system extracts-and-loads the current NavMesh's boundary in one step.
+- **Obstacle selection follows the NavMesh graph, so a stacked floor's walls don't bleed through.** The agent system picks obstacle candidates by walking the NavMesh adjacency outward from the agent's own triangle, considering only walls reachable on its own floor or ramp — an upper storey whose walls overlap in the XZ plane never constrains the agent below it. Expansion is bounded by a per-edge step-delta floor test, a padded range, and a climb cap that auto-derives from the mesh's recorded bake slope where present; an agent that can't be localized falls back to a full scan. Only the *selection* is graph-aware — the half-plane math stays 2D and the hot path stays allocation-free.
+
+### Navigation — clearance that matches the funnel path
+
+- **A baked NavMesh now records the agent settings it was baked with, and the runtime uses the radius to cancel double-counted clearance.** A boundary is already inset from the real wall by the bake agent radius, and ORCA independently holds an agent its own radius off the obstacle line — so a naive setup stops agents roughly two radii short of a wall and chokes tight corridors. The asset carries its bake radius (alongside slope, height, and climb) in a self-describing settings block, and loading the boundary auto-applies it as an inset that cancels the baked offset: under a matching bake-and-simulation radius the boundary itself becomes the constraint and agents hug corners exactly as the point-agent funnel path does. The inset is per-peer local config that rides the asset automatically, and a consumer may still override it after loading.
+- **The obstacle time horizon is short, so an agent moving along a wall slides past it rather than braking against it.** The horizon decides how far ahead a wall becomes a hard constraint; keeping it short means an edge an agent is merely travelling parallel to doesn't turn into an active constraint, so agents follow walls cleanly instead of decelerating and hugging them.
+
+### Breaking changes
+
+- **The baked NavMesh binary format advanced to version 3, so `.bytes` assets baked by earlier versions must be re-exported.** The format gained the bake-settings block (agent radius / slope / height / climb) the clearance inset reads at load time; an older file has no such block and will not load. Re-bake and re-export each stage's NavMesh from its scene.
+
+### API additions
+
+- **`FPNavMeshObstacleExtractor` is new** — extracts ORCA obstacle rings (`FPVector2[]` vertices + `int[]` polygon offsets) from a NavMesh's boundary; build/load-time only.
+- **`FPObstacleVertex` is new** — the static-obstacle vertex struct (flat-array ring: point, unit direction, convex flag, prev/next, polygon index), the FP64 equivalent of the RVO2 obstacle vertex.
+- **`FPNavAvoidance` gained `LoadObstacles(FPVector2[] vertices, int[] polygonOffsets)`, `ObstacleRadiusInset`, and a `TimeHorizonObst` defaulting to a short horizon**, plus obstacle diagnostics (loaded count, selected count, obstacle-line overflow, and which selection path ran).
+- **`FPNavAgentSystem` gained `LoadNavMeshObstacles()`** — extracts and loads its own NavMesh's boundary in one call (invoke after configuring avoidance) — **and `MaxClimbWithinHorizon`** for the graph-local selection's climb cap when the mesh records no bake slope.
+- **`FPNavMesh`'s constructor gained optional bake-settings parameters** (`bakeAgentRadius` / `bakeMaxSlopeDeg` / `bakeAgentHeight` / `bakeAgentClimb`, all defaulting to zero) and the matching read-only properties; existing callers that omit them are unchanged.
+
+> Obstacle avoidance is per-peer local — obstacle geometry is not on the wire, in a frame, or in the state hash. Every peer loads the same baked geometry and computes identical avoidance velocities, so in a server-driven session **both the client and the server must load the obstacles**; wiring only one side makes the velocity solve diverge. See [Navigation §Static Obstacles](Docs/Navigation.md#static-obstacles-orca).
+
+### Samples
+
+- **Brawler wires NavMesh obstacle avoidance on both its client and its dedicated server**, so bots steer around the stage walls; its stages are baked with a small agent radius so the clearance lines up end to end.
+- **The NavMesh visualizer draws the extracted obstacle rings** on both the Unity editor window and the Godot dock, so a stage's obstacle boundary can be inspected before it ever runs; the Godot samples ship the same view.
+
+### Tests
+
+- **~1,600 engine-agnostic tests moved out of the Unity Test Runner into a new `Klotho.Runtime.Tests` (dotnet/NUnit) project**, so they run under `dotnet test` without the editor (Brawler EditMode 2,552 → 918).
+
 ## [0.6.1] - 2026-07-21
 
 ### Profiling the simulation tick

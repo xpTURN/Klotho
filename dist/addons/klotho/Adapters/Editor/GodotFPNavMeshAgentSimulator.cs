@@ -24,6 +24,10 @@ namespace xpTURN.Klotho.Godot
         public float DefaultRadius = 0.5f;
         public float DefaultAcceleration = 10.0f;
         public bool EnableAvoidance = true;
+        // Bake inset carried by the loaded mesh boundary. Synced from the asset's recorded
+        // BakeAgentRadius on Initialize; edit live (SetObstacleRadiusInset) to override for
+        // diagnosis (0 = uncorrected double clearance, reproducing the edge slowdown).
+        public float ObstacleRadiusInset = 0f;
         // Diagnostic knob: multi-floor traversal threshold. Raising it lets the agent
         // cross steep single ramp triangles whose centerY differs by more than the default 2.0.
         public float MultiFloorYThreshold = 2.0f;
@@ -60,8 +64,16 @@ namespace xpTURN.Klotho.Godot
             _agentSystem.MultiFloorYThreshold = FP64.FromFloat(MultiFloorYThreshold);
 
             _avoidance = new FPNavAvoidance();
-            if (EnableAvoidance)
-                _agentSystem.SetAvoidance(_avoidance);
+            // Load the NavMesh boundary as ORCA static obstacles once (retained on _avoidance across
+            // enable/disable toggles), so the ORCA-lines overlay shows wall half-planes, not just
+            // agent-agent ones. Set avoidance to load, then honor the EnableAvoidance toggle.
+            // LoadNavMeshObstacles applies the asset's recorded bake radius as the obstacle inset;
+            // sync the knob so the UI shows the applied value (still editable as an override).
+            _agentSystem.SetAvoidance(_avoidance);
+            _agentSystem.LoadNavMeshObstacles();
+            ObstacleRadiusInset = _avoidance.ObstacleRadiusInset.ToFloat();
+            if (!EnableAvoidance)
+                _agentSystem.SetAvoidance(null);
 
             CurrentTick = 0;
             _accumulator = 0;
@@ -107,6 +119,17 @@ namespace xpTURN.Klotho.Godot
             MultiFloorYThreshold = v;
             if (_agentSystem != null)
                 _agentSystem.MultiFloorYThreshold = FP64.FromFloat(v);
+        }
+
+        /// <summary>
+        /// Live knob: writes through to the retained avoidance so toggling the inset (e.g. 0 vs
+        /// bake radius) is visible without reloading the mesh.
+        /// </summary>
+        public void SetObstacleRadiusInset(float v)
+        {
+            ObstacleRadiusInset = v;
+            if (_avoidance != null)
+                _avoidance.ObstacleRadiusInset = FP64.FromFloat(v);
         }
 
         public void SetAgentDestination(int index, Vector3 dest)
