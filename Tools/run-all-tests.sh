@@ -36,6 +36,7 @@ UNITY_PATH="${UNITY_PATH:-/Applications/Unity/Hub/Editor/${UNITY_VERSION}/Unity.
 DOTNET_TEST_PROJECTS=(
   "Tools/KlothoGenerator.Tests/KlothoGenerator.Tests.csproj"
   "Samples/Klotho.Core.Tests/Klotho.Core.Tests.csproj"
+  "Samples/Klotho.Runtime.Tests/Klotho.Runtime.Tests.csproj"
   "Samples/DevLobbyServer.Tests/DevLobbyServer.Tests.csproj"
 )
 

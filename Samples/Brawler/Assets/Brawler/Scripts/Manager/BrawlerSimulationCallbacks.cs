@@ -7,6 +7,7 @@ using xpTURN.Klotho.ECS;
 using xpTURN.Klotho.ECS.Systems;
 using xpTURN.Klotho.Deterministic.Math;
 using xpTURN.Klotho.Deterministic.Navigation;
+using xpTURN.Klotho.Logging;
 using xpTURN.Klotho.Network;
 using xpTURN.Klotho.Serialization;
 using System.Collections.Generic;
@@ -96,6 +97,12 @@ namespace Brawler
             var funnel      = new FPNavMeshFunnel(_navMesh, query, null);
             var agentSystem = new FPNavAgentSystem(_navMesh, query, pathfinder, funnel, null);
             agentSystem.SetAvoidance(new FPNavAvoidance());
+            // Registers the NavMesh boundary as ORCA static obstacles (wall avoidance) and applies
+            // the baked asset's own Agent Radius as the obstacle inset — both peers load the same
+            // asset, so the clearance correction stays symmetric without a hand-synced constant.
+            agentSystem.LoadNavMeshObstacles();
+            if (agentSystem.DebugObstacleCount == 0)
+                simulation.Frame.Logger?.KWarning($"[BrawlerSimulationCallbacks] ORCA obstacles empty — NavMesh obstacle wiring missing or boundary-free mesh");
 
             botFSMSystem = new BotFSMSystem(agentSystem);
             botFSMSystem.SetQuery(query);

@@ -55,7 +55,7 @@ namespace xpTURN.Klotho.Editor
             Debug.Log($"[JsonToBytes] {jsonPath} → {bytesPath} ({bytes.Length} bytes)");
         }
 
-        [MenuItem("Tools/Convert/JsonToBytes", true)]
+        [MenuItem("Tools/Klotho/Convert/DataAsset JsonToBytes", true)]
         private static bool ConvertSelectedJsonToBytes_Validate()
         {
             var selected = Selection.activeObject as TextAsset;

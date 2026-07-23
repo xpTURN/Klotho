@@ -533,6 +533,14 @@ PrefabInstance:
       value: 1
       objectReference: {fileID: 0}
     - target: {fileID: 4919301263117958624, guid: 7735020e7823341b793bb9cc27e31b25, type: 3}
+      propertyPath: m_VoxelSize
+      value: 0.16666667
+      objectReference: {fileID: 0}
+    - target: {fileID: 4919301263117958624, guid: 7735020e7823341b793bb9cc27e31b25, type: 3}
+      propertyPath: m_AgentTypeID
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 4919301263117958624, guid: 7735020e7823341b793bb9cc27e31b25, type: 3}
       propertyPath: m_NavMeshData
       value: 
       objectReference: {fileID: 23800000, guid: c7a2c5d248b024772826070e17567f1d, type: 2}
@@ -550,7 +558,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 7172111968783205166, guid: 7735020e7823341b793bb9cc27e31b25, type: 3}
       propertyPath: m_LocalPosition.x
-      value: -0
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 7172111968783205166, guid: 7735020e7823341b793bb9cc27e31b25, type: 3}
       propertyPath: m_LocalPosition.y

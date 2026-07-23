@@ -134,5 +134,9 @@
   "gridWidth": 4,
   "gridHeight": 4,
   "gridCellSize": 4,
-  "gridOrigin": [-6.333333,-5.333333]
+  "gridOrigin": [-6.333333,-5.333333],
+  "bakeAgentRadius": 0.5,
+  "bakeMaxSlopeDeg": 45,
+  "bakeAgentHeight": 2,
+  "bakeAgentClimb": 0.75
 }

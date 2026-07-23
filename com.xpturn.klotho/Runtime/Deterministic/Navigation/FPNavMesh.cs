@@ -42,6 +42,38 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         public readonly FP64 GridCellSize;
         public readonly FPVector2 GridOrigin;
 
+        // --- Bake settings block (recorded at export, VERSION 3) ---
+        // The asset is self-describing about how it was baked; riding these on the asset keeps
+        // lockstep peers symmetric by construction (no hand-synced constants) and lets the JSON
+        // sidecar identify a stage baked with the wrong settings.
+
+        /// <summary>
+        /// Agent Radius the source NavMesh was baked with — the boundary sits this far inside the
+        /// physical walls. Consumer: FPNavAgentSystem.LoadNavMeshObstacles applies it as
+        /// FPNavAvoidance.ObstacleRadiusInset (clearance not double-charged). 0 = unknown/uninset.
+        /// </summary>
+        public readonly FP64 BakeAgentRadius;
+
+        /// <summary>
+        /// Max walkable slope the source NavMesh was baked with, in degrees. Consumer: the
+        /// graph-local obstacle query auto-derives its sound climb cap from this
+        /// (obstRange × FP64.Sin(deg × Deg2Rad) — see FPNavAgentSystem.MaxClimbWithinHorizon).
+        /// 0 = unknown (no auto cap).
+        /// </summary>
+        public readonly FP64 BakeMaxSlopeDeg;
+
+        /// <summary>
+        /// Agent Height the source NavMesh was baked with (meters). No runtime consumer —
+        /// recorded so the bake settings block is complete (vertical clearance is bake-time only).
+        /// </summary>
+        public readonly FP64 BakeAgentHeight;
+
+        /// <summary>
+        /// Agent step/climb height the source NavMesh was baked with (meters). No runtime
+        /// consumer — climbability is already baked into the mesh connectivity.
+        /// </summary>
+        public readonly FP64 BakeAgentClimb;
+
         public FPNavMesh(
             FPVector3[] vertices,
             FPNavMeshTriangle[] triangles,
@@ -51,7 +83,11 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             int gridWidth,
             int gridHeight,
             FP64 gridCellSize,
-            FPVector2 gridOrigin)
+            FPVector2 gridOrigin,
+            FP64 bakeAgentRadius = default,
+            FP64 bakeMaxSlopeDeg = default,
+            FP64 bakeAgentHeight = default,
+            FP64 bakeAgentClimb = default)
         {
             Vertices = vertices;
             Triangles = triangles;
@@ -62,6 +98,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             GridHeight = gridHeight;
             GridCellSize = gridCellSize;
             GridOrigin = gridOrigin;
+            BakeAgentRadius = bakeAgentRadius;
+            BakeMaxSlopeDeg = bakeMaxSlopeDeg;
+            BakeAgentHeight = bakeAgentHeight;
+            BakeAgentClimb = bakeAgentClimb;
         }
 
         /// <summary>

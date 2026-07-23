@@ -147,6 +147,7 @@ namespace xpTURN.Klotho.Godot
             grid.AddChild(Check("Triangles", ov.ShowTriangles, v => { ov.ShowTriangles = v; _ctrl.RequestStaticRedraw(); }));
             grid.AddChild(Check("Edges", ov.ShowEdges, v => { ov.ShowEdges = v; _ctrl.RequestStaticRedraw(); }));
             grid.AddChild(Check("Boundary", ov.ShowBoundaryEdges, v => { ov.ShowBoundaryEdges = v; _ctrl.RequestStaticRedraw(); }));
+            grid.AddChild(Check("Obstacle Rings", ov.ShowObstacleRings, v => { ov.ShowObstacleRings = v; _ctrl.RequestStaticRedraw(); }));
             grid.AddChild(Check("Vertices", ov.ShowVertices, v => { ov.ShowVertices = v; _ctrl.RequestStaticRedraw(); }));
             grid.AddChild(Check("Tri Indices", ov.ShowTriangleIndices, v => { ov.ShowTriangleIndices = v; _ctrl.RequestStaticRedraw(); }));
             grid.AddChild(Check("Centers", ov.ShowTriangleCenters, v => { ov.ShowTriangleCenters = v; _ctrl.RequestStaticRedraw(); }));
@@ -210,6 +211,9 @@ namespace xpTURN.Klotho.Godot
             AddChild(SpinRow("Accel", sim.DefaultAcceleration, v => sim.DefaultAcceleration = (float)v));
             AddChild(SpinRow("Floor Y Thr", sim.MultiFloorYThreshold, v => sim.SetMultiFloorYThreshold((float)v)));
             AddChild(Check("Avoidance", sim.EnableAvoidance, v => sim.EnableAvoidance = v));
+            // Bake inset carried by the loaded mesh boundary (R_sim = R_bake convention → set to
+            // the bake Agent Radius; 0 = uncorrected double clearance). Applied live.
+            AddChild(SpinRow("Obst Inset", sim.ObstacleRadiusInset, v => sim.SetObstacleRadiusInset((float)v)));
 
             var modes = new HBoxContainer();
             modes.AddChild(Btn("Place Agent", () => ToggleMode(InteractionMode.PlaceAgent)));

@@ -59,6 +59,12 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
             var funnel      = new FPNavMeshFunnel(_navMesh, query, _logger);
             var agentSystem = new FPNavAgentSystem(_navMesh, query, pathfinder, funnel, _logger);
             agentSystem.SetAvoidance(new FPNavAvoidance());
+            // Registers the NavMesh boundary as ORCA static obstacles (wall avoidance) and applies
+            // the baked asset's own Agent Radius as the obstacle inset — both peers load the same
+            // asset, so the clearance correction stays symmetric without a hand-synced constant.
+            agentSystem.LoadNavMeshObstacles();
+            if (agentSystem.DebugObstacleCount == 0)
+                _logger?.KWarning($"[BrawlerServerCallbacks] ORCA obstacles empty — NavMesh obstacle wiring missing or boundary-free mesh");
 
             botFSMSystem = new BotFSMSystem(agentSystem);
             botFSMSystem.SetQuery(query);

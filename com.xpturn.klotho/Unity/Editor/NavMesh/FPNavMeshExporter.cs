@@ -44,7 +44,28 @@ namespace xpTURN.Klotho.Editor
             if (string.IsNullOrEmpty(path))
                 return;
 
-            FPNavMesh navMesh = Build(triangulation.vertices, triangulation.indices, triangulation.areas, DEFAULT_CELL_SIZE);
+            // Bake settings block: recorded into the asset so it is self-describing (radius feeds
+            // the obstacle inset at load time; slope/height/climb recorded for future consumers).
+            // CalculateTriangulation() merges without per-agent-type identity, so read agent
+            // type 0 (Humanoid default — the type our stages bake with).
+            var bakeSettings = NavMesh.GetSettingsByID(0);
+
+            // CalculateTriangulation() carries no per-agent-type identity, so the recorded radius is
+            // read from type 0. If the scene defines more than one agent type (or bakes with a
+            // non-type-0 agent), that assumption can silently record the wrong BakeAgentRadius →
+            // wrong runtime ObstacleRadiusInset. Warn so it is caught at export, not at runtime.
+            if (NavMesh.GetSettingsCount() > 1)
+            {
+                Debug.LogWarning(
+                    $"[FPNavMeshExporter] {NavMesh.GetSettingsCount()} NavMesh agent types present — " +
+                    $"BakeAgentRadius is recorded from agent type 0 (radius {bakeSettings.agentRadius:F3}). " +
+                    $"Verify this stage bakes with type 0, else the obstacle inset will be wrong.");
+            }
+
+            FPNavMesh navMesh = Build(triangulation.vertices, triangulation.indices, triangulation.areas,
+                DEFAULT_CELL_SIZE,
+                bakeSettings.agentRadius, bakeSettings.agentSlope,
+                bakeSettings.agentHeight, bakeSettings.agentClimb);
             int size = FPNavMeshSerializer.GetSerializedSize(navMesh);
             int written;
             using (var buf = SerializationBuffer.Create(size))
@@ -70,7 +91,8 @@ namespace xpTURN.Klotho.Editor
 
             Debug.Log($"[FPNavMeshExporter] Export complete: " +
                       $"vertices {navMesh.Vertices.Length}, triangles {navMesh.Triangles.Length}, " +
-                      $"grid {navMesh.GridWidth}x{navMesh.GridHeight}, {written} bytes");
+                      $"grid {navMesh.GridWidth}x{navMesh.GridHeight}, " +
+                      $"bakeAgentRadius {navMesh.BakeAgentRadius.ToFloat():F3}, {written} bytes");
             Debug.Log($"[FPNavMeshExporter] Saved JSON: {jsonPath}");
         }
 
@@ -78,7 +100,9 @@ namespace xpTURN.Klotho.Editor
         /// Converts Unity NavMesh data to FPNavMesh.
         /// Public static to allow unit testing.
         /// </summary>
-        public static FPNavMesh Build(Vector3[] srcVertices, int[] srcIndices, int[] srcAreas, double cellSize)
+        public static FPNavMesh Build(Vector3[] srcVertices, int[] srcIndices, int[] srcAreas, double cellSize,
+            double bakeAgentRadius = 0, double bakeMaxSlopeDeg = 0,
+            double bakeAgentHeight = 0, double bakeAgentClimb = 0)
         {
             // 1. FP64 conversion + vertex welding
             WeldVertices(srcVertices, WELD_EPSILON,
@@ -95,7 +119,9 @@ namespace xpTURN.Klotho.Editor
             // Delegate the engine-agnostic geometry pipeline. Diagnostics routed to Unity console.
             return FPNavMeshBuildPipeline.Build(
                 vertices, indices, areas, cellSize,
-                log: m => Debug.Log(m), logError: m => Debug.LogError(m));
+                log: m => Debug.Log(m), logError: m => Debug.LogError(m),
+                bakeAgentRadius: bakeAgentRadius, bakeMaxSlopeDeg: bakeMaxSlopeDeg,
+                bakeAgentHeight: bakeAgentHeight, bakeAgentClimb: bakeAgentClimb);
         }
 
         #region Vertex welding

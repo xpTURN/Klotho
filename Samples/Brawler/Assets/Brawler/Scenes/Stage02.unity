@@ -127,6 +127,10 @@ PrefabInstance:
     serializedVersion: 3
     m_TransformParent: {fileID: 0}
     m_Modifications:
+    - target: {fileID: 1947940942497249250, guid: 9e8c810080566413eb23f0aa99d2dd6e, type: 3}
+      propertyPath: m_NavMeshData
+      value: 
+      objectReference: {fileID: 23800000, guid: f5e6469da358141e29370d4585e0881a, type: 2}
     - target: {fileID: 5856674520978769159, guid: 9e8c810080566413eb23f0aa99d2dd6e, type: 3}
       propertyPath: m_Name
       value: Stage02

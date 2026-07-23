@@ -54,6 +54,17 @@ namespace xpTURN.Klotho.Editor
         public List<(Vector3 a, Vector3 b)> BoundaryEdges = new List<(Vector3, Vector3)>();
         public List<(Vector3 a, Vector3 b)> InternalEdges = new List<(Vector3, Vector3)>();
 
+        // ORCA static-obstacle rings extracted from the NavMesh boundary (same data the runtime
+        // obstacle layer uses). Flat XZ footprint drawn at ObstacleRingY.
+        public struct ObstacleRingRender
+        {
+            public Vector3[] Points;   // ring vertices (world; Y = ObstacleRingY)
+            public bool[] Convex;      // per-vertex obstacle convexity
+            public bool IsCCW;         // winding: CCW = hole/pillar, CW = outer boundary
+        }
+        public const float ObstacleRingY = 0.1f;
+        public List<ObstacleRingRender> ObstacleRings = new List<ObstacleRingRender>();
+
         // Path results
         public Vector3 StartPoint;
         public Vector3 EndPoint;
@@ -133,6 +144,7 @@ namespace xpTURN.Klotho.Editor
             CachedTriangles = null;
             BoundaryEdges.Clear();
             InternalEdges.Clear();
+            ObstacleRings.Clear();
             ClearPath();
         }
 
@@ -199,6 +211,58 @@ namespace xpTURN.Klotho.Editor
                     else
                         InternalEdges.Add((a, b));
                 }
+            }
+
+            BuildObstacleRings();
+        }
+
+        // Extracts ORCA obstacle rings from the NavMesh boundary once per cache rebuild (not per
+        // scene repaint). Reveals winding (outer CW vs hole CCW), per-vertex convexity, and any
+        // coincident/duplicate rings from raised (multi-level) geometry.
+        private void BuildObstacleRings()
+        {
+            ObstacleRings.Clear();
+            if (NavMesh == null) return;
+
+            // Obstacle extraction runs in the mesh-load path; isolate its failure so a malformed /
+            // non-manifold boundary (FPNavMeshObstacleExtractor.Extract throws) only drops the
+            // obstacle overlay — the triangles/edges already built by BuildRenderCache still render
+            // for diagnosis, instead of the whole load aborting to a blank view.
+            try
+            {
+                FPNavMeshObstacleExtractor.Extract(NavMesh, out var verts, out var offsets);
+                if (verts.Length == 0) return;
+
+                var avoidance = new FPNavAvoidance();
+                avoidance.LoadObstacles(verts, offsets);
+                var obst = avoidance.DebugObstacles;
+
+                int ringCount = offsets.Length;
+                for (int r = 0; r < ringCount; r++)
+                {
+                    int s = offsets[r];
+                    int e = (r + 1 < ringCount) ? offsets[r + 1] : verts.Length;
+                    int n = e - s;
+                    if (n < 2) continue;
+
+                    var points = new Vector3[n];
+                    var convex = new bool[n];
+                    double area2 = 0;
+                    for (int i = s; i < e; i++)
+                    {
+                        var p = verts[i];
+                        var q = verts[i + 1 < e ? i + 1 : s];
+                        points[i - s] = new Vector3(p.x.ToFloat(), ObstacleRingY, p.y.ToFloat());
+                        convex[i - s] = obst[i].isConvex;
+                        area2 += p.x.ToFloat() * q.y.ToFloat() - q.x.ToFloat() * p.y.ToFloat();
+                    }
+                    ObstacleRings.Add(new ObstacleRingRender { Points = points, Convex = convex, IsCCW = area2 > 0 });
+                }
+            }
+            catch (System.Exception ex)
+            {
+                ObstacleRings.Clear();
+                Debug.LogWarning($"[FPNavMeshVisualizer] Obstacle ring extraction failed (mesh still shown): {ex.Message}");
             }
         }
 

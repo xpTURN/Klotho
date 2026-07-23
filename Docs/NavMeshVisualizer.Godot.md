@@ -50,6 +50,7 @@ Toggle on/off with checkboxes. Geometry layers are re-drawn immediately.
 | Centers | Triangle center points |
 | Blocked | Whether blocked triangles are highlighted |
 | Cost Heatmap | `costMultiplier` gradient (green→red) |
+| Obstacle Rings | ORCA static-obstacle rings extracted from the boundary — flat XZ footprint with per-vertex convex/reflex markers and CW/CCW winding (the same data the runtime obstacle layer feeds to `FPNavAvoidance`) |
 
 > Labels (Tri Indices · Cell Labels · agent `#i`) are drawn in 2D over the 3D view and appear once the camera is captured — i.e. **after the mouse has entered the 3D viewport once**. Labels are drawn only within a fixed distance (~40m) of the camera.
 
@@ -105,6 +106,7 @@ Drives the deterministic `FPNavAgentSystem` directly in the editor.
 | Shift+click does nothing | Is the tool on? Is a mode button active? Is the click point on the NavMesh? |
 | Labels not visible | Has the mouse entered the 3D viewport once (camera cache)? Within ~40m? Tri Indices / Cell Labels toggled on? |
 | Agent can't cross a steep ramp/slope | Was the ramp baked as one large triangle? Lower the NavMesh `edge_max_length` (≤3) to subdivide and re-export (§8). *Diagnostic*: raise the dock `Floor Y Thr` (e.g. 5) — if it then passes, this is the case. |
+| Triangles/edges show but **Obstacle Rings** don't after Load | The boundary may be non-manifold — obstacle extraction is isolated in a try/catch, so the mesh still renders; check the Godot console for an `Obstacle ring extraction failed` warning. |
 
 ---
 

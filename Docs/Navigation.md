@@ -16,8 +16,10 @@ A deterministic NavMesh navigation system based on FP64. All computation runs on
 | `FPNavMeshFunnel` | SSFA (Simple Stupid Funnel Algorithm) — corridor → waypoints |
 | `NavAgentComponent` | ECS agent component (`[KlothoComponent(11)]`; position / velocity / corridor / destination) |
 | `FPNavAgentStatus` | Agent-status enum (Idle / PathPending / Moving / Arrived / PathFailed) |
-| `FPNavAgentSystem` | Path request → steering → ORCA avoidance → movement → NavMesh constraint (operates on Frame + EntityRef[]) |
-| `FPNavAvoidance` | ORCA (Optimal Reciprocal Collision Avoidance) agent-collision avoidance |
+| `FPNavAgentSystem` | Path request → steering → ORCA avoidance → movement → NavMesh constraint → position-correction pass (operates on Frame + EntityRef[]); `LoadNavMeshObstacles()` registers the NavMesh boundary as ORCA obstacles and builds the graph-local obstacle-query CSR |
+| `FPNavAvoidance` | ORCA (Optimal Reciprocal Collision Avoidance): agent-agent **and** static-obstacle half-planes (wall/cliff), general non-convex + winding-aware |
+| `FPObstacleVertex` | Static-obstacle vertex (RVO2 `Obstacle` equivalent), flat-array ring representation (point / unitDir / isConvex / prev/next / polygonIndex) |
+| `FPNavMeshObstacleExtractor` | Extracts ORCA obstacle rings from the NavMesh boundary (`neighbor == -1` edges); load/build-time only |
 | `NavCorridorHelper` | Corridor-search and corridor-maintenance helper utilities |
 | `FPNavMeshSerializer` | Binary serialization / deserialization |
 
@@ -34,11 +36,13 @@ com.xpturn.klotho/Runtime/Deterministic/Navigation/
 ├── FPNavMeshSerializer.cs    # Binary serialization
 ├── FPNavMeshBuildPipeline.cs # Engine-agnostic bake pipeline (degenerate/T-junction/adjacency/grid)
 ├── NavAgentComponent.cs      # ECS agent component + FPNavAgentStatus enum
-├── FPNavAgentSystem.cs       # Agent update system (Frame + EntityRef[])
-├── FPNavAvoidance.cs         # ORCA collision avoidance
+├── FPNavAgentSystem.cs       # Agent update system (Frame + EntityRef[]) + LoadNavMeshObstacles()
+├── FPNavAvoidance.cs         # ORCA collision avoidance (agent-agent + static obstacles)
+├── FPObstacleVertex.cs       # Static-obstacle vertex struct (flat ring)
+├── FPNavMeshObstacleExtractor.cs # NavMesh boundary → ORCA obstacle rings
 └── NavCorridorHelper.cs      # Corridor helper utilities
 
-com.xpturn.klotho/Editor/NavMesh/         # Unity Editor (baking + visualization)
+com.xpturn.klotho/Unity/Editor/NavMesh/   # Unity Editor (baking + visualization)
 ├── FPNavMeshExporter.cs          # Unity NavMesh → FPNavMesh conversion tool
 ├── FPNavMeshVisualizerWindow.cs  # NavMesh visualization editor window
 ├── FPNavMeshVisualizerData.cs    # Visualization state
@@ -79,9 +83,10 @@ FPNavMeshQuery                  FPNavMeshPathfinder                FPNavMeshFunn
            ┌──────────────────────┐
            │ 1. ProcessPathRequest│ ─▸ A* + Funnel
            │ 2. ProcessSteering   │ ─▸ Seek + Arrive
-           │ 3. ORCA Avoidance    │ ─▸ agent-agent collision avoidance
+           │ 3. ORCA Avoidance    │ ─▸ agent-agent + static-obstacle (wall) avoidance (graph-local select)
            │ 4. ProcessMovement   │ ─▸ acceleration, speed clamp, position update
            │ 5. ConstrainToNavMesh│ ─▸ boundary-edge sliding
+           │ 6. ResolveCollisions │ ─▸ position-space overlap push (gated on avoidance)
            └──────────────────────┘
 ```
 
@@ -99,6 +104,9 @@ FPNavMeshQuery                  FPNavMeshPathfinder                FPNavMeshFunn
 | `GridWidth/Height` | `int` | Grid dimensions |
 | `GridCellSize` | `FP64` | Cell size |
 | `GridOrigin` | `FPVector2` | Grid origin |
+| `BakeAgentRadius` | `FP64` | Agent radius the source was baked with (bake settings block) — consumed as `ObstacleRadiusInset` |
+| `BakeMaxSlopeDeg` | `FP64` | Max walkable slope baked with (bake settings block) — graph-local query auto-derives its climb cap |
+| `BakeAgentHeight` / `BakeAgentClimb` | `FP64` | Recorded bake settings block (no runtime consumer) |
 
 ### FPNavMeshTriangle
 
@@ -167,6 +175,9 @@ var navSystem  = new FPNavAgentSystem(navMesh, query, pathfinder, funnel, logger
 
 // Enable ORCA avoidance (optional)
 navSystem.SetAvoidance(new FPNavAvoidance());
+// Register the NavMesh boundary as static obstacles (wall avoidance). Call AFTER SetAvoidance.
+// On all peers/server for a deterministic match (see Static Obstacles below).
+navSystem.LoadNavMeshObstacles();
 
 // Spawn an agent — attach NavAgentComponent to an ECS entity
 var entity = frame.CreateEntity();
@@ -179,6 +190,25 @@ nav.HasNavDestination = true;
 // Per-tick update (inside ISystem.Update) — collect entities with NavAgentComponent and batch-process
 navSystem.Update(ref frame, entities, entityCount, currentTick, dt);
 ```
+
+## Static Obstacles (ORCA)
+
+`FPNavAvoidance` adds RVO2 static-obstacle half-planes on top of agent-agent avoidance, so agents steer around walls/cliffs (not just each other). Obstacle lines are **hard constraints** — `LinearProgram3` never relaxes them (only agent lines are relaxed), so velocity never leaks through a wall.
+
+**Two obstacle sources (same flat format):** `FPVector2[] vertices + int[] polygonOffsets` fed to `FPNavAvoidance.LoadObstacles(...)`:
+
+1. **NavMesh boundary** (Unity/Godot) — `FPNavMeshObstacleExtractor.Extract(navMesh, out verts, out offsets)` walks the boundary edges (`neighbor == -1`), orienting each by the interior (opposite) vertex — no triangle-winding assumption — and chains them by rotating around each shared vertex through the walkable fan (handles pinch/bowtie vertices). Outer boundaries come out clockwise, holes counter-clockwise, automatically. `FPNavAgentSystem.LoadNavMeshObstacles()` wraps extract + load using the system's own NavMesh.
+2. **Convex polygon rings** — e.g. procedurally baked terrain blocks — passed directly to `LoadObstacles`.
+
+Convex and non-convex (reflex) rings are both handled (the RVO2 non-convex leg arms are present). Convex CCW input exercises only the convex paths.
+
+**Winding convention:** free (walkable) space is on the **right** of each edge's `unitDir`. Solid blocks (agents outside) are wound CCW; walkable-boundary loops (agents inside) CW. Callers guarantee this — the NavMesh extractor by construction, procedural sources by their gate.
+
+**Determinism:** obstacle data is **per-peer local static** — it is *not* in the wire/frame/state hash. All peers load the same baked geometry, so every peer extracts an identical obstacle set and computes identical avoidance velocities. In server-driven (SD) mode the **client and server must both** call `LoadNavMeshObstacles()` — a one-sided wiring makes `ComputeNewVelocity` diverge and desyncs. `FPNavAgentSystem.DebugObstacleCount` is a setup-time diagnostic (0 while avoidance is set ⇒ missing wiring or a boundary-free mesh). Load is once per match (tick-independent), idempotent-replace across stage changes; the hot path stays GC-0.
+
+**Graph-local obstacle selection (multi-floor / ramp):** `FPNavAgentSystem` picks obstacle candidates by walking the NavMesh adjacency (BFS) outward from the agent's current triangle rather than scanning every loaded segment, so only walls on the agent's own floor/ramp are considered — a stacked upper floor whose walls overlap in XZ no longer yields phantom obstacles. Expansion is gated by a per-edge step-delta floor test, a padded XZ range, and a climb cap: on a mesh that records its bake slope (`FPNavMesh.BakeMaxSlopeDeg`) the cap auto-derives as `obstRange·sin(slope)`, otherwise `MaxClimbWithinHorizon` (∞ by default). Only *which* segments are selected changes; the half-plane math stays XZ-2D and GC-0. An unlocalized agent (seed triangle `-1`) falls back to the brute-force scan.
+
+> **Radius inset / clearance (`ObstacleRadiusInset`):** a baked NavMesh boundary is inset from the real wall by the bake **Agent Radius** (Unity min 0.05, **0 not allowed**; Godot per-resource). Since ORCA also holds the agent its own radius off the obstacle line, a naive setup double-counts clearance — agents stop ~`bakeRadius + simRadius` from walls, blocking tight corridors. `FPNavAvoidance.ObstacleRadiusInset` cancels the baked inset: the effective obstacle radius is `max(0, agent.Radius − ObstacleRadiusInset)`. `LoadNavMeshObstacles()` auto-sets it to the asset's recorded `BakeAgentRadius` (bake settings block), so under the `R_sim = R_bake` convention the effective radius is 0 and the boundary itself is the constraint (matching the point-agent funnel path, which hugs corners). Per-peer local config — auto-riding the asset keeps lockstep peers symmetric; consumers may override after the load. Keep the baked mesh clean (a fragmented mesh yields spurious obstacle rings).
 
 ## NavMesh Export & Visualization *(Editor)*
 
@@ -205,10 +235,11 @@ Shared bake steps:
 | `MAX_CORRIDOR` | `NavAgentComponent`, `FPNavMeshPathfinder` | 128 | Max length of A* / agent corridor |
 | `MAX_WAYPOINTS` | `FPNavMeshFunnel` | 64 | Max number of Funnel waypoints |
 | `MAX_ITERATIONS` | `FPNavMeshPathfinder` | 4096 | Max A* iterations |
-| `MAX_ORCA_LINES` | `FPNavAvoidance` | 64 | Max ORCA half-planes |
+| `MAX_ORCA_LINES` | `FPNavAvoidance` | 64 | Max ORCA half-planes (obstacle + agent) |
+| `MAX_OBST_LINES` | `FPNavAvoidance` | 48 | Max obstacle half-planes (= `MAX_ORCA_LINES − MAX_NEIGHBORS`; reserves agent-line slots) |
 | `MAX_NEIGHBORS` | `FPNavAvoidance` | 16 | Max ORCA neighbor agents |
 | `DEFAULT_AREA_MASK` | `FPNavAgentSystem` | `~0` | Default area mask (all areas allowed) |
 
 ---
 
-*Last updated: 2026-06-09 — Godot exporter + visualizer added; baking pipeline shared via `FPNavMeshBuildPipeline`, each engine bakes its own scene.*
+*Last updated: 2026-07-23 — graph-local obstacle query (BFS multi-floor/ramp, bake-slope climb cap), clearance tuning (`ObstacleRadiusInset` auto-applied from the recorded bake-settings block), position-correction pass, non-convex/dual-source extraction. (2026-07-22: ORCA static obstacles — hard-constraint LP3, `FPNavMeshObstacleExtractor`, `LoadNavMeshObstacles()`, `MAX_OBST_LINES`.)*
