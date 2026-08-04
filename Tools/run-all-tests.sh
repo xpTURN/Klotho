@@ -2,19 +2,23 @@
 #
 # run-all-tests.sh — Klotho integrated test runner
 #
-# Runs the .NET unit tests (dotnet test) plus the Brawler Unity Test Runner
+# Runs the .NET unit tests (dotnet test) plus the Unity Test Runner suites
 # (EditMode, via command line) from a single entry point and prints a final
-# console summary report.
+# console summary report. Two Unity projects are covered: Brawler on the primary
+# editor, and Unity2022.Tests on the 2022.3 LTS line the package declares as its
+# minimum (a separate editor install).
 #
 # Usage:
-#   Tools/run-all-tests.sh                # run everything (.NET + Unity)
-#   Tools/run-all-tests.sh --dotnet-only  # .NET tests only
-#   Tools/run-all-tests.sh --unity-only   # Unity EditMode tests only
-#   Tools/run-all-tests.sh --no-build     # pass --no-build to dotnet test
+#   Tools/run-all-tests.sh                  # run everything (.NET + both Unity projects)
+#   Tools/run-all-tests.sh --dotnet-only    # .NET tests only
+#   Tools/run-all-tests.sh --unity-only     # Unity EditMode tests only
+#   Tools/run-all-tests.sh --no-unity-2022  # skip the 2022.3 LTS project (editor not installed)
+#   Tools/run-all-tests.sh --no-build       # pass --no-build to dotnet test
 #   Tools/run-all-tests.sh -h | --help
 #
 # Environment variables:
-#   UNITY_PATH   Override the Unity executable path (default: Hub 6000.3.9f1)
+#   UNITY_PATH        Override the Unity executable path (default: Hub 6000.3.9f1)
+#   UNITY_2022_PATH   Override the 2022.3 LTS editor path (default: Hub 2022.3.62f3)
 #
 # Exit code: non-zero if anything fails (CI friendly).
 
@@ -32,10 +36,16 @@ UNITY_VERSION="6000.3.9f1"
 UNITY_PROJECT="${REPO_ROOT}/Samples/Brawler"
 UNITY_PATH="${UNITY_PATH:-/Applications/Unity/Hub/Editor/${UNITY_VERSION}/Unity.app/Contents/MacOS/Unity}"
 
+# Unity 2022.3 LTS compatibility project. Runs on its own editor install by design —
+# the suite exists to validate the oldest editor the package supports (package.json
+# declares "unity": "2022.3"), so it cannot share the primary editor above.
+UNITY_2022_VERSION="2022.3.62f3"
+UNITY_2022_PROJECT="${REPO_ROOT}/Samples/Unity2022.Tests"
+UNITY_2022_PATH="${UNITY_2022_PATH:-/Applications/Unity/Hub/Editor/${UNITY_2022_VERSION}/Unity.app/Contents/MacOS/Unity}"
+
 # .NET test projects
 DOTNET_TEST_PROJECTS=(
   "Tools/KlothoGenerator.Tests/KlothoGenerator.Tests.csproj"
-  "Samples/Klotho.Core.Tests/Klotho.Core.Tests.csproj"
   "Samples/Klotho.Runtime.Tests/Klotho.Runtime.Tests.csproj"
   "Samples/DevLobbyServer.Tests/DevLobbyServer.Tests.csproj"
 )
@@ -43,16 +53,18 @@ DOTNET_TEST_PROJECTS=(
 # ── Option parsing ───────────────────────────────────────────────────────────
 RUN_DOTNET=1
 RUN_UNITY=1
+RUN_UNITY_2022=1
 DOTNET_NO_BUILD=0
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dotnet-only) RUN_UNITY=0 ;;
-    --unity-only)  RUN_DOTNET=0 ;;
-    --no-build)    DOTNET_NO_BUILD=1 ;;
-    -h|--help)     usage; exit 0 ;;
+    --dotnet-only)   RUN_UNITY=0 ;;
+    --unity-only)    RUN_DOTNET=0 ;;
+    --no-unity-2022) RUN_UNITY_2022=0 ;;
+    --no-build)      DOTNET_NO_BUILD=1 ;;
+    -h|--help)       usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
   esac
   shift
@@ -68,8 +80,9 @@ fi
 section() { echo; echo "${C_BLD}${C_CYN}=== $* ===${C_RST}"; }
 
 mkdir -p "${RESULTS_DIR}"
-# Clean up results from the previous run
-rm -f "${RESULTS_DIR}"/*.trx "${RESULTS_DIR}"/*.xml 2>/dev/null || true
+# Clean up results from the previous run. Logs are included so a renamed/removed suite
+# cannot leave an orphaned editor log behind (they grow to hundreds of MB).
+rm -f "${RESULTS_DIR}"/*.trx "${RESULTS_DIR}"/*.xml "${RESULTS_DIR}"/*.log 2>/dev/null || true
 
 # ── .NET tests ───────────────────────────────────────────────────────────────
 run_dotnet_tests() {
@@ -100,25 +113,29 @@ run_dotnet_tests() {
 }
 
 # ── Unity EditMode tests ─────────────────────────────────────────────────────
-run_unity_tests() {
-  section "Unity Test Runner (EditMode, batch mode)"
-  if [[ ! -x "${UNITY_PATH}" ]]; then
-    echo "${C_RED}Unity executable not found:${C_RST} ${UNITY_PATH}" >&2
-    echo "  Set the UNITY_PATH environment variable to point at it." >&2
+# run_unity_editmode <label> <editor-exe> <project-dir> <slug> <path-env-var>
+# The slug names both artifacts (unity-<slug>.xml / .log); the .xml name is what the
+# summary parser globs, so it must stay unique per project.
+run_unity_editmode() {
+  local label="$1" editor="$2" project="$3" slug="$4" path_var="$5"
+
+  if [[ ! -x "${editor}" ]]; then
+    echo "${C_RED}Unity executable not found:${C_RST} ${editor}" >&2
+    echo "  Set the ${path_var} environment variable to point at it." >&2
     return 1
   fi
 
-  local results_xml="${RESULTS_DIR}/unity-brawler-editmode.xml"
-  local unity_log="${RESULTS_DIR}/unity-editmode.log"
+  local results_xml="${RESULTS_DIR}/unity-${slug}.xml"
+  local unity_log="${RESULTS_DIR}/unity-${slug}.log"
 
-  echo "${C_BLD}▶ Brawler EditMode${C_RST}  (log: ${unity_log})"
+  echo "${C_BLD}▶ ${label}${C_RST}  (log: ${unity_log})"
   # -runTests handles batch mode and exit automatically (do not combine with -quit).
   # Unity returns an exit code based on the test result (0=pass, 2=test failure, etc.).
-  "${UNITY_PATH}" \
+  "${editor}" \
     -runTests \
     -batchmode \
     -nographics \
-    -projectPath "${UNITY_PROJECT}" \
+    -projectPath "${project}" \
     -testPlatform EditMode \
     -testResults "${results_xml}" \
     -logFile "${unity_log}" \
@@ -132,6 +149,23 @@ run_unity_tests() {
     return 1
   fi
   return ${rc}
+}
+
+run_unity_tests() {
+  section "Unity Test Runner (EditMode, batch mode)"
+  local overall=0
+
+  run_unity_editmode "Brawler EditMode (${UNITY_VERSION})" \
+    "${UNITY_PATH}" "${UNITY_PROJECT}" "brawler-editmode" "UNITY_PATH" || overall=1
+
+  if [[ "${RUN_UNITY_2022}" -eq 1 ]]; then
+    run_unity_editmode "Unity2022.Tests EditMode (${UNITY_2022_VERSION})" \
+      "${UNITY_2022_PATH}" "${UNITY_2022_PROJECT}" "2022lts-editmode" "UNITY_2022_PATH" || overall=1
+  else
+    echo "${C_YEL}▶ Unity2022.Tests EditMode — skipped (--no-unity-2022)${C_RST}"
+  fi
+
+  return ${overall}
 }
 
 # ── Final summary report (parses TRX + Unity NUnit XML) ──────────────────────

@@ -55,10 +55,10 @@
 **/SdSample/*.sln
 **/SdSample/*.slnx
 
-**/Unity2022/*.csproj
-**/Unity2022/*.sln
-**/Unity2022/*.slnx
+**/Unity2022.Tests/*.csproj
+**/Unity2022.Tests/*.sln
+**/Unity2022.Tests/*.slnx
 
 **/export_presets.cfg
 
-Klotho.sln
+Klotho.Tests.sln

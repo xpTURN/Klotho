@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1] - 2026-08-04
+
+### Tests — the engine-agnostic suite runs headless under `dotnet test`
+
+- **~1,600 engine-agnostic tests moved off the Unity Test Runner into a single dotnet project, `Klotho.Runtime.Tests` (NUnit).** The deterministic core — fixed-point math, ECS, physics, navigation, networking, replay, and the desync/probe diagnostics — now runs headless under `dotnet test` in a couple of seconds instead of a batch-mode editor boot. Brawler's EditMode suite drops from 2,552 tests to 918; what stays behind is what genuinely needs the editor — the Unity `Vector`/`Quaternion`/`AnimationCurve` parity oracles, the GC-allocation constraints, the Gameplay-assembly systems, and full engine integration. NUnit 3's classic assertions match the API the editor tests were already written against, so the bulk of the move is source-identical; the pure test harness (headless simulation, transport, sweep matrix) is shared into the new project rather than converted.
+- **The two dotnet test projects collapsed into one.** The former `Klotho.Core.Tests` (xUnit) — home of the headless contract, entitlement, replay-fidelity, and NavMesh-obstacle tests — was converted to NUnit and folded into `Klotho.Runtime.Tests`, ending a split that existed only by test framework and not by scope, since both exercised the same runtime assembly. New engine-agnostic tests now have one home and one convention.
+
 ## [0.7.0] - 2026-07-23
 
 ### Navigation — agents avoid walls, not just each other
@@ -31,10 +38,6 @@
 
 - **Brawler wires NavMesh obstacle avoidance on both its client and its dedicated server**, so bots steer around the stage walls; its stages are baked with a small agent radius so the clearance lines up end to end.
 - **The NavMesh visualizer draws the extracted obstacle rings** on both the Unity editor window and the Godot dock, so a stage's obstacle boundary can be inspected before it ever runs; the Godot samples ship the same view.
-
-### Tests
-
-- **~1,600 engine-agnostic tests moved out of the Unity Test Runner into a new `Klotho.Runtime.Tests` (dotnet/NUnit) project**, so they run under `dotnet test` without the editor (Brawler EditMode 2,552 → 918).
 
 ## [0.6.1] - 2026-07-21
 

@@ -1,0 +1,35 @@
+{
+    "name": "xpTURN.Klotho.Unity2022.Tests",
+    "rootNamespace": "",
+    "references": [
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner",
+        "xpTURN.Polyfill.Runtime",
+        "xpTURN.Klotho.Logging",
+        "xpTURN.Klotho.Logging.Unity",
+        "xpTURN.Klotho.Runtime",
+        "xpTURN.Klotho.Runtime.Unity",
+        "xpTURN.Klotho.Gameplay",
+        "xpTURN.Klotho.DataAsset.Json",
+        "xpTURN.Klotho.LiteNetLib",
+        "xpTURN.Klotho.Editor",
+        "xpTURN.Klotho.Editor.ECS",
+        "xpTURN.Klotho.Editor.FSM"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "UNITY_EDITOR"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
