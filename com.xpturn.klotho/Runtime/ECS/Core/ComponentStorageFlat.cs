@@ -46,6 +46,11 @@ namespace xpTURN.Klotho.ECS
         // For Filter iterators — a dense (entityIndex) view sliced to the active entity count.
         public ReadOnlySpan<int> DenseToSparse => DenseSpan.Slice(0, Count);
 
+        // Type-erased view of Count + Sparse, for FilterMutationGuard. Reads live, so it sees the
+        // compaction a Remove performs behind the span the Filter captured.
+        internal ComponentStorageWatch Watch =>
+            new ComponentStorageWatch(_heap, _countOffset, _sparseOffset, _capacity);
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool Has(int entityIndex)
         {

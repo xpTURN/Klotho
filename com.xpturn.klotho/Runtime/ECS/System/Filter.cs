@@ -10,6 +10,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal Filter(ComponentStorageFlat<T1> storage1, EntityManager entities)
         {
@@ -17,10 +18,13 @@ namespace xpTURN.Klotho.ECS
             _denseToSparse = storage1.DenseToSparse;   // span derived once in ctor (one MemoryMarshal.Cast)
             _count = storage1.Count;
             _index = 0;
+            _guard = new FilterMutationGuard(storage1.Watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -28,6 +32,7 @@ namespace xpTURN.Klotho.ECS
 
                 if (_entities.IsAlive(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -49,6 +54,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal Filter(ComponentStorageFlat<T1> storage1, ComponentStorageFlat<T2> storage2, EntityManager entities)
         {
@@ -56,22 +62,29 @@ namespace xpTURN.Klotho.ECS
             _storage2 = storage2;
             _entities = entities;
 
+            ComponentStorageWatch watch;
+
             // For efficiency, iterate over the smaller storage
             if (storage1.Count <= storage2.Count)
             {
                 _denseToSparse = storage1.DenseToSparse;
                 _count = storage1.Count;
+                watch = storage1.Watch;
             }
             else
             {
                 _denseToSparse = storage2.DenseToSparse;
                 _count = storage2.Count;
+                watch = storage2.Watch;
             }
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -81,6 +94,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage1.Has(entityIndex)
                     && _storage2.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -104,6 +118,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal Filter(
             ComponentStorageFlat<T1> storage1,
@@ -119,24 +134,30 @@ namespace xpTURN.Klotho.ECS
             // Select and iterate over the smallest storage
             int min = storage1.Count;
             _denseToSparse = storage1.DenseToSparse;
+            var watch = storage1.Watch;
 
             if (storage2.Count < min)
             {
                 min = storage2.Count;
                 _denseToSparse = storage2.DenseToSparse;
+                watch = storage2.Watch;
             }
             if (storage3.Count < min)
             {
                 min = storage3.Count;
                 _denseToSparse = storage3.DenseToSparse;
+                watch = storage3.Watch;
             }
 
             _count = min;
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -147,6 +168,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage2.Has(entityIndex)
                     && _storage3.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -172,6 +194,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal Filter(
             ComponentStorageFlat<T1> storage1,
@@ -188,17 +211,21 @@ namespace xpTURN.Klotho.ECS
 
             int min = storage1.Count;
             _denseToSparse = storage1.DenseToSparse;
+            var watch = storage1.Watch;
 
-            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; }
-            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; }
-            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; }
+            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; watch = storage2.Watch; }
+            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; watch = storage3.Watch; }
+            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; watch = storage4.Watch; }
 
             _count = min;
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -210,6 +237,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage3.Has(entityIndex)
                     && _storage4.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -237,6 +265,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal Filter(
             ComponentStorageFlat<T1> storage1,
@@ -255,18 +284,22 @@ namespace xpTURN.Klotho.ECS
 
             int min = storage1.Count;
             _denseToSparse = storage1.DenseToSparse;
+            var watch = storage1.Watch;
 
-            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; }
-            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; }
-            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; }
-            if (storage5.Count < min) { min = storage5.Count; _denseToSparse = storage5.DenseToSparse; }
+            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; watch = storage2.Watch; }
+            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; watch = storage3.Watch; }
+            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; watch = storage4.Watch; }
+            if (storage5.Count < min) { min = storage5.Count; _denseToSparse = storage5.DenseToSparse; watch = storage5.Watch; }
 
             _count = min;
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -279,6 +312,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage4.Has(entityIndex)
                     && _storage5.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -305,6 +339,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal FilterWithout(
             ComponentStorageFlat<T1> storage1,
@@ -317,10 +352,13 @@ namespace xpTURN.Klotho.ECS
             _denseToSparse = storage1.DenseToSparse;
             _count = storage1.Count;
             _index = 0;
+            _guard = new FilterMutationGuard(storage1.Watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -330,6 +368,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage1.Has(entityIndex)
                     && !_exclude.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -351,6 +390,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal FilterWithout(
             ComponentStorageFlat<T1> storage1,
@@ -363,21 +403,27 @@ namespace xpTURN.Klotho.ECS
             _exclude = exclude;
             _entities = entities;
 
+            ComponentStorageWatch watch;
             if (storage1.Count <= storage2.Count)
             {
                 _denseToSparse = storage1.DenseToSparse;
                 _count = storage1.Count;
+                watch = storage1.Watch;
             }
             else
             {
                 _denseToSparse = storage2.DenseToSparse;
                 _count = storage2.Count;
+                watch = storage2.Watch;
             }
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -388,6 +434,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage2.Has(entityIndex)
                     && !_exclude.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -411,6 +458,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal FilterWithout(
             ComponentStorageFlat<T1> storage1,
@@ -427,16 +475,20 @@ namespace xpTURN.Klotho.ECS
 
             int min = storage1.Count;
             _denseToSparse = storage1.DenseToSparse;
+            var watch = storage1.Watch;
 
-            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; }
-            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; }
+            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; watch = storage2.Watch; }
+            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; watch = storage3.Watch; }
 
             _count = min;
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -448,6 +500,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage3.Has(entityIndex)
                     && !_exclude.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -473,6 +526,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal FilterWithout(
             ComponentStorageFlat<T1> storage1,
@@ -491,17 +545,21 @@ namespace xpTURN.Klotho.ECS
 
             int min = storage1.Count;
             _denseToSparse = storage1.DenseToSparse;
+            var watch = storage1.Watch;
 
-            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; }
-            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; }
-            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; }
+            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; watch = storage2.Watch; }
+            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; watch = storage3.Watch; }
+            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; watch = storage4.Watch; }
 
             _count = min;
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -514,6 +572,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage4.Has(entityIndex)
                     && !_exclude.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
@@ -541,6 +600,7 @@ namespace xpTURN.Klotho.ECS
         private readonly ReadOnlySpan<int> _denseToSparse;
         private readonly int _count;
         private int _index;
+        private FilterMutationGuard _guard;
 
         internal FilterWithout(
             ComponentStorageFlat<T1> storage1,
@@ -561,18 +621,22 @@ namespace xpTURN.Klotho.ECS
 
             int min = storage1.Count;
             _denseToSparse = storage1.DenseToSparse;
+            var watch = storage1.Watch;
 
-            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; }
-            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; }
-            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; }
-            if (storage5.Count < min) { min = storage5.Count; _denseToSparse = storage5.DenseToSparse; }
+            if (storage2.Count < min) { min = storage2.Count; _denseToSparse = storage2.DenseToSparse; watch = storage2.Watch; }
+            if (storage3.Count < min) { min = storage3.Count; _denseToSparse = storage3.DenseToSparse; watch = storage3.Watch; }
+            if (storage4.Count < min) { min = storage4.Count; _denseToSparse = storage4.DenseToSparse; watch = storage4.Watch; }
+            if (storage5.Count < min) { min = storage5.Count; _denseToSparse = storage5.DenseToSparse; watch = storage5.Watch; }
 
             _count = min;
             _index = 0;
+            _guard = new FilterMutationGuard(watch);
         }
 
         public bool Next(out EntityRef entity)
         {
+            _guard.Check();
+
             while (_index < _count)
             {
                 int entityIndex = _denseToSparse[_index];
@@ -586,6 +650,7 @@ namespace xpTURN.Klotho.ECS
                     && _storage5.Has(entityIndex)
                     && !_exclude.Has(entityIndex))
                 {
+                    _guard.Record(entityIndex);
                     entity = new EntityRef(entityIndex, _entities.GetVersion(entityIndex));
                     return true;
                 }
