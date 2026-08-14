@@ -1428,17 +1428,9 @@ PrefabInstance:
       value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 8213086385032628623, guid: 1fa7675e191ad49ae83ae00a0d00d6b1, type: 3}
-      propertyPath: _items
-      value: 
-      objectReference: {fileID: 303981387}
-    - target: {fileID: 8213086385032628623, guid: 1fa7675e191ad49ae83ae00a0d00d6b1, type: 3}
       propertyPath: _gameHUD
       value: 
       objectReference: {fileID: 1715779268}
-    - target: {fileID: 8213086385032628623, guid: 1fa7675e191ad49ae83ae00a0d00d6b1, type: 3}
-      propertyPath: _characters
-      value: 
-      objectReference: {fileID: 266705889}
     - target: {fileID: 8213086385032628623, guid: 1fa7675e191ad49ae83ae00a0d00d6b1, type: 3}
       propertyPath: _resultScreen
       value: 
@@ -1447,10 +1439,6 @@ PrefabInstance:
       propertyPath: _cameraController
       value: 
       objectReference: {fileID: 659088868}
-    - target: {fileID: 8213086385032628623, guid: 1fa7675e191ad49ae83ae00a0d00d6b1, type: 3}
-      propertyPath: '_movingPlatforms.Array.data[0]'
-      value: 
-      objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
@@ -1578,6 +1566,10 @@ PrefabInstance:
     serializedVersion: 3
     m_TransformParent: {fileID: 2111532282}
     m_Modifications:
+    - target: {fileID: 719762222860033686, guid: 4732efe74758e4dc3bdde504d5f16f3b, type: 3}
+      propertyPath: m_OnClick.m_PersistentCalls.m_Calls.Array.data[0].m_Target
+      value: 
+      objectReference: {fileID: 1586705824667993624}
     - target: {fileID: 1796704119361015062, guid: 4732efe74758e4dc3bdde504d5f16f3b, type: 3}
       propertyPath: m_Name
       value: Slots
@@ -1666,6 +1658,10 @@ PrefabInstance:
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
       objectReference: {fileID: 0}
+    - target: {fileID: 8686417829759310046, guid: 4732efe74758e4dc3bdde504d5f16f3b, type: 3}
+      propertyPath: m_OnClick.m_PersistentCalls.m_Calls.Array.data[0].m_Target
+      value: 
+      objectReference: {fileID: 1586705824667993624}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []

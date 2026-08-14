@@ -12,6 +12,7 @@ using xpTURN.Klotho.Network;
 using xpTURN.Klotho.Serialization;
 using System.Collections.Generic;
 using xpTURN.Klotho.Deterministic.Physics;
+using xpTURN.Klotho.Deterministic.Random;
 
 namespace Brawler
 {
@@ -57,8 +58,29 @@ namespace Brawler
         // sample dependency (the gate likewise decodes ownership inline).
         private const int DemoConsumableId = 100;
 
-        public FPNavMesh NavMesh { get { return _navMesh; } }
-        public FPNavMeshQuery NavQuery { get; private set; }
+        // INavMeshProvider must expose the SIMULATION's mesh/query, not the one it started
+        // with: a runtime rebake swaps them, and diagnostics that keep showing the base
+        // mesh draw paths straight through buildings. Delegating to the agent system — the
+        // object SwapNavMesh actually rebinds — makes staleness impossible, including on the
+        // direct SwapNavMesh path.
+        // NOTE: _navMesh stays readonly and keeps holding the BASE mesh — RebakeContext
+        // rebakes from it on every call, so overwriting it would break the snapshot contract.
+        //
+        // Only NavMesh has a fallback, and not by oversight: before RegisterSystems there IS no
+        // query to fall back to. _navMesh arrives with the callbacks; the query is built inside
+        // RegisterSystems, in the same breath as the agent system that holds it. So the two are
+        // null at different times and nothing can close that gap here.
+        //
+        // It never shows, because both are read from inside the simulation and the simulation
+        // does not exist until RegisterSystems has run — the sample's only NavQuery consumer is
+        // a bot FSM action. Worth naming rather than leaving as an apparent inconsistency: a
+        // consumer that null-checks NavMesh and then dereferences NavQuery would be relying on
+        // that timing, not on anything guaranteed here.
+        public FPNavMesh NavMesh { get { return _agentSystem?.CurrentMesh ?? _navMesh; } }
+        public FPNavMeshQuery NavQuery { get { return _agentSystem?.CurrentQuery; } }
+
+        private FPNavAgentSystem _agentSystem;
+        public FPNavMeshRebakeContext RebakeContext { get; private set; }
         public BotFSMSystem BotFSMSystem { get; private set; }
 
         public INavAgentSnapshotProvider NavAgentSnapshotProvider => BotFSMSystem;
@@ -92,10 +114,15 @@ namespace Brawler
 
             BotFSMSystem botFSMSystem = null;
 
-            var query       = new FPNavMeshQuery(_navMesh, null);
-            var pathfinder  = new FPNavMeshPathfinder(_navMesh, query, null);
-            var funnel      = new FPNavMeshFunnel(_navMesh, query, null);
-            var agentSystem = new FPNavAgentSystem(_navMesh, query, pathfinder, funnel, null);
+            // The trio keeps whatever logger it is born with — rebinding does not replace the
+            // objects, so a null here would silence FindPath's out-of-navmesh errors for the whole
+            // room. It used to get quietly upgraded by the first building placement, back when a
+            // swap built new ones; that accident is now a decision.
+            IKLogger navLogger = simulation.Frame.Logger;
+            var query       = new FPNavMeshQuery(_navMesh, navLogger);
+            var pathfinder  = new FPNavMeshPathfinder(_navMesh, query, navLogger);
+            var funnel      = new FPNavMeshFunnel(_navMesh, query, navLogger);
+            var agentSystem = new FPNavAgentSystem(_navMesh, query, pathfinder, funnel, navLogger);
             agentSystem.SetAvoidance(new FPNavAvoidance());
             // Registers the NavMesh boundary as ORCA static obstacles (wall avoidance) and applies
             // the baked asset's own Agent Radius as the obstacle inset — both peers load the same
@@ -107,7 +134,22 @@ namespace Brawler
             botFSMSystem = new BotFSMSystem(agentSystem);
             botFSMSystem.SetQuery(query);
 
-            NavQuery = query;
+            // Per-match rebake snapshot (JIT warming is built into CreateSnapshot;
+            // it is a no-op under IL2CPP). Throws on unsupported bases (multi-level/off-grid):
+            // runtime building placement is then unavailable for this stage — surfaced at load.
+            try
+            {
+                // Through the shared helper, never FPNavMeshRebaker.CreateContext directly — the
+                // server has to build the SAME catalog into its snapshot or a placement one end
+                // accepts is refused by the other (BrawlerBuildingShapes.CreateContext).
+                RebakeContext = BrawlerBuildingShapes.CreateContext(_navMesh, simulation.Frame.Logger);
+            }
+            catch (System.Exception e)
+            {
+                simulation.Frame.Logger?.KWarning($"[BrawlerSimulationCallbacks] rebake snapshot unavailable for this stage: {e.Message}");
+            }
+
+            _agentSystem = agentSystem;
             BotFSMSystem = botFSMSystem;
 
             BrawlerSimSetup.RegisterSystems(
@@ -116,8 +158,67 @@ namespace Brawler
                 _dataAssets,
                 _staticColliders,
                 botFSMSystem,
-                _stageId
+                _stageId,
+                RebakeContext
             );
+        }
+
+        /// <summary>
+        /// After a full state is applied (late join /
+        /// corrective reset) the restored BuildingComponents are frame state but the navmesh
+        /// is still the base — rebake once from the components so the nav fingerprint
+        /// matches the peers. No-op when the stage has no rebake snapshot or no buildings.
+        /// </summary>
+        public void OnFullStateApplied(IKlothoEngine engine, Frame frame)
+        {
+            if (RebakeContext == null || BotFSMSystem == null)
+                return;
+            // Sized from the ENGINE STORAGE bound, not the game's policy cap and not a literal:
+            // this must hold every building the frame can possibly contain, whatever policy is in
+            // force. The literal 33 that used to sit here was wrong twice over — it could not
+            // follow a raised MaxCount (so only the joining peer rebaked a subset), and its `+1`
+            // was copied from the placement path, which needs a slot for the candidate being
+            // validated. There is no candidate here.
+            //
+            // A local rather than a field, deliberately. The guide blesses a one-off allocation
+            // ("fine for a one-off") and reserves the reused-buffer rule for paths that run per
+            // placement; this one runs at join and resync. Hoisting it would cost the command
+            // path's _placeScratch its stated reason for existing — that field is there because
+            // THAT path is hot, and a copy of it here would say otherwise.
+            var buffer = new FPBuildingPlacement[PlatformerCommandSystem.BuildingSlotCapacity];
+            int count = PlatformerCommandSystem.CollectBuildings(ref frame, buffer);
+            if (count == 0)
+                return;
+
+            // The hook contract is "do not throw" (ISimulationCallbacks.OnFullStateApplied), so the
+            // rejection cases are ours to report, not the engine's to absorb. They are reachable
+            // here in a way the command path's are not: this also runs on a hash MISMATCH, i.e. on
+            // a building set nothing has vouched for. Leaving the old mesh installed is the honest
+            // outcome — the engine's nav fingerprint check is what surfaces the resulting
+            // divergence, and swapping in a half-carved mesh would be worse than not swapping.
+            FPNavMesh mesh;
+            try
+            {
+                // The buffer goes in with its live count, not trimmed to an exact-size copy —
+                // that trim is what the length-is-the-count reading used to force, and
+                // placementCount exists to remove it.
+                mesh = FPNavMeshRebaker.RebakePlacements(
+                    RebakeContext, buffer, frame.Logger, PlatformerCommandSystem.PlacementRules, count);
+            }
+            catch (System.Exception e)
+            {
+                frame.Logger?.KError(
+                    $"[BrawlerSimulationCallbacks] post-fullstate rebake rejected {count} building(s), " +
+                    $"keeping the current navmesh: {e.Message}");
+                return;
+            }
+
+            // Swap WITHOUT reseeding. Only this peer runs this hook, so a reseed here writes hashed
+            // NavAgent state on one side of a state hash that was just verified — see
+            // BotFSMSystem.SwapForRestoredState for why that is a divergence and not a repair.
+            BotFSMSystem.SwapForRestoredState(ref frame, mesh);
+            RebakeContext.CommitSwap(mesh);
+            frame.Logger?.KInformation($"[BrawlerSimulationCallbacks] post-fullstate rebake: {count} building(s)");
         }
 
         public void OnInitializeWorld(IKlothoEngine engine)
@@ -279,6 +380,110 @@ namespace Brawler
             // is the one-shot entry point — initial send + handle creation. Subsequent retries run
             // inside the tracker via _spawnBuilder factory invocation.
             _spawnHandle = engine.IssueOnce(_spawnBuilder);
+        }
+
+        /// <summary>Picks the orientation for a new building. "Random" here still has to be
+        /// reproducible, so it comes from the match seed keyed by tick rather than from
+        /// UnityEngine.Random — a replay of this session has to make the same choice.</summary>
+        private static int RandomOrientation(Frame frame, ulong salt)
+        {
+            ref readonly var seed = ref frame.GetReadOnlySingleton<RandomSeedComponent>();
+            var rng = DeterministicRandom.FromSeed(
+                seed.Seed, BrawlerBuildingShapes.OrientationFeatureKey, (ulong)frame.Tick ^ salt);
+            return rng.NextInt(0, BrawlerBuildingShapes.Directions);
+        }
+
+        /// <summary>
+        /// Test entry: places an oriented building two cells in front of the local
+        /// character via the reliable channel (IssueOnce → server-routed → verified stream) —
+        /// safe to trigger from a single client in SD, unlike the headless bot-injection demo.
+        /// The orientation is drawn at random from the shape catalog, which is the point of the P4
+        /// wiring: an axis-aligned rect would not have one.
+        /// No-op when the stage has no rebake snapshot or the local character is absent.
+        /// </summary>
+        public void SendPlaceBuildingCommand(IKlothoEngine engine)
+        {
+            if (RebakeContext == null)
+                return;
+            var frame = ((EcsSimulation)engine.Simulation).Frame;
+            int playerId = engine.LocalPlayerId;
+
+            var filter = frame.Filter<TransformComponent, CharacterComponent>();
+            while (filter.Next(out var entity))
+            {
+                ref readonly var ch = ref frame.GetReadOnly<CharacterComponent>(entity);
+                if (ch.PlayerId != playerId || ch.IsDead)
+                    continue;
+                ref readonly var tr = ref frame.GetReadOnly<TransformComponent>(entity);
+                // Quantised to the placement grid, not rounded to whole units. The grid is
+                // 1/1024 of a world unit, so the character's actual position survives instead of
+                // being flattened — which is what lets a placement sit where a flush neighbour
+                // would go (FPGeoPredicates.Quantize).
+                var centre = new FPVector3(
+                    FPGeoPredicates.Quantize(tr.Position.x + FP64.FromInt(2)),
+                    tr.Position.y,
+                    FPGeoPredicates.Quantize(tr.Position.z));
+                int orientation = RandomOrientation(frame, (ulong)playerId);
+                // Pooled, not `new`: IssueOnce's factory hands the instance to the framework, which
+                // owns and eventually recycles it (ILockstepEngine.IssueOnce · ReliableCommandTracker
+                // .Issue both state this). The factory is re-invoked on every retry, so a `new` here
+                // is a fresh allocation per attempt on the one path the pool exists to keep quiet.
+                //
+                // Every field the command declares is assigned below, deliberately: CommandPool.Get
+                // resets only PlayerId and Tick, so a recycled instance still carries the previous
+                // caller's values in everything else. SequenceNumber is the one exception — the
+                // tracker stamps it on both the initial send and each retry.
+                engine.IssueOnce(() =>
+                {
+                    var cmd = CommandPool.Get<PlaceBuildingCommand>();
+                    cmd.ShapeId = BrawlerBuildingShapes.BoxShape;
+                    cmd.Orientation = orientation;
+                    cmd.Centre = centre;
+                    return cmd;
+                });
+                return;
+            }
+        }
+
+        /// <summary>
+        /// Test entry: places a HEXAGON in front of the local character, via its own
+        /// command. Separate from the box because a hexagon has no orientation to send — no integer
+        /// hexagon is symmetric under 60 degrees, so the turns a rotate button would offer are not
+        /// in the catalog (see BrawlerBuildingShapes). Wire to a second UI button.
+        /// </summary>
+        public void SendPlaceHexBuildingCommand(IKlothoEngine engine)
+        {
+            if (RebakeContext == null)
+                return;
+            var frame = ((EcsSimulation)engine.Simulation).Frame;
+            int playerId = engine.LocalPlayerId;
+
+            var filter = frame.Filter<TransformComponent, CharacterComponent>();
+            while (filter.Next(out var entity))
+            {
+                ref readonly var ch = ref frame.GetReadOnly<CharacterComponent>(entity);
+                if (ch.PlayerId != playerId || ch.IsDead)
+                    continue;
+                ref readonly var tr = ref frame.GetReadOnly<TransformComponent>(entity);
+                // Snapped to the hexagon's own tiling lattice, so pressing this repeatedly builds
+                // a honeycomb rather than a scatter of near misses. Without it the touch rule is
+                // on but unreachable from the UI: no tiling delta is a whole world unit, so a
+                // free-hand position essentially never lands flush.
+                BrawlerBuildingShapes.SnapHexPlacement(
+                    RebakeContext.ShapeExpansion,
+                    tr.Position.x + FP64.FromInt(2), tr.Position.z,
+                    out FP64 hx, out FP64 hz);
+                var centre = new FPVector3(hx, tr.Position.y, hz);
+                // Pooled — see the sibling in SendPlaceBuildingCommand for why, and for why every
+                // declared field is assigned rather than relying on a fresh object's zeroes.
+                engine.IssueOnce(() =>
+                {
+                    var cmd = CommandPool.Get<PlaceHexBuildingCommand>();
+                    cmd.Centre = centre;
+                    return cmd;
+                });
+                return;
+            }
         }
 
         // Factory body invoked by the reliability tracker on initial send AND every retry. Each call

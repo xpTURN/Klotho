@@ -11,11 +11,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// </summary>
     public static class FPNavMeshSerializer
     {
-        private const int VERSION = 3;
+        private const int VERSION = 4;
 
-        // FPNavMeshTriangle: int(4)*12 + FPVector2(16) + FP64(8) + int(4) + FP64(8) + bool(1) + FP64*3(24) = 109 bytes
-        // (+24 for minY, maxY, centerY added in VERSION 2)
-        private const int TRIANGLE_SIZE = 109;
+        // FPNavMeshTriangle: int(4)*6 + FPVector2(16) + FP64(8) + int(4) + bool(1) + byte(1) + FP64(8) + FP64*3(24) = 86 bytes
+        // (+24 for minY, maxY, centerY added in VERSION 2;
+        //  VERSION 4 replaced the six portal ints with a single portalFlip byte: 109 -> 86)
+        private const int TRIANGLE_SIZE = 86;
 
         // === Span-based serialization (cross-platform, no GC) ===
 
@@ -47,7 +48,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // triangles
             writer.WriteInt32(navMesh.Triangles.Length);
             for (int i = 0; i < navMesh.Triangles.Length; i++)
-                WriteTriangle(ref writer, ref navMesh.Triangles[i]);
+                WriteTriangle(ref writer, in navMesh.Triangles[i]);
 
             // BoundsXZ (center + extents = 4 FP64)
             writer.WriteFP(navMesh.BoundsXZ.center);
@@ -176,9 +177,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 sb.Append("    {");
                 sb.Append($"\"v0\":{t.v0},\"v1\":{t.v1},\"v2\":{t.v2}");
                 sb.Append($",\"neighbor0\":{t.neighbor0},\"neighbor1\":{t.neighbor1},\"neighbor2\":{t.neighbor2}");
-                sb.Append($",\"portal0Left\":{t.portal0Left},\"portal0Right\":{t.portal0Right}");
-                sb.Append($",\"portal1Left\":{t.portal1Left},\"portal1Right\":{t.portal1Right}");
-                sb.Append($",\"portal2Left\":{t.portal2Left},\"portal2Right\":{t.portal2Right}");
+                sb.Append($",\"portalFlip\":{t.portalFlip}");
+                // Portal indices are derivable (edge vertex pair ordered by the flip bit) and no
+                // consumer reads them, but the dump is for eyeballing so keep them spelled out.
+                for (int e = 0; e < 3; e++)
+                {
+                    t.GetPortal(e, out int pl, out int pr);
+                    sb.Append($",\"portal{e}Left\":{pl},\"portal{e}Right\":{pr}");
+                }
                 sb.Append($",\"centerXZ\":[{t.centerXZ.x.ToFloat()},{t.centerXZ.y.ToFloat()}]");
                 sb.Append($",\"area\":{t.area.ToFloat()}");
                 sb.Append($",\"areaMask\":{t.areaMask}");
@@ -209,7 +215,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             return sb.ToString();
         }
 
-        private static void WriteTriangle(ref SpanWriter writer, ref FPNavMeshTriangle tri)
+        private static void WriteTriangle(ref SpanWriter writer, in FPNavMeshTriangle tri)
         {
             // vertex indices
             writer.WriteInt32(tri.v0);
@@ -221,13 +227,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             writer.WriteInt32(tri.neighbor1);
             writer.WriteInt32(tri.neighbor2);
 
-            // portals
-            writer.WriteInt32(tri.portal0Left);
-            writer.WriteInt32(tri.portal0Right);
-            writer.WriteInt32(tri.portal1Left);
-            writer.WriteInt32(tri.portal1Right);
-            writer.WriteInt32(tri.portal2Left);
-            writer.WriteInt32(tri.portal2Right);
+            // portal orientation, one bit per edge (VERSION 4 — was six int indices)
+            writer.WriteByte(tri.portalFlip);
 
             // precomputed values
             writer.WriteFP(tri.centerXZ);
@@ -256,13 +257,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             tri.neighbor1 = reader.ReadInt32();
             tri.neighbor2 = reader.ReadInt32();
 
-            // portals
-            tri.portal0Left = reader.ReadInt32();
-            tri.portal0Right = reader.ReadInt32();
-            tri.portal1Left = reader.ReadInt32();
-            tri.portal1Right = reader.ReadInt32();
-            tri.portal2Left = reader.ReadInt32();
-            tri.portal2Right = reader.ReadInt32();
+            // portal orientation, one bit per edge (VERSION 4 — was six int indices)
+            tri.portalFlip = reader.ReadByte();
 
             // precomputed values
             tri.centerXZ = reader.ReadFPVector2();

@@ -74,9 +74,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 1, v2 = 3,
                 neighbor0 = -1, neighbor1 = 3, neighbor2 = 1,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = 1, portal1Right = 3,   // T0→T3 shared: v1-v3
-                portal2Left = 3, portal2Right = 0,   // T0→T1 shared: v3-v0
                 centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1,
@@ -89,9 +86,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 3, v2 = 2,
                 neighbor0 = 0, neighbor1 = -1, neighbor2 = -1,
-                portal0Left = 0, portal0Right = 3,   // T1→T0 shared: v0-v3
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = -1, portal2Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1,
@@ -104,9 +98,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 4, v2 = 5,
                 neighbor0 = -1, neighbor1 = -1, neighbor2 = 3,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = -1, portal1Right = -1,   // boundary (x=8): v4-v5
-                portal2Left = 5, portal2Right = 1,   // T2→T3 shared: v1-v5
                 centerXZ = new FPVector2(FP64.FromFloat(20f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1,
@@ -119,9 +110,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 5, v2 = 3,
                 neighbor0 = 2, neighbor1 = -1, neighbor2 = 0,
-                portal0Left = 1, portal0Right = 5,   // T3→T2 shared: v1-v5
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 3, portal2Right = 1,
                 centerXZ = new FPVector2(FP64.FromFloat(16f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1,
@@ -159,7 +147,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         private static FPNavMesh Create4TriNavMesh_WithAreaMask()
         {
             var mesh = Create4TriNavMesh();
-            mesh.Triangles[3].areaMask = 2; // only T3 is area 2
+            mesh.TrianglesMutable[3].areaMask = 2; // only T3 is area 2
             return mesh;
         }
 
@@ -263,7 +251,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         {
             var mesh = Create4TriNavMesh();
             // T0 blocked → cannot start at T0
-            mesh.Triangles[0].isBlocked = true;
+            mesh.TrianglesMutable[0].isBlocked = true;
 
             var query = new FPNavMeshQuery(mesh, _logger);
             var pf = new FPNavMeshPathfinder(mesh, query, _logger);
@@ -281,7 +269,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             var mesh = Create4TriNavMesh();
             // T0 blocked, can start from T1 but the path to T2 must pass through T0
             // T1→T0(blocked) → no path
-            mesh.Triangles[0].isBlocked = true;
+            mesh.TrianglesMutable[0].isBlocked = true;
 
             var query = new FPNavMeshQuery(mesh, _logger);
             var pf = new FPNavMeshPathfinder(mesh, query, _logger);
@@ -355,9 +343,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         {
             var mesh = Create4TriNavMesh();
             // T0, T2, T3 blocked → can start from T1 but cannot go anywhere
-            mesh.Triangles[0].isBlocked = true;
-            mesh.Triangles[2].isBlocked = true;
-            mesh.Triangles[3].isBlocked = true;
+            mesh.TrianglesMutable[0].isBlocked = true;
+            mesh.TrianglesMutable[2].isBlocked = true;
+            mesh.TrianglesMutable[3].isBlocked = true;
 
             var query = new FPNavMeshQuery(mesh, _logger);
             var pf = new FPNavMeshPathfinder(mesh, query, _logger);
@@ -374,7 +362,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         public void FindPath_StartBlocked_ReturnsFalse()
         {
             var mesh = Create4TriNavMesh();
-            mesh.Triangles[0].isBlocked = true;
+            mesh.TrianglesMutable[0].isBlocked = true;
 
             var query = new FPNavMeshQuery(mesh, _logger);
             var pf = new FPNavMeshPathfinder(mesh, query, _logger);
@@ -391,7 +379,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         public void FindPath_EndBlocked_ReturnsFalse()
         {
             var mesh = Create4TriNavMesh();
-            mesh.Triangles[2].isBlocked = true;
+            mesh.TrianglesMutable[2].isBlocked = true;
 
             var query = new FPNavMeshQuery(mesh, _logger);
             var pf = new FPNavMeshPathfinder(mesh, query, _logger);
@@ -408,7 +396,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         public void FindPath_HighCostMultiplier_StillFinds()
         {
             var mesh = Create4TriNavMesh();
-            mesh.Triangles[2].costMultiplier = FP64.FromInt(100);
+            mesh.TrianglesMutable[2].costMultiplier = FP64.FromInt(100);
 
             var query = new FPNavMeshQuery(mesh, _logger);
             var pf = new FPNavMeshPathfinder(mesh, query, _logger);

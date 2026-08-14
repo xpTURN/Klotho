@@ -37,5 +37,23 @@ namespace xpTURN.Klotho.Core
         /// Games with no per-join world state leave this empty.
         /// </summary>
         void OnPlayerJoinedWorld(IKlothoEngine engine, ECS.Frame frame, int playerId);
+
+        /// <summary>
+        /// Called after a received full state has been applied locally (late join /
+        /// corrective reset) — the frame now holds the restored world. Use this to rebuild
+        /// peer-local derivatives that live outside the state hash (for example: rebake
+        /// the navmesh from restored building components so the nav fingerprint matches).
+        /// Default no-op (default interface method) — existing implementations unaffected.
+        /// <para><b>Do not throw.</b> The state is already applied and live by the time this runs,
+        /// and the engine cannot undo it — so there is no failure this can usefully signal by
+        /// unwinding. Handle domain errors here (a rejected placement is the game's to report),
+        /// and treat a throw as a bug. The engine does guard the call so that a violation cannot
+        /// cost it the return value its callers depend on, but that guard is a last line of
+        /// defence, not a licence: it logs a KError and marks the apply as having a broken
+        /// derivative, which leaves this peer simulating a sound state on a stale navmesh.</para>
+        /// <para>Also runs when the applied state's hash did NOT match, i.e. on an untrusted
+        /// world — implementations that validate their inputs should keep doing so.</para>
+        /// </summary>
+        void OnFullStateApplied(IKlothoEngine engine, ECS.Frame frame) { }
     }
 }

@@ -26,7 +26,7 @@ namespace xpTURN.Klotho.Core.Tests
         private static FPNavMesh Build(FPVector3[] verts, int[] idx, double bakeMaxSlopeDeg = 0)
         {
             var areas = new int[idx.Length / 3];
-            return FPNavMeshBuildPipeline.Build(verts, idx, areas, 5.0, null, null,
+            return FPNavMeshBuildPipeline.Build(verts, idx, areas, 5.0, null,
                 bakeMaxSlopeDeg: bakeMaxSlopeDeg);
         }
 
@@ -237,7 +237,7 @@ namespace xpTURN.Klotho.Core.Tests
 
         private static bool HasBoundaryEdgeStartingAt(FPNavMesh nav, int t, FPVector2 point)
         {
-            ref FPNavMeshTriangle tri = ref nav.Triangles[t];
+            ref readonly FPNavMeshTriangle tri = ref nav.Triangles[t];
             for (int e = 0; e < 3; e++)
             {
                 if (tri.GetNeighbor(e) != -1)

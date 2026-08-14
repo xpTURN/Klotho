@@ -30,7 +30,7 @@ namespace xpTURN.Klotho.Core.Tests
         {
             var verts = new[] { V(0, 0), V(12, 0), V(12, 12), V(9, 12), V(9, 3), V(0, 3) };
             var idx = new[] { 0, 1, 4, 0, 4, 5, 1, 2, 4, 2, 3, 4 };
-            return FPNavMeshBuildPipeline.Build(verts, idx, new int[idx.Length / 3], 5.0, null, null);
+            return FPNavMeshBuildPipeline.Build(verts, idx, new int[idx.Length / 3], 5.0, null);
         }
 
         // Drives one seeded agent from start to dest; returns the closest XZ distance to dest seen.
@@ -140,7 +140,7 @@ namespace xpTURN.Klotho.Core.Tests
         {
             var verts = new[] { V(0, 0), V(10, 0), V(10, 10), V(0, 10) };
             var idx = new[] { 0, 1, 2, 0, 2, 3 };
-            var built = FPNavMeshBuildPipeline.Build(verts, idx, new int[2], 5.0, null, null,
+            var built = FPNavMeshBuildPipeline.Build(verts, idx, new int[2], 5.0, null,
                 bakeAgentRadius: 0.5, bakeMaxSlopeDeg: 45, bakeAgentHeight: 2, bakeAgentClimb: 0.75);
             Assert.AreEqual(FP64.Half.RawValue, built.BakeAgentRadius.RawValue);
 

@@ -1034,6 +1034,21 @@ namespace xpTURN.Klotho.Core
                 OnResyncFailed?.Invoke();
             }
 
+            // DerivativeRebuildFailed — the state and its hash are sound; only this peer's
+            // out-of-hash derivative rebuild (navmesh) threw. Deliberately NOT folded into the
+            // branch above: that one ends the match, and a local rebuild failure — usually this
+            // client's assets or config disagreeing with the authority's — does not warrant that.
+            // Re-requesting is no use either, since the same deterministic rebuild fails the same
+            // way. So fall through to normal post-processing (the state is good and its bookkeeping
+            // must land) and make the degradation visible instead.
+            if (applyResult == FullStateApplyResult.DerivativeRebuildFailed)
+            {
+                _logger?.KError(
+                    $"[KlothoEngine][SD] FullState applied at tick={tick} but this client's peer-local " +
+                    $"derivative rebuild failed — its navmesh no longer matches its state. Not an abort: " +
+                    $"the state is sound and a retry would fail identically. See the preceding KError for the cause.");
+            }
+
             // F47 (L1): truncate the recording at the pre-reset frontier before the state jump lands in the
             // bookkeeping below. Placed after the Skipped / HashMismatch+AutoAbort early-returns so only an
             // actually-applied resync truncates; the helper's reason gate + IsRecording guard keep it inert

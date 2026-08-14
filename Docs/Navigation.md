@@ -22,6 +22,10 @@ A deterministic NavMesh navigation system based on FP64. All computation runs on
 | `FPNavMeshObstacleExtractor` | Extracts ORCA obstacle rings from the NavMesh boundary (`neighbor == -1` edges); load/build-time only |
 | `NavCorridorHelper` | Corridor-search and corridor-maintenance helper utilities |
 | `FPNavMeshSerializer` | Binary serialization / deserialization |
+| `FPNavMeshRebaker` | Runtime rebake: base mesh + building footprints → new `FPNavMesh` (see [Runtime Rebake](#runtime-rebake)) |
+| `FPConstrainedDelaunay` | Deterministic constrained Delaunay triangulation on the exact integer grid |
+| `FPBuildingShapeCatalog` | The set of footprints a game can place (integer offsets about the shape centre) |
+| `FPConvexOffset` | Expands a convex footprint by the agent radius (integer miter, conservative) |
 
 ## File Layout
 
@@ -40,7 +44,13 @@ com.xpturn.klotho/Runtime/Deterministic/Navigation/
 ├── FPNavAvoidance.cs         # ORCA collision avoidance (agent-agent + static obstacles)
 ├── FPObstacleVertex.cs       # Static-obstacle vertex struct (flat ring)
 ├── FPNavMeshObstacleExtractor.cs # NavMesh boundary → ORCA obstacle rings
-└── NavCorridorHelper.cs      # Corridor helper utilities
+├── NavCorridorHelper.cs      # Corridor helper utilities
+├── FPNavMeshRebaker.cs       # Runtime rebake orchestrator + snapshot/context/placement types
+├── FPNavMeshRebakeBufferPool.cs  # Reusable rebake work buffers (per room)
+├── FPConstrainedDelaunay.cs  # Deterministic constrained Delaunay triangulation
+├── FPBuildingShapeCatalog.cs # Shape table + radius-expanded derivative
+├── FPConvexOffset.cs         # Convex footprint ⊕ agent radius (integer miter)
+└── INavFingerprintSource.cs  # Cross-peer nav fingerprint hook
 
 com.xpturn.klotho/Unity/Editor/NavMesh/   # Unity Editor (baking + visualization)
 ├── FPNavMeshExporter.cs          # Unity NavMesh → FPNavMesh conversion tool
@@ -210,6 +220,23 @@ Convex and non-convex (reflex) rings are both handled (the RVO2 non-convex leg a
 
 > **Radius inset / clearance (`ObstacleRadiusInset`):** a baked NavMesh boundary is inset from the real wall by the bake **Agent Radius** (Unity min 0.05, **0 not allowed**; Godot per-resource). Since ORCA also holds the agent its own radius off the obstacle line, a naive setup double-counts clearance — agents stop ~`bakeRadius + simRadius` from walls, blocking tight corridors. `FPNavAvoidance.ObstacleRadiusInset` cancels the baked inset: the effective obstacle radius is `max(0, agent.Radius − ObstacleRadiusInset)`. `LoadNavMeshObstacles()` auto-sets it to the asset's recorded `BakeAgentRadius` (bake settings block), so under the `R_sim = R_bake` convention the effective radius is 0 and the boundary itself is the constraint (matching the point-agent funnel path, which hugs corners). Per-peer local config — auto-riding the asset keeps lockstep peers symmetric; consumers may override after the load. Keep the baked mesh clean (a fragmented mesh yields spurious obstacle rings).
 
+## Runtime Rebake
+
+Everything above assumes the NavMesh is fixed. It does not have to be: a building placed during a
+match can be carved out of the walkable region and the rest re-triangulated, deterministically, on
+every peer. A footprint then blocks only the space it covers rather than the whole corridor triangle
+it happens to sit in.
+
+The pieces live in this folder — `FPNavMeshRebaker` orchestrates, `FPConstrainedDelaunay` does the
+triangulation on the exact integer grid, `FPBuildingShapeCatalog` holds the footprints a game may
+place, `FPConvexOffset` expands them by the agent radius. The result is an ordinary `FPNavMesh`,
+indistinguishable from a baked one, which you install with
+`FPNavAgentSystem.SwapNavMesh(...)` — that rebinds the query, pathfinder and funnel and reseeds
+every agent, because triangle indices are rebuilt and the old ones mean nothing.
+
+**[Navigation.Rebake.md](Navigation.Rebake.md)** is the guide: footprint types, the placement grid,
+what gets rejected, the determinism envelope, and measured costs.
+
 ## NavMesh Export & Visualization *(Editor)*
 
 Both engines ship an editor exporter and visualizer; they share the geometry pipeline (`FPNavMeshBuildPipeline`) and produce the same `.bytes` binary format.
@@ -242,4 +269,4 @@ Shared bake steps:
 
 ---
 
-*Last updated: 2026-07-23 — graph-local obstacle query (BFS multi-floor/ramp, bake-slope climb cap), clearance tuning (`ObstacleRadiusInset` auto-applied from the recorded bake-settings block), position-correction pass, non-convex/dual-source extraction. (2026-07-22: ORCA static obstacles — hard-constraint LP3, `FPNavMeshObstacleExtractor`, `LoadNavMeshObstacles()`, `MAX_OBST_LINES`.)*
+*Last updated: 2026-08-12 — runtime NavMesh rebake (deterministic re-triangulation from building footprints, shape catalog, placement grid) — see [Navigation.Rebake.md](Navigation.Rebake.md). (2026-07-23: graph-local obstacle query (BFS multi-floor/ramp, bake-slope climb cap), clearance tuning (`ObstacleRadiusInset` auto-applied from the recorded bake-settings block), position-correction pass, non-convex/dual-source extraction.) (2026-07-22: ORCA static obstacles — hard-constraint LP3, `FPNavMeshObstacleExtractor`, `LoadNavMeshObstacles()`, `MAX_OBST_LINES`.)*

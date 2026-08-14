@@ -920,6 +920,9 @@ namespace xpTURN.Klotho.Core.Tests
         // the gap tick and asserts the pool's outstanding count is unchanged (delta 0). Full-path
         // gap-fill triggering (restoreTick < firstExecutionTick) is exercised by integration; this
         // unit test pins the helper's pool hygiene directly.
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+        // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
+        // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]
         public void SDClient_GapTickResim_RaisedEvent_ReturnedToPool_NoLeak()
         {
@@ -966,5 +969,6 @@ namespace xpTURN.Klotho.Core.Tests
                 "Gap-tick events are state-advance only and must be dropped, not buffered " +
                 $"(buffering would double-dispatch). Found {bufferedSynced} in the buffer.");
         }
+#endif
     }
 }

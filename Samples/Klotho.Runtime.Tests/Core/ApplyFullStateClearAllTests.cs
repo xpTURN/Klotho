@@ -131,7 +131,7 @@ namespace xpTURN.Klotho.Core.Tests
             Assert.AreEqual("Applied", result, "Hash matched path must return Applied");
             Assert.AreEqual(applyTick, host.Engine.CurrentTick, "CurrentTick must equal applyTick after restore");
             Assert.AreEqual(verifiedBefore, host.Engine.LastVerifiedTick,
-                "ApplyFullState internal must not modify _lastVerifiedTick (caller post-processing is §F-9 territory)");
+                "ApplyFullState internal must not modify _lastVerifiedTick — that is the caller's post-processing");
 
             AssertAllSlotsEmpty(ReadEventBuffer(host.Engine));
 
@@ -259,8 +259,11 @@ namespace xpTURN.Klotho.Core.Tests
         // ApplyFullState called EventPool.ClearAll() and wiped that tracking, so B's later legitimate
         // Return was flagged as an ownership violation (KError + pool-insert skip = leak). With the
         // fix (ClearAll removed) B's _outstanding survives and its Return is clean.
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+        // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
+        // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]
-        public void ApplyFullState_DoesNotWipeOtherEnginesPooledEvents_IMP60_30_E3()
+        public void ApplyFullState_DoesNotWipeOtherEnginesPooledEvents()
         {
             var host = _harness.Host;
 
@@ -284,15 +287,19 @@ namespace xpTURN.Klotho.Core.Tests
             EventPool.SetDiagnosticLogger(null);
 
             Assert.IsFalse(_log.Contains(KLogLevel.Error, "[EventPool] Return called on non-pool"),
-                "E-3: ApplyFullState must not wipe another engine's EventPool._outstanding — " +
+                "ApplyFullState must not wipe another engine's EventPool._outstanding — " +
                 "B's legitimate Return must not be flagged as an ownership violation (pre-fix: KError + leak).");
         }
+#endif
 
         // removing EventPool.ClearAll() must not surface a masked leak. Repeated
         // ApplyFullState with no ticks between must not accumulate outstanding pool instances
         // (the per-apply _eventBuffer.ClearAll() returns this engine's buffered events each time).
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+        // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
+        // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]
-        public void ApplyFullState_RepeatedApply_NoOutstandingGrowth_IMP60_30_E3()
+        public void ApplyFullState_RepeatedApply_NoOutstandingGrowth()
         {
             var host = _harness.Host;
             byte[] stateData = host.Simulation.SerializeFullState();
@@ -307,8 +314,9 @@ namespace xpTURN.Klotho.Core.Tests
 
             int delta = EventPool.GetOutstandingCount() - baseline;
             Assert.LessOrEqual(delta, 0,
-                $"E-3 NoLeak: repeated ApplyFullState must not accumulate outstanding pool events (delta={delta}). " +
+                $"repeated ApplyFullState must not accumulate outstanding pool events (delta={delta}). " +
                 "A positive delta would indicate a pre-existing leak that EventPool.ClearAll() was masking.");
         }
+#endif
     }
 }

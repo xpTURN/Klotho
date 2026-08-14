@@ -45,9 +45,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 1, v2 = 3,
                 neighbor0 = -1, neighbor1 = -1, neighbor2 = 1,
-                portal2Left = 3, portal2Right = 0,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = -1, portal1Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1,
@@ -59,9 +56,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 3, v2 = 2,
                 neighbor0 = 0, neighbor1 = -1, neighbor2 = -1,
-                portal0Left = 0, portal0Right = 3,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = -1, portal2Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 3,
@@ -161,12 +155,19 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
             for (int i = 0; i < original.Triangles.Length; i++)
             {
-                Assert.AreEqual(original.Triangles[i].portal0Left, restored.Triangles[i].portal0Left);
-                Assert.AreEqual(original.Triangles[i].portal0Right, restored.Triangles[i].portal0Right);
-                Assert.AreEqual(original.Triangles[i].portal1Left, restored.Triangles[i].portal1Left);
-                Assert.AreEqual(original.Triangles[i].portal1Right, restored.Triangles[i].portal1Right);
-                Assert.AreEqual(original.Triangles[i].portal2Left, restored.Triangles[i].portal2Left);
-                Assert.AreEqual(original.Triangles[i].portal2Right, restored.Triangles[i].portal2Right);
+                // Checks both portalFlip (the raw bit) and GetPortal (the decoded value): the
+                // bit can survive the round trip while decoding drifts, which only the latter
+                // catches, and the reverse holds too — on a boundary edge both read -1.
+                Assert.AreEqual(original.Triangles[i].portalFlip, restored.Triangles[i].portalFlip,
+                    $"T{i}: portalFlip");
+
+                for (int e = 0; e < 3; e++)
+                {
+                    original.Triangles[i].GetPortal(e, out int ol, out int or);
+                    restored.Triangles[i].GetPortal(e, out int rl, out int rr);
+                    Assert.AreEqual(ol, rl, $"T{i} e{e}: portal left");
+                    Assert.AreEqual(or, rr, $"T{i} e{e}: portal right");
+                }
             }
         }
 

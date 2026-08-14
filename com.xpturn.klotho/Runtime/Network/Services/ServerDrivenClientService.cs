@@ -1164,8 +1164,25 @@ namespace xpTURN.Klotho.Network
                 OnReconnected?.Invoke();
             }
 
-            (_engine as KlothoEngine)?.CheckStaticGeometryFingerprint(msg.StaticFingerprint);
             OnServerFullStateReceived?.Invoke(msg.Tick, msg.StateData, msg.StateHash);
+
+            // AFTER the apply, not before. The invoke above is a plain event, so it runs the whole
+            // apply synchronously — including the OnFullStateApplied hook that rebuilds peer-local
+            // derivatives (the navmesh) from the restored state. The sender's fingerprint was taken
+            // from ITS post-rebake state, so comparing before the apply pits this peer's pre-apply
+            // derivative against that and mismatches by construction on any state carrying runtime
+            // rebakes. That false positive is not free: the mismatch report is one-shot
+            // (_staticMismatchLogged re-arms only on a later MATCHING check), so it consumed the
+            // report a real divergence in the same window would have needed.
+            //
+            // Ordered this way the check also becomes the detector for a derivative rebuild that
+            // FAILED — the hook throwing leaves the navmesh behind the state it is now simulating,
+            // and this is what says so.
+            //
+            // Residual: an apply the engine skips (retreat guard) or drops leaves the state
+            // unchanged, so the comparison is against pre-apply derivatives just as it was before.
+            // Unchanged behaviour for that case, and it is the narrow one.
+            (_engine as KlothoEngine)?.CheckStaticGeometryFingerprint(msg.StaticFingerprint);
         }
 
         // ── Connection events ─────────────────────────────────────

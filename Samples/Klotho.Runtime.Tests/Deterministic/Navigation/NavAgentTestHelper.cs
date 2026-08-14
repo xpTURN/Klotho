@@ -101,9 +101,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 1, v2 = 3,
                 neighbor0 = -1, neighbor1 = 3, neighbor2 = 1,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = 1, portal1Right = 3,
-                portal2Left = 3, portal2Right = 0,
                 centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -113,9 +110,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 3, v2 = 2,
                 neighbor0 = 0, neighbor1 = -1, neighbor2 = -1,
-                portal0Left = 0, portal0Right = 3,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = -1, portal2Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -125,9 +119,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 4, v2 = 5,
                 neighbor0 = -1, neighbor1 = -1, neighbor2 = 3,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 5, portal2Right = 1,
                 centerXZ = new FPVector2(FP64.FromFloat(20f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -137,9 +128,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 5, v2 = 3,
                 neighbor0 = 2, neighbor1 = -1, neighbor2 = 0,
-                portal0Left = 1, portal0Right = 5,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 3, portal2Right = 1,
                 centerXZ = new FPVector2(FP64.FromFloat(16f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -204,9 +192,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 neighbor0 = 4,  // T4 via edge v0-v1
                 neighbor1 = -1, // boundary (v1-v3)
                 neighbor2 = 1,  // T1 via edge v3-v0
-                portal0Left = 0, portal0Right = 1,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 3, portal2Right = 0,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f + 4f / 3f), FP64.FromFloat(16f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -219,9 +204,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 neighbor0 = 0,  // T0 via edge v0-v3
                 neighbor1 = -1, // boundary
                 neighbor2 = -1, // boundary
-                portal0Left = 0, portal0Right = 3,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = -1, portal2Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(20f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -234,9 +216,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 neighbor0 = -1, // boundary
                 neighbor1 = -1, // boundary
                 neighbor2 = 3,  // T3 via edge v6-v4
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 6, portal2Right = 4,
                 centerXZ = new FPVector2(FP64.FromFloat(20f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -249,9 +228,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 neighbor0 = 2,  // T2 via edge v4-v6
                 neighbor1 = -1, // boundary
                 neighbor2 = 4,  // T4 via edge v1-v4
-                portal0Left = 4, portal0Right = 6,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 1, portal2Right = 4,
                 centerXZ = new FPVector2(FP64.FromFloat(16f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -264,9 +240,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 neighbor0 = -1, // boundary (v0-v4 diagonal)
                 neighbor1 = 3,  // T3 via edge v4-v1
                 neighbor2 = 0,  // T0 via edge v1-v0
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = 4, portal1Right = 1,
-                portal2Left = 1, portal2Right = 0,
                 centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -297,6 +270,84 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 vertices, triangles, bounds,
                 gridCells, gridTriangles,
                 gridWidth: 2, gridHeight: 2,
+                gridCellSize: FP64.FromInt(4),
+                gridOrigin: FPVector2.Zero
+            );
+        }
+
+        /// <summary>
+        /// A CLOCKWISE two-triangle square.
+        ///
+        /// Every other hand-written fixture is counter-clockwise, which stores every portal in the
+        /// edge's own vertex order `(va,vb)` — the `flip = 0` case of the one-bit portal encoding.
+        /// This one is the opposite, so it is the only fixture that covers the `flip = 1` path
+        /// where a portal is stored as `(vb,va)`. Four of the baked assets are clockwise too, but
+        /// reaching those needs a file load; this fixture is what covers the path in the layers
+        /// that run without assets.
+        ///
+        /// <code>
+        ///   v3(0,4)---v2(4,4)
+        ///     |  \  T1  |          T0 = (v0, v2, v1)   clockwise
+        ///     | T0 \    |          T1 = (v0, v3, v2)   clockwise
+        ///   v0(0,0)---v1(4,0)      shared edge = {v0,v2}
+        /// </code>
+        ///
+        /// The stored portals are the baker's own rule (`ComputePortalLeftRight`) applied by hand.
+        /// Its test value is `Cross(d, a-b) = -2 * SignedArea`; a clockwise triangle has negative
+        /// area, so the sign flips and the `else` branch (`left = vb`) is taken — both interior
+        /// edges therefore store `(vb, va)`.
+        /// </summary>
+        public static FPNavMesh CreateCwSquareNavMesh()
+        {
+            var vertices = new[]
+            {
+                new FPVector3(FP64.Zero, FP64.Zero, FP64.Zero),                       // v0 (0,0)
+                new FPVector3(FP64.FromInt(4), FP64.Zero, FP64.Zero),                 // v1 (4,0)
+                new FPVector3(FP64.FromInt(4), FP64.Zero, FP64.FromInt(4)),           // v2 (4,4)
+                new FPVector3(FP64.Zero, FP64.Zero, FP64.FromInt(4)),                 // v3 (0,4)
+            };
+
+            // T0 = (v0, v2, v1): Cross(v2-v0, v1-v0) = Cross((4,4),(4,0)) = -16 < 0 → CW
+            var t0 = new FPNavMeshTriangle
+            {
+                v0 = 0, v1 = 2, v2 = 1,
+                neighbor0 = 1,   // e0 = (v0,v2) = shared edge -> T1
+                neighbor1 = -1,  // e1 = (v2,v1) boundary
+                neighbor2 = -1,  // e2 = (v1,v0) boundary
+                portalFlip = 0x01,   // e0 is the only interior edge and it is CW -> bit 0 (portal = (vb,va))
+                centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(4f / 3f)),
+                area = FP64.FromInt(8),
+                areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
+            };
+
+            // T1 = (v0, v3, v2): Cross(v3-v0, v2-v0) = Cross((0,4),(4,4)) = -16 < 0 → CW
+            var t1 = new FPNavMeshTriangle
+            {
+                v0 = 0, v1 = 3, v2 = 2,
+                neighbor0 = -1,  // e0 = (v0,v3) boundary
+                neighbor1 = -1,  // e1 = (v3,v2) boundary
+                neighbor2 = 0,   // e2 = (v2,v0) = shared edge -> T0
+                portalFlip = 0x04,   // e2 is the only interior edge and it is CW -> bit 2 (portal = (vb,va))
+                centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(8f / 3f)),
+                area = FP64.FromInt(8),
+                areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
+            };
+
+            var triangles = new[] { t0, t1 };
+
+            var bounds = new FPBounds2(
+                new FPVector2(FP64.FromInt(2), FP64.FromInt(2)),
+                new FPVector2(FP64.FromInt(4), FP64.FromInt(4))
+            );
+
+            // 1x1 grid (cell size 4) — both triangles in one cell
+            var gridCells = new[] { 0, 2 };
+            var gridTriangles = new[] { 0, 1 };
+
+            return new FPNavMesh(
+                vertices, triangles, bounds,
+                gridCells, gridTriangles,
+                gridWidth: 1, gridHeight: 1,
                 gridCellSize: FP64.FromInt(4),
                 gridOrigin: FPVector2.Zero
             );

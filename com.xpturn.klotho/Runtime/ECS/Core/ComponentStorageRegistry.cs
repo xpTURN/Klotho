@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using xpTURN.Klotho.Deterministic;
 using xpTURN.Klotho.Serialization;
 
 namespace xpTURN.Klotho.ECS
@@ -43,6 +44,7 @@ namespace xpTURN.Klotho.ECS
         // === Layout + freeze state ===
         private static StorageLayout[] _layouts;
         private static int _heapSize;
+        private static long _layoutFingerprint;
         private static int _computedMaxEntities = -1;
         private static bool _frozen = false;
         // Config-supplied per-type slot-cap overrides (typeId→maxCount). Process-global layout input:
@@ -315,19 +317,24 @@ namespace xpTURN.Klotho.ECS
                 if (_computedMaxEntities == maxEntities && OverridesEqual(_maxCountOverrides, maxCountOverrides)
                     && PrunedSetEqual(_prunedSet, BuildEffectivePrunedSet(prunedComponentTypeIds)))
                     return;   // idempotent
-#if UNITY_EDITOR || UNITY_INCLUDE_TESTS || DEBUG
-                // Editor/test/debug builds: automatically relax cross-fixture freeze conflicts.
-                // Even when unit tests construct Frames with different maxEntities per fixture, layout is auto-recomputed.
-                // In release builds the #else branch throws (to protect determinism).
-                ResetForRecompute();
-#else
-                throw new InvalidOperationException(
-                    $"ComponentStorageRegistry frozen at maxEntities={_computedMaxEntities}, " +
-                    $"attempted EnsureLayoutComputed({maxEntities}) with a different maxEntities, " +
-                    $"maxCount-override map, or prune-set. Layout cannot be recomputed within a session " +
-                    $"(these must be process-uniform). " +
-                    $"Call ResetForTesting() (test code only) if session reset is required.");
-#endif
+                // Automatically relax cross-fixture freeze conflicts, so unit tests can construct
+                // Frames with different maxEntities per fixture without every one of them having
+                // to reset first. Gated at RUNTIME rather than by #if: the compile-time form made
+                // the suite behave differently in Debug and Release, which is how 170 Release
+                // failures went unnoticed behind "Release is just red". See AllowLayoutRecompute.
+                if (AllowLayoutRecompute)
+                {
+                    ResetForRecompute();
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"ComponentStorageRegistry frozen at maxEntities={_computedMaxEntities}, " +
+                        $"attempted EnsureLayoutComputed({maxEntities}) with a different maxEntities, " +
+                        $"maxCount-override map, or prune-set. Layout cannot be recomputed within a session " +
+                        $"(these must be process-uniform). " +
+                        $"Call ResetForTesting() (test code only) if session reset is required.");
+                }
             }
 
             _maxCountOverrides = maxCountOverrides;
@@ -371,6 +378,7 @@ namespace xpTURN.Klotho.ECS
             _heapSize = offset;
             _registeredTypeIdsSorted = registeredList.ToArray();   // Guaranteed ascending typeId order (loop order)
             _computedMaxEntities = maxEntities;
+            _layoutFingerprint = ComputeLayoutFingerprint(maxEntities);
             _frozen = true;
             // Invalidate TypeIdCache<T> populated before the layout existed. A typeId resolved pre-compute
             // (e.g. SimulationConfig.PruneComponent<T> at bootstrap, when _layouts was null) cached a
@@ -388,6 +396,60 @@ namespace xpTURN.Klotho.ECS
 #endif
         }
 
+        /// <summary>
+        /// Fingerprint of the frozen layout: which component types are registered, and how each is
+        /// sized. Peers whose fingerprints differ CANNOT produce equal state hashes —
+        /// <c>Frame.CalculateHash</c> folds every registered type, including the ones with zero
+        /// instances, so the registered SET is itself hash input. This property therefore adds no
+        /// constraint; it names one that was previously visible only as an unexplained hash
+        /// difference. The motivating case: a Unity Editor session registers Editor-only test
+        /// assemblies' components, which a player build does not have, so Editor and player build
+        /// can never agree on a state hash even with an identical world.
+        /// Compare this between peers before chasing a state-hash divergence.
+        ///
+        /// Historical note: the chained hash fold that preceded the layered one did NOT have
+        /// this property — an empty type contributed no bytes and was invisible, so a registry difference
+        /// stayed harmless until the day it silently became fatal. That is why the fingerprint is logged
+        /// unconditionally rather than behind a diagnostic flag.
+        /// </summary>
+        public static long LayoutFingerprint => _layoutFingerprint;
+
+        /// <summary>
+        /// Number of component types in the frozen LAYOUT — i.e. the set that
+        /// <c>Frame.CalculateHash</c> folds. Differs from <see cref="RegisteredTypeCount"/>, which
+        /// counts every scanned type including reservation-pruned ones.
+        /// </summary>
+        public static int LayoutTypeCount => _registeredTypeIdsSorted?.Length ?? 0;
+
+        private static long ComputeLayoutFingerprint(int maxEntities)
+        {
+            ulong h = FPHash.FNV_OFFSET;
+            h = FPHash.Hash(h, maxEntities);
+            h = FPHash.Hash(h, _registeredTypeIdsSorted.Length);
+            for (int i = 0; i < _registeredTypeIdsSorted.Length; i++)
+            {
+                int typeId = _registeredTypeIdsSorted[i];
+                ref readonly StorageLayout layout = ref _layouts[typeId];
+                h = FPHash.Hash(h, typeId);
+                h = FPHash.Hash(h, HashTypeName(_idToType[typeId].FullName));
+                h = FPHash.Hash(h, layout.SlotCapacity);
+                h = FPHash.Hash(h, layout.ComponentSize);
+            }
+            return (long)h;
+        }
+
+        /// <summary>
+        /// Explicit FNV over the characters. NOT string.GetHashCode(): that is randomized per
+        /// process, which would make two runs of the SAME build report different fingerprints.
+        /// </summary>
+        private static ulong HashTypeName(string name)
+        {
+            ulong h = FPHash.FNV_OFFSET;
+            for (int i = 0; i < name.Length; i++)
+                h = FPHash.Hash(h, (int)name[i]);
+            return h;
+        }
+
         public static ref readonly StorageLayout GetLayout(int typeId) => ref _layouts[typeId];
 
         public static int GetHeapSize(int maxEntities)
@@ -396,12 +458,43 @@ namespace xpTURN.Klotho.ECS
             return _heapSize;
         }
 
+        /// <summary>
+        /// Whether a conflicting <see cref="EnsureLayoutComputed"/> may silently recompute the
+        /// layout instead of throwing. Test/editor convenience only.
+        /// <para>Defaults ON for editor, Unity-test and DEBUG builds — the configurations a test
+        /// runner uses — and OFF everywhere else, which reproduces exactly what the old
+        /// <c>#if UNITY_EDITOR || UNITY_INCLUDE_TESTS || DEBUG</c> did for shipping code. What it
+        /// adds is a way for a Release TEST run to opt in, which the compile-time form could not
+        /// offer: the symbol is evaluated when this assembly is built, so a Release `dotnet test`
+        /// linked against a Release runtime got the shipping behaviour and 170 fixtures failed on
+        /// a freeze conflict they never hit in Debug.</para>
+        /// <para><c>internal</c>, so only the assemblies named in InternalsVisibleTo can set it.
+        /// A shipping process has no way to turn it on and still throws.</para>
+        /// </summary>
+        internal static bool AllowLayoutRecompute =
+#if UNITY_EDITOR || UNITY_INCLUDE_TESTS || DEBUG
+            true;
+#else
+            false;
+#endif
+
         // === Test-only reset ===
-        // Completely removed in release builds — protects determinism.
-        // The Runtime asmdef AssemblyInfo.cs declares InternalsVisibleTo("xpTURN.Klotho.Tests").
-        [Conditional("UNITY_EDITOR")]
-        [Conditional("UNITY_INCLUDE_TESTS")]
-        [Conditional("DEBUG")]
+        // Reachable only through InternalsVisibleTo (Runtime's AssemblyInfo.cs names the test and
+        // editor assemblies), which is what keeps it out of shipping code.
+        //
+        // Deliberately NOT [Conditional]. It used to carry UNITY_EDITOR/UNITY_INCLUDE_TESTS/DEBUG,
+        // and [Conditional] removes the CALL, not the method — so in a Release `dotnet test` every
+        // `ResetForTesting()` in a fixture silently became a no-op. That did not fail loudly: it
+        // left the registry frozen from whichever test ran first, and the freeze guard in
+        // EnsureLayoutComputed then threw for 146 of the 149 Release failures. Worse, one test
+        // (Fingerprint_IsStable_ForTheSameLayout) still PASSED, because the reset that was
+        // supposed to force a from-scratch recompute vanished and it ended up comparing a frozen
+        // fingerprint with itself — asserting nothing, in the exact place that asserts the
+        // fingerprint is a pure function of its inputs rather than of process state.
+        //
+        // Determinism is protected by the two things that remain build-independent: the method is
+        // internal, and the automatic freeze relaxation below stays editor/test/debug-only, so a
+        // shipping build still throws on a conflicting EnsureLayoutComputed.
         internal static void ResetForTesting()
         {
             ResetForRecompute();
@@ -409,10 +502,12 @@ namespace xpTURN.Klotho.ECS
 
         // Automatic cross-fixture freeze relaxation path, limited to editor/test/debug builds.
         // Called directly when EnsureLayoutComputed is re-invoked with a different maxEntities.
-        // Separated because ResetForTesting is stripped in release via [Conditional] and cannot share its body.
+        // Kept separate from ResetForTesting: that one is an explicit test action allowed in any
+        // build, this one is an implicit rescue that must never happen in a shipping process.
         private static void ResetForRecompute()
         {
             _computedMaxEntities = -1;
+            _layoutFingerprint = 0;
             _frozen = false;
             _layouts = null;
             _heapSize = 0;

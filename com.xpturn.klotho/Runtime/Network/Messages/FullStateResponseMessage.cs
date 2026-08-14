@@ -24,9 +24,10 @@ namespace xpTURN.Klotho.Network
         [KlothoOrder]
         public byte Kind;
 
-        // Diagnostic fingerprint of the sender's static geometry. The receiver compares it against
-        // its own to surface a static collider mismatch at join time (static is not in StateHash).
-        // 0 means "not provided" — GetStaticFingerprint never returns 0, so the receiver skips it.
+        // Diagnostic fingerprint of the sender's static environment (static colliders folded with
+        // the navigation fingerprint). The receiver compares it against its own to
+        // surface a static/navmesh mismatch at join time (neither is in StateHash).
+        // 0 means "not provided" — both producers avoid 0, so the receiver skips it.
         [KlothoOrder]
         public long StaticFingerprint;
 

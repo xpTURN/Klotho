@@ -115,6 +115,9 @@ namespace xpTURN.Klotho.Integration.Tests
 
         // ── seek re-simulation loop returns raised events to the pool (no leak) ──
 
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+        // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
+        // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]
         public void Replay_SeekReSimulationLoop_RaisedEventsReturnedToPool_NoLeak()
         {
@@ -150,6 +153,7 @@ namespace xpTURN.Klotho.Integration.Tests
                 "Seek re-simulation must drop its raised events back to the pool (E-5b leak). " +
                 $"Outstanding grew by {delta} across repeated seeks.");
         }
+#endif
 
         // ── backward seek re-dispatches Synced events on resumed playback ──
 
@@ -191,7 +195,7 @@ namespace xpTURN.Klotho.Integration.Tests
 
             Assert.AreEqual(2, syncedDispatchCount,
                 "Backward seek must lower the watermark so the resumed playback re-dispatches the " +
-                "Synced event (E-6 symptom ①). Pre-fix it stays silent (count remains 1).");
+                "Synced event (symptom 1). Before the fix it stays silent — count remains 1.");
         }
 
         // ── long backward seek does not false-fire the ClearTick dev guard ──
@@ -228,7 +232,7 @@ namespace xpTURN.Klotho.Integration.Tests
 
             Assert.IsFalse(logCapture.Contains(KLogLevel.Error, "destroys a NEWER occupant"),
                 "A long backward seek must reset the ring-wrap slot markers (ClearAll) so the " +
-                "resumed ClearTick does not false-fire the dev guard (E-6 symptom ②).");
+                "resumed ClearTick does not false-fire the dev guard (symptom 2).");
         }
     }
 }

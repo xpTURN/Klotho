@@ -930,6 +930,16 @@ namespace xpTURN.Klotho.Core
                 (_simulation as xpTURN.Klotho.ECS.EcsSimulation)?.LogStaticFingerprint(_logger, "boot");
             }
 
+            // Component-registry fingerprint. Logged on EVERY peer (no SD gate: the registry is
+            // frozen before any state arrives) because the registered type SET is state-hash input —
+            // Frame.CalculateHash folds every type, including empty ones. Two peers that differ here
+            // can never agree on a state hash, so this line is the first thing to compare when a
+            // hash mismatch shows up. Editor vs player build is the classic case: Editor-only test
+            // assemblies contribute components a player build does not have.
+            _logger?.KInformation(
+                $"[KlothoEngine][Registry] boot: types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount} " +
+                $"fp=0x{xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint:X16}");
+
             SaveSnapshot(0);
 
             if (enableRecording && !_isReplayMode)
@@ -1253,9 +1263,9 @@ namespace xpTURN.Klotho.Core
         public void EscalateExtraDelay(int step, int max)
         {
             int clampMax = _simConfig.MaxRollbackTicks / 2;
-            // ⓑ effective backstop: never let baseline+reactive exceed the rollback-budget clamp.
+            // Effective backstop: never let baseline+reactive exceed the rollback-budget clamp.
             if (RecommendedExtraDelay >= clampMax) return;
-            // ⓐ reactive-alone cap = max (ReactiveMax).
+            // Reactive-alone cap = max (ReactiveMax).
             int newReactive = Math.Min(_reactiveExtraDelay + step, max);
             if (newReactive <= _reactiveExtraDelay) return;
 

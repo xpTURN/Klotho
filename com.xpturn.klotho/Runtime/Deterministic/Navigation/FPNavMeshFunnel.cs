@@ -11,7 +11,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// </summary>
     public class FPNavMeshFunnel
     {
-        private readonly FPNavMesh _navMesh;
+        private FPNavMesh _navMesh;
 
         private static readonly FP64 FUNNEL_EPSILON = FP64.FromDouble(0.0001);
 
@@ -33,6 +33,17 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _portalLeft = new FPVector3[MAX_PORTALS];
             _portalRight = new FPVector3[MAX_PORTALS];
             _waypoints = new FPVector3[MAX_WAYPOINTS];
+        }
+
+        /// <summary>
+        /// Points this funnel at a different mesh. Its buffers are fixed-size, so there is nothing
+        /// to grow — but the mesh reference still has to move, or FindCorners keeps reading
+        /// vertices out of the mesh that was just replaced.
+        /// Part of a navmesh swap — see FPNavAgentSystem.SwapNavMesh.
+        /// </summary>
+        internal void Rebind(FPNavMesh newMesh)
+        {
+            _navMesh = newMesh;
         }
 
         /// <summary>
@@ -120,7 +131,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private void FindSharedPortal(int triIdx, int nextTriIdx,
             out FPVector3 left, out FPVector3 right)
         {
-            ref FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
+            ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
 
             for (int e = 0; e < 3; e++)
             {

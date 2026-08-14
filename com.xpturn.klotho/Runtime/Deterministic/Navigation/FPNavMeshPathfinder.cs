@@ -1,3 +1,4 @@
+using System;
 using xpTURN.Klotho.Logging;
 
 using xpTURN.Klotho.Deterministic.Math;
@@ -10,17 +11,17 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// </summary>
     public class FPNavMeshPathfinder
     {
-        private readonly FPNavMesh _navMesh;
+        private FPNavMesh _navMesh;
         private readonly FPNavMeshQuery _query;
         private readonly IKLogger _logger;
 
         // Pre-allocated A* buffers
         private FPNavMeshBinaryHeap _openSet;
-        private readonly FP64[] _gScores;
-        private readonly int[] _cameFrom;
-        private readonly bool[] _closed;
-        private readonly int[] _nodeGeneration;
-        private readonly FPVector2[] _entryPoints;
+        private FP64[] _gScores;
+        private int[] _cameFrom;
+        private bool[] _closed;
+        private int[] _nodeGeneration;
+        private FPVector2[] _entryPoints;
         private int _generation;
 
         // Corridor result buffer
@@ -44,6 +45,43 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _entryPoints = new FPVector2[triCount];
             _generation = 0;
             _corridor = new int[MAX_CORRIDOR];
+        }
+
+        /// <summary>
+        /// Points this pathfinder at a different mesh, keeping the working arrays.
+        /// Part of a navmesh swap — see FPNavAgentSystem.SwapNavMesh, which is the only thing
+        /// that should call it.
+        /// </summary>
+        internal void Rebind(FPNavMesh newMesh)
+        {
+            _navMesh = newMesh;
+
+            int triCount = newMesh.Triangles.Length;
+            if (triCount > _gScores.Length)
+            {
+                // All of these were sized together, so they run out together. The heap is rebuilt
+                // through its constructor rather than patched: it fills _positions with -1, and a
+                // hand-grown one would be all zeros — which Contains reads as "in the heap at
+                // slot 0", making every triangle look like it is already queued.
+                var openSet = new FPNavMeshBinaryHeap(triCount);
+                var gScores = new FP64[triCount];
+                var cameFrom = new int[triCount];
+                var closed = new bool[triCount];
+                var nodeGeneration = new int[triCount];
+                var entryPoints = new FPVector2[triCount];
+
+                // Allocate first, install after — see FPNavMeshQuery.Rebind.
+                _openSet = openSet;
+                _gScores = gScores;
+                _cameFrom = cameFrom;
+                _closed = closed;
+                _nodeGeneration = nodeGeneration;
+                _entryPoints = entryPoints;
+            }
+
+            // _generation is deliberately left alone — see FPNavMeshQuery.Rebind for why. Reset()
+            // pre-increments and the constructor starts at 0, so 0 is the permanent "never
+            // touched" sentinel; a grown array reads as untouched for free.
         }
 
         /// <summary>
@@ -168,6 +206,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         {
             _openSet.Clear();
             _generation++;
+            if (_generation == int.MaxValue)
+            {
+                // Generation 0 is the permanent "never touched" sentinel, so wrap to 1, not 0.
+                // Only _nodeGeneration needs clearing — TouchNode rewrites the other four
+                // whenever it sees a generation mismatch, so they follow from this one.
+                Array.Clear(_nodeGeneration, 0, _nodeGeneration.Length);
+                _generation = 1;
+            }
         }
 
 

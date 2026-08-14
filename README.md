@@ -219,6 +219,7 @@ Docs: [Docs/Samples/Brawler.md](Docs/Samples/Brawler.md)
 | [Docs/DeterministicMath.md](Docs/DeterministicMath.md) | Deterministic math (`FP64` 32.32 fixed-point · `FPVector*`/`FPQuaternion`/`FPMatrix` · trig · geometry · `DeterministicRandom`) |
 | [Docs/Replay.md](Docs/Replay.md) | Replay (record inputs · save/load · play/pause/seek/speed · determinism guarantees) |
 | [Docs/Navigation.md](Docs/Navigation.md) | Deterministic navigation (FPNavMesh · A* · Funnel · ORCA) |
+| [Docs/Navigation.Rebake.md](Docs/Navigation.Rebake.md) | Runtime NavMesh rebake — place buildings mid-match, deterministic re-triangulation |
 | [Docs/NavMeshVisualizer.Godot.md](Docs/NavMeshVisualizer.Godot.md) | `Godot (.NET)` editor tool — visualize a serialized `FPNavMesh` (`.bytes`) and validate pathfinding / agent simulation in the 3D viewport |
 | [Docs/PhysicsWorld.md](Docs/PhysicsWorld.md) | Deterministic physics (rigid bodies · colliders · contacts · triggers · CCD) |
 | [Docs/PhysicsVisualizer.Godot.md](Docs/PhysicsVisualizer.Godot.md) | `Godot (.NET)` runtime/editor tools — draw the live FPPhysics world (bodies · colliders · contacts), HUD inspector, static-collider viewer |

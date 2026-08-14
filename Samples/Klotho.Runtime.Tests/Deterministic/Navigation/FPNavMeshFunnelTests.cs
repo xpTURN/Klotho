@@ -52,9 +52,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 1, v2 = 3,
                 neighbor0 = -1, neighbor1 = -1, neighbor2 = 1,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 3, portal2Right = 0,
                 centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1,
@@ -66,9 +63,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 3, v2 = 2,
                 neighbor0 = 0, neighbor1 = -1, neighbor2 = -1,
-                portal0Left = 0, portal0Right = 3,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = -1, portal2Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1,
@@ -114,9 +108,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 1, v2 = 3,
                 neighbor0 = -1, neighbor1 = 3, neighbor2 = 1,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = 1, portal1Right = 3,
-                portal2Left = 3, portal2Right = 0,
                 centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -126,9 +117,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 3, v2 = 2,
                 neighbor0 = 0, neighbor1 = -1, neighbor2 = -1,
-                portal0Left = 0, portal0Right = 3,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = -1, portal2Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -138,9 +126,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 4, v2 = 5,
                 neighbor0 = -1, neighbor1 = -1, neighbor2 = 3,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 5, portal2Right = 1,
                 centerXZ = new FPVector2(FP64.FromFloat(20f / 3f), FP64.FromFloat(4f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -150,9 +135,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 5, v2 = 3,
                 neighbor0 = 2, neighbor1 = -1, neighbor2 = 0,
-                portal0Left = 1, portal0Right = 5,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 3, portal2Right = 1,
                 centerXZ = new FPVector2(FP64.FromFloat(16f / 3f), FP64.FromFloat(8f / 3f)),
                 area = FP64.FromInt(8),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -452,9 +434,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 1, v2 = 3,
                 neighbor0 = -1, neighbor1 = 3, neighbor2 = 1,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = 1, portal1Right = 3,
-                portal2Left = 3, portal2Right = 0,
                 centerXZ = new FPVector2(FP64.FromFloat(8f / 3f), FP64.FromFloat(0.01f / 3f)),
                 area = FP64.FromFloat(0.02f),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -464,9 +443,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 0, v1 = 3, v2 = 2,
                 neighbor0 = 0, neighbor1 = -1, neighbor2 = -1,
-                portal0Left = 0, portal0Right = 3,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = -1, portal2Right = -1,
                 centerXZ = new FPVector2(FP64.FromFloat(4f / 3f), FP64.FromFloat(0.02f / 3f)),
                 area = FP64.FromFloat(0.02f),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -476,9 +452,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 4, v2 = 5,
                 neighbor0 = -1, neighbor1 = -1, neighbor2 = 3,
-                portal0Left = -1, portal0Right = -1,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 5, portal2Right = 1,
                 centerXZ = new FPVector2(FP64.FromFloat(20f / 3f), FP64.FromFloat(0.01f / 3f)),
                 area = FP64.FromFloat(0.02f),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,
@@ -488,9 +461,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             {
                 v0 = 1, v1 = 5, v2 = 3,
                 neighbor0 = 2, neighbor1 = -1, neighbor2 = 0,
-                portal0Left = 1, portal0Right = 5,
-                portal1Left = -1, portal1Right = -1,
-                portal2Left = 3, portal2Right = 1,
                 centerXZ = new FPVector2(FP64.FromFloat(16f / 3f), FP64.FromFloat(0.02f / 3f)),
                 area = FP64.FromFloat(0.02f),
                 areaMask = 1, costMultiplier = FP64.One, isBlocked = false,

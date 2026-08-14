@@ -38,6 +38,11 @@ namespace xpTURN.Klotho.Core
         /// the engine via a public entry point (<c>ICommandSender.Send</c>, <c>KlothoEngine.InputCommand</c>)
         /// or an interface surface (<c>ILockstepNetworkService.SendCommand</c>, <c>IInputBuffer.AddCommand</c>) —
         /// ownership then transfers to the engine and the caller MUST NOT retain or reuse the instance.
+        /// <para><b>Only <c>PlayerId</c> and <c>Tick</c> are reset.</b> A recycled instance still holds
+        /// the previous caller's values in every field the command type declares, so the caller must
+        /// assign ALL of them — not just the ones that differ from a default. This is the trap when
+        /// converting a <c>new T { … }</c> initializer to a rent: the initializer left the rest at
+        /// zero, and this does not.</para>
         /// </summary>
         public static T Get<T>() where T : CommandBase, new()
         {

@@ -43,10 +43,95 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         public static void Extract(FPNavMesh navMesh, out FPVector2[] vertices, out int[] polygonOffsets,
             out int[] triSegStart, out int[] triSegList)
+            => Extract(navMesh, null, out vertices, out polygonOffsets, out triSegStart, out triSegList);
+
+        /// <summary>
+        /// Reusable working set for a caller that extracts repeatedly from the same room — today
+        /// <see cref="FPNavAgentSystem"/>, which re-extracts on every navmesh swap. Holds the
+        /// arrays that never leave as length-bearing outputs, so re-extraction stops allocating
+        /// them: the visited flags, the segment-to-triangle map, the counting-sort cursor, and the
+        /// CSR pair the agent system keeps for the life of the mesh anyway.
+        ///
+        /// <para>Caller-owned rather than a process-wide pool, and that is not a style choice.
+        /// <see cref="FPNavMeshRebaker.CreateSnapshot"/> also extracts, and a snapshot is
+        /// documented as shareable read-only across rooms and worker threads — two rooms building
+        /// one concurrently would trample a shared pool. Ownership by the thing that re-extracts
+        /// is what makes "used serially" true by construction instead of by convention.</para>
+        ///
+        /// <para><b>The CSR pair comes back oversized.</b> Consumers must read it as a CSR —
+        /// <c>triSegList[triSegStart[t] .. triSegStart[t+1])</c> — and never take its
+        /// <c>Length</c>. <c>vertices</c> and <c>polygonOffsets</c> are still exact-size, because
+        /// <see cref="FPNavAvoidance.LoadObstacles"/> reads their length as the count.</para>
+        /// </summary>
+        internal sealed class ExtractScratch
         {
-            var verts = new List<FPVector2>();
-            var offsets = new List<int>();
-            var segTri = new List<int>(); // segment index (== verts index) -> source triangle
+            internal bool[] Visited;
+            internal int[] SegTri;
+            internal int[] FillCursor;
+            internal int[] TriSegStart;
+            internal int[] TriSegList;
+            // Ring starts. A List because the ring count is only known by walking, and Clear()
+            // keeps the capacity — so after the first extract this stops allocating entirely.
+            internal List<int> Offsets;
+            // Ring vertices. The single biggest allocation this method used to make (245 KB on
+            // the shipped Field asset), kept because LoadObstacles now takes an explicit count.
+            internal FPVector2[] Verts;
+            internal int[] OffsetsArray;
+        }
+
+        /// <inheritdoc cref="Extract(FPNavMesh, out FPVector2[], out int[], out int[], out int[])"/>
+        /// <param name="scratch">
+        /// Reusable working set, or null to allocate everything fresh. Non-null hands the CSR pair
+        /// back oversized — see <see cref="ExtractScratch"/>.
+        /// </param>
+        internal static void Extract(FPNavMesh navMesh, ExtractScratch scratch,
+            out FPVector2[] vertices, out int[] polygonOffsets,
+            out int[] triSegStart, out int[] triSegList)
+        {
+            Extract(navMesh, scratch, out vertices, out int vertexCount,
+                out polygonOffsets, out int polygonCount, out triSegStart, out triSegList);
+
+            // The array-only forms promise exact-size outputs, so a scratch-backed call has to
+            // trim. Nothing does that today — the scratch overload is only reached through the
+            // counted signature — but leaving the promise unenforced would make the two shapes
+            // silently different for whoever adds the next caller.
+            if (vertices.Length != vertexCount)
+                vertices = TrimTo(vertices, vertexCount);
+            if (polygonOffsets.Length != polygonCount)
+            {
+                var exact = new int[polygonCount];
+                Array.Copy(polygonOffsets, exact, polygonCount);
+                polygonOffsets = exact;
+            }
+        }
+
+        /// <summary>
+        /// <inheritdoc cref="Extract(FPNavMesh, ExtractScratch, out FPVector2[], out int[], out int[], out int[])" path="/summary/node()"/>
+        ///
+        /// <para><b>With a scratch, <paramref name="vertices"/> and <paramref name="polygonOffsets"/>
+        /// come back oversized too</b> — read them through <paramref name="vertexCount"/> and
+        /// <paramref name="polygonCount"/>, never through <c>Length</c>. That is what removes the
+        /// last per-swap allocation; the exact-size promise lives on the array-only overloads.</para>
+        /// </summary>
+        internal static void Extract(FPNavMesh navMesh, ExtractScratch scratch,
+            out FPVector2[] vertices, out int vertexCount,
+            out int[] polygonOffsets, out int polygonCount,
+            out int[] triSegStart, out int[] triSegList)
+        {
+            // Held by the scratch for the same reason verts and segTri no longer double-buffer:
+            // 1,679 rings on the shipped Field asset means the doubling walk throws away 16 KB of
+            // intermediate capacity, which is more than the finished array costs. Clear() keeps
+            // that capacity, so the growth happens once for the life of the room.
+            List<int> offsets;
+            if (scratch == null)
+            {
+                offsets = new List<int>();
+            }
+            else
+            {
+                offsets = scratch.Offsets ?? (scratch.Offsets = new List<int>());
+                offsets.Clear();
+            }
 
             if (navMesh == null || navMesh.Triangles == null || navMesh.Triangles.Length == 0
                 || navMesh.Vertices == null)
@@ -55,12 +140,49 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 polygonOffsets = Array.Empty<int>();
                 triSegStart = Array.Empty<int>();
                 triSegList = Array.Empty<int>();
+                vertexCount = 0;
+                polygonCount = 0;
                 return;
             }
 
             var tris = navMesh.Triangles;
             int triCount = tris.Length;
-            var visited = new bool[triCount * 3]; // boundary-edge visited flags (triIdx*3 + localEdge)
+
+            // Count the boundary edges first, then fill exact-size arrays directly. verts and
+            // segTri used to be List<T>, which cost twice over on a large mesh: the doubling walk
+            // allocates every intermediate capacity (16 B x 32,764 for 15,317 ring vertices on the
+            // shipped Field asset), and ToArray then allocates the result a second time. Measured,
+            // those two were half of everything this method spends.
+            //
+            // The count is exact whenever no seed is dropped below, and it is an upper bound
+            // otherwise — never short. The walk marks `visited` and appends to both arrays in the
+            // SAME iteration, so one visited boundary edge is one entry; the only path that marks
+            // without appending is the degenerate-seed drop, whose own comment records that a
+            // Build-pipeline mesh cannot reach it.
+            int boundaryEdges = 0;
+            for (int t = 0; t < triCount; t++)
+            {
+                for (int e = 0; e < 3; e++)
+                {
+                    if (tris[t].GetNeighbor(e) == -1)
+                        boundaryEdges++;
+                }
+            }
+
+            FPVector2[] verts = scratch == null
+                ? new FPVector2[boundaryEdges]
+                : RentVerts(ref scratch.Verts, boundaryEdges);
+            // segment index (== verts index) -> source triangle. Written over [0, vertCount)
+            // before anything reads it, so a reused array needs no clearing.
+            int[] segTri = scratch == null
+                ? new int[boundaryEdges]
+                : Rent(ref scratch.SegTri, boundaryEdges);
+            int vertCount = 0;
+            // Boundary-edge visited flags (triIdx*3 + localEdge). Unlike segTri this is READ
+            // before it is written, so a reused array has to start false again.
+            bool[] visited = scratch == null
+                ? new bool[triCount * 3]
+                : RentCleared(ref scratch.Visited, triCount * 3);
 
             for (int t = 0; t < triCount; t++)
             {
@@ -92,7 +214,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                         continue;
                     }
 
-                    offsets.Add(verts.Count);
+                    offsets.Add(vertCount);
 
                     int startV, endV;
                     if (seedCross < FP64.Zero)
@@ -119,8 +241,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     while (true)
                     {
                         visited[curTri * 3 + curEdge] = true;
-                        verts.Add(navMesh.Vertices[cs].ToXZ());
-                        segTri.Add(curTri); // this ring vertex starts boundary edge (curTri, curEdge)
+                        verts[vertCount] = navMesh.Vertices[cs].ToXZ();
+                        segTri[vertCount] = curTri; // this ring vertex starts boundary edge (curTri, curEdge)
+                        vertCount++;
 
                         if (ce == seedStart)
                             break; // ring closed
@@ -147,18 +270,42 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 }
             }
 
-            vertices = verts.ToArray();
-            polygonOffsets = offsets.ToArray();
+            // Handed out as-is. The array may be longer than vertCount — either because a
+            // degenerate seed was dropped, or because it is a scratch buffer sized by an earlier,
+            // larger mesh. Both cases are the same to a caller reading through the count, which is
+            // why this no longer trims: the array-only overloads do that on the way out.
+            vertices = verts;
+            vertexCount = vertCount;
+
+            polygonCount = offsets.Count;
+            if (scratch == null)
+            {
+                polygonOffsets = offsets.ToArray();
+            }
+            else
+            {
+                polygonOffsets = Rent(ref scratch.OffsetsArray, polygonCount);
+                for (int i = 0; i < polygonCount; i++)
+                    polygonOffsets[i] = offsets[i];
+            }
 
             // Build forward triangle->segment CSR by counting sort on the source triangle.
-            int segCount = segTri.Count;
-            triSegStart = new int[triCount + 1];
+            // triSegStart is accumulated into, so a reused one has to start at zero; triSegList
+            // and fillCursor are fully written before they are read.
+            int segCount = vertCount;
+            triSegStart = scratch == null
+                ? new int[triCount + 1]
+                : RentCleared(ref scratch.TriSegStart, triCount + 1);
             for (int s = 0; s < segCount; s++)
                 triSegStart[segTri[s] + 1]++;
             for (int ti = 0; ti < triCount; ti++)
                 triSegStart[ti + 1] += triSegStart[ti];
-            triSegList = new int[segCount];
-            var fillCursor = new int[triCount];
+            triSegList = scratch == null
+                ? new int[segCount]
+                : Rent(ref scratch.TriSegList, segCount);
+            int[] fillCursor = scratch == null
+                ? new int[triCount]
+                : Rent(ref scratch.FillCursor, triCount);
             for (int ti = 0; ti < triCount; ti++)
                 fillCursor[ti] = triSegStart[ti];
             for (int s = 0; s < segCount; s++)
@@ -166,6 +313,55 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 int owner = segTri[s];
                 triSegList[fillCursor[owner]++] = s;
             }
+        }
+
+        // Grow-if-too-small, keep otherwise — the same rule FPNavAgentSystem's _bfsStamp uses, and
+        // for the same reason: a rebake that removes a building shrinks the triangle count, and
+        // reallocating on every shrink would give back what reuse is for.
+        private static int[] Rent(ref int[] slot, int minSize)
+        {
+            if (slot == null || slot.Length < minSize)
+                slot = new int[minSize];
+            return slot;
+        }
+
+        private static FPVector2[] RentVerts(ref FPVector2[] slot, int minSize)
+        {
+            if (slot == null || slot.Length < minSize)
+                slot = new FPVector2[minSize];
+            return slot;
+        }
+
+        // For the two that are read before they are written. A fresh array is already zeroed, so
+        // the clear only costs anything on the reuse path — which is the path that saves the
+        // allocation.
+        private static int[] RentCleared(ref int[] slot, int minSize)
+        {
+            if (slot == null || slot.Length < minSize)
+            {
+                slot = new int[minSize];
+                return slot;
+            }
+            Array.Clear(slot, 0, minSize);
+            return slot;
+        }
+
+        private static bool[] RentCleared(ref bool[] slot, int minSize)
+        {
+            if (slot == null || slot.Length < minSize)
+            {
+                slot = new bool[minSize];
+                return slot;
+            }
+            Array.Clear(slot, 0, minSize);
+            return slot;
+        }
+
+        private static FPVector2[] TrimTo(FPVector2[] source, int count)
+        {
+            var trimmed = new FPVector2[count];
+            Array.Copy(source, trimmed, count);
+            return trimmed;
         }
 
         /// <summary>Third vertex of a triangle, opposite the given local edge (0,1,2).</summary>
@@ -202,7 +398,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// Returns the boundary edge's triangle/local-edge and its other endpoint (the ring's next vertex).
         /// </summary>
         private static bool FindNextBoundaryEdge(
-            FPNavMeshTriangle[] tris, int startTri, int v, int through,
+            ReadOnlySpan<FPNavMeshTriangle> tris, int startTri, int v, int through,
             out int outTri, out int outEdge, out int outOther)
         {
             int rTri = startTri;

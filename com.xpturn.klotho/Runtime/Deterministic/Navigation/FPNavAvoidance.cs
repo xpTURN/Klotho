@@ -172,30 +172,65 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// Loads static obstacles from polygon rings into the flat obstacle array. Rings may be
         /// convex or non-convex; the caller guarantees the winding convention (free space on the
         /// right of each edge's unitDir): solid blocks CCW, walkable-boundary loops CW.
-        /// Load-time only (tick-independent); (re)allocation here is fine — the hot path stays GC-0.
         /// polygonOffsets holds the start index of each ring; ring p spans
         /// [polygonOffsets[p], polygonOffsets[p+1]) (or vertices.Length for the last ring).
         /// A trailing CSR-style sentinel entry (== vertices.Length) is tolerated.
+        ///
+        /// <para>This form takes both arrays at their exact length, which is what a caller that
+        /// built the rings itself has — procedural terrain blocks, a hand-written test fixture.
+        /// The navmesh boundary path uses <see cref="LoadObstacles(FPVector2[], int, int[], int)"/>
+        /// instead, because its arrays are reused across rebakes and come back oversized.</para>
+        ///
+        /// <para>Discrete-event scope, not per-tick: re-run whenever the geometry is replaced, which
+        /// on a game with runtime rebake means every building placement. The hot path stays GC-0
+        /// regardless — the allocation here is the obstacle array, and it only grows.</para>
         /// </summary>
         public void LoadObstacles(FPVector2[] vertices, int[] polygonOffsets)
+            => LoadObstacles(vertices, vertices?.Length ?? 0,
+                             polygonOffsets, polygonOffsets?.Length ?? 0);
+
+        /// <summary>
+        /// <inheritdoc cref="LoadObstacles(FPVector2[], int[])" path="/summary/node()[1]"/>
+        ///
+        /// <para>The counted form. Both arrays may be longer than the data in them, which is what
+        /// lets the navmesh extractor hand over a working buffer it reuses across rebakes rather
+        /// than a fresh exact-size one every time — on a large stage that is a quarter of a
+        /// megabyte per building placement.</para>
+        ///
+        /// <para><paramref name="polygonCount"/> is the number of RINGS and does not count a
+        /// trailing sentinel. The two-argument form derives both counts from the arrays' lengths,
+        /// which is why a sentinel is merely tolerated there rather than expected.</para>
+        /// </summary>
+        /// <param name="vertexCount">Live entries in <paramref name="vertices"/>; the rest is ignored.</param>
+        /// <param name="polygonCount">Number of rings in <paramref name="polygonOffsets"/>.</param>
+        public void LoadObstacles(FPVector2[] vertices, int vertexCount,
+            int[] polygonOffsets, int polygonCount)
         {
             _obstacleLoadGeneration++;
 
-            if (vertices == null || vertices.Length == 0)
+            if (vertices == null || vertexCount <= 0)
             {
                 _obstacleCount = 0;
                 return;
             }
 
-            int n = vertices.Length;
+            if (vertexCount > vertices.Length)
+                throw new System.ArgumentException(
+                    $"FPNavAvoidance.LoadObstacles: vertexCount {vertexCount} exceeds the array's {vertices.Length}");
+            if (polygonOffsets != null && polygonCount > polygonOffsets.Length)
+                throw new System.ArgumentException(
+                    $"FPNavAvoidance.LoadObstacles: polygonCount {polygonCount} exceeds the array's {polygonOffsets.Length}");
+
+            int n = vertexCount;
             if (_obstacles == null || _obstacles.Length < n)
                 _obstacles = new FPObstacleVertex[n];
 
-            int polyCount = (polygonOffsets != null && polygonOffsets.Length > 0) ? polygonOffsets.Length : 1;
+            bool haveRings = polygonOffsets != null && polygonCount > 0;
+            int polyCount = haveRings ? polygonCount : 1;
             for (int p = 0; p < polyCount; p++)
             {
-                int start = (polygonOffsets != null && polygonOffsets.Length > 0) ? polygonOffsets[p] : 0;
-                int end = (polygonOffsets != null && p + 1 < polyCount) ? polygonOffsets[p + 1] : n;
+                int start = haveRings ? polygonOffsets[p] : 0;
+                int end = (haveRings && p + 1 < polyCount) ? polygonOffsets[p + 1] : n;
 
                 for (int i = start; i < end; i++)
                 {

@@ -50,6 +50,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
 #endif
         }
 
+        public FPNavMeshRebakeContext RebakeContext { get; private set; }
+
         public void RegisterSystems(EcsSimulation simulation)
         {
             BotFSMSystem botFSMSystem = null;
@@ -69,7 +71,28 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
             botFSMSystem = new BotFSMSystem(agentSystem);
             botFSMSystem.SetQuery(query);
 
-            BrawlerSimSetup.RegisterSystems(simulation, _logger, _dataAssets, _staticColliders, botFSMSystem, _stageId);
+            // Building demo: BRAWLER_BUILDING_DEMO=<interval ticks> — headless-only (bot
+            // command injection is tick-execution state; with clients connected every peer
+            // would need the identical setting or hashes diverge).
+            if (int.TryParse(System.Environment.GetEnvironmentVariable("BRAWLER_BUILDING_DEMO"), out int demoTicks) && demoTicks > 0)
+            {
+                botFSMSystem.SetBuildingDemo(demoTicks);
+                _logger?.KWarning($"[BrawlerServerCallbacks] building demo enabled: every {demoTicks} ticks (headless-only)");
+            }
+
+            // Per-match rebake snapshot (JIT warming is built into CreateSnapshot;
+            // no-op under IL2CPP). Throws on unsupported bases — building placement is then
+            // unavailable for this stage, surfaced at load time.
+            try
+            {
+                RebakeContext = BrawlerBuildingShapes.CreateContext(_navMesh, _logger);
+            }
+            catch (System.Exception e)
+            {
+                _logger?.KWarning($"[BrawlerServerCallbacks] rebake snapshot unavailable for this stage: {e.Message}");
+            }
+
+            BrawlerSimSetup.RegisterSystems(simulation, _logger, _dataAssets, _staticColliders, botFSMSystem, _stageId, RebakeContext);
 #if DEBUG
             // DEV: after BrawlerSimSetup so it runs last in the tick; fires the abort on the engine thread.
             if (_devAbortAfterMs > 0)

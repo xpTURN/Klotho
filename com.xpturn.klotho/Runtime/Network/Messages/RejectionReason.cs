@@ -22,5 +22,7 @@ namespace xpTURN.Klotho.Network
         // Game-layer (application) — receiver updates game-layer state (latch clear / UI / cooldown).
         // 10+ append-only.
         Duplicate = 10,
+        /// <summary>Building placement rejected (overlap / boundary / outside walkable / cap).</summary>
+        InvalidPlacement = 11,
     }
 }

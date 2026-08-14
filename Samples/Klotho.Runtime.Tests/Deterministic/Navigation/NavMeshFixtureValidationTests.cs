@@ -60,7 +60,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
                     if (nb < 0)
                     {
-                        // boundary edge: baker keeps portal (-1,-1)
+                        // boundary edge: baker keeps portal (-1,-1).
+                        //
+                        // TAUTOLOGY since the one-bit encoding: GetPortal returns (-1,-1) exactly
+                        // when GetNeighbor(e) < 0, which is the condition of this branch. Left as a
+                        // statement of the contract, not as a check — do not read a green here as
+                        // evidence that any boundary portal was verified.
                         Assert.IsTrue(pl == -1 && pr == -1,
                             $"[{label}] T{i} e{e}: boundary edge but portal=({pl},{pr}), expected (-1,-1)");
                         continue;
@@ -91,20 +96,48 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                     Assert.IsTrue(HasVertex(b, va) && HasVertex(b, vb),
                         $"[{label}] T{i} e{e}→T{nb}: edge ({va},{vb}) not both in neighbor's vertices");
 
-                    // 3. portal vertices == edge vertex pair (unordered) — precondition of 4
+                    // 3. portal vertices == edge vertex pair (unordered) — precondition of 4.
+                    //
+                    // TAUTOLOGY since the one-bit portal encoding landed, and kept only as
+                    // documentation of the precondition. GetPortal derives the pair from this
+                    // edge's own GetEdgeVertices(e), so it cannot come back as anything else. It
+                    // used to compare against six STORED ints, which is what made it a check.
                     Assert.IsTrue(SamePair(pl, pr, va, vb),
                         $"[{label}] T{i} e{e}: portal ({pl},{pr}) != edge ({va},{vb})");
 
-                    // 4. portal direction matches baker invariant: Cross(d, left-right) < 0
-                    //    d = edgeMid - oppositeVertex (stored portalLeft/Right used verbatim)
-                    int opp = OppositeVertex(t, e);
-                    FPVector2 edgeMid = (mesh.Vertices[va].ToXZ() + mesh.Vertices[vb].ToXZ()) * FP64.Half;
-                    FPVector2 d = edgeMid - mesh.Vertices[opp].ToXZ();
-                    FP64 cross = FPVector2.Cross(d, mesh.Vertices[pl].ToXZ() - mesh.Vertices[pr].ToXZ());
-                    Assert.IsTrue(cross < FP64.Zero,
-                        $"[{label}] T{i} e{e}: portal direction Cross={cross} >= 0 (left/right reversed)");
+                    // 4. portal direction matches baker invariant: Cross(d, left-right) < 0.
+                    // The one real portal check left: the stored portalFlip BIT decides the
+                    // (left,right) order, and this compares that order against the geometry.
+                    string violation = CheckPortalDirection(mesh, t, i, e, va, vb, pl, pr, label);
+                    Assert.IsNull(violation, violation);
                 }
             }
+        }
+
+        /// <summary>
+        /// Check 4 on one edge, returning the violation text or <c>null</c>.
+        ///
+        /// <para>Split out so it can run over BAKED ASSETS, which <see cref="Validate"/> as a whole
+        /// cannot: that method also asserts winding consistency, non-degeneracy and centroid
+        /// agreement, and those trip on real assets for reasons that say nothing about portals.</para>
+        ///
+        /// <para>Why it is worth running there. When portals became one bit per edge, the portal
+        /// literals went out of the baked JSON too — 2,598 lines from Field alone, ~2,920 across
+        /// the five assets — so no independent record of portal orientation survives anywhere. Of
+        /// the checks that read portals back, only this one is not a tautology, and until now it
+        /// ran on three hand-written fixtures and no asset at all.</para>
+        /// </summary>
+        public static string CheckPortalDirection(
+            FPNavMesh mesh, FPNavMeshTriangle t, int i, int e, int va, int vb, int pl, int pr, string label)
+        {
+            //    d = edgeMid - oppositeVertex (stored portalLeft/Right used verbatim)
+            int opp = OppositeVertex(t, e);
+            FPVector2 edgeMid = (mesh.Vertices[va].ToXZ() + mesh.Vertices[vb].ToXZ()) * FP64.Half;
+            FPVector2 d = edgeMid - mesh.Vertices[opp].ToXZ();
+            FP64 cross = FPVector2.Cross(d, mesh.Vertices[pl].ToXZ() - mesh.Vertices[pr].ToXZ());
+            return cross < FP64.Zero
+                ? null
+                : $"[{label}] T{i} e{e}: portal direction Cross={cross} >= 0 (left/right reversed)";
         }
 
         private static bool SamePair(int a0, int a1, int b0, int b1)
@@ -136,5 +169,23 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         [Test]
         public void Validate_LShapedFixture_MatchesBakerInvariants()
             => NavMeshFixtureValidator.Validate(NavAgentTestHelper.CreateLShapedNavMesh(), "L-shaped");
+
+        /// <summary>
+        /// Demonstrates with a CLOCKWISE fixture that check 4 is winding-agnostic — the claim the
+        /// class remarks make. It follows from the identity <c>Cross(d, a-b) = -2 * SignedArea</c>:
+        ///
+        /// <list type="table">
+        ///   <item><description>CCW, correct: portal=(va,vb) gives <c>-2A</c> with A&gt;0, so negative — passes</description></item>
+        ///   <item><description>CW, correct: portal=(vb,va) gives <c>+2A</c> with A&lt;0, so negative — passes</description></item>
+        ///   <item><description>CW, flip ignored: portal=(va,vb) gives <c>-2A</c> with A&lt;0, so <b>positive — fails</b></description></item>
+        /// </list>
+        ///
+        /// So this shows the clockwise fixture passes the current validator unchanged, and at the
+        /// same time it is the detector for an implementation that stores portals as one flip bit
+        /// and then forgets to read it.
+        /// </summary>
+        [Test]
+        public void Validate_CwSquareFixture_MatchesBakerInvariants()
+            => NavMeshFixtureValidator.Validate(NavAgentTestHelper.CreateCwSquareNavMesh(), "CW-square");
     }
 }

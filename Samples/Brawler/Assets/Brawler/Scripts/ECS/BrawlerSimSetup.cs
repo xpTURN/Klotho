@@ -1,6 +1,7 @@
 using xpTURN.Klotho.Logging;
 
 using xpTURN.Klotho.ECS;
+using xpTURN.Klotho.Deterministic.Navigation;
 using xpTURN.Klotho.ECS.FSM;
 using xpTURN.Klotho.ECS.Systems;
 using xpTURN.Klotho.Deterministic.Math;
@@ -187,7 +188,8 @@ namespace Brawler
                                            List<IDataAsset> dataAssets = null,
                                            List<FPStaticCollider> staticColliders = null,
                                            BotFSMSystem botFSMSystem = null,
-                                           int stageId = 0)
+                                           int stageId = 0,
+                                           FPNavMeshRebakeContext rebakeContext = null)
         {
             // Register assets
             if (dataAssets != null)
@@ -206,9 +208,14 @@ namespace Brawler
 
             var events = new EventSystem();
             var platformerCommandSystem = new PlatformerCommandSystem(events);
+            // Building command context (null snapshot = placement unavailable on this stage).
+            platformerCommandSystem.SetRebakeContext(rebakeContext, botFSMSystem);
 
             if (botFSMSystem != null)
+            {
                 botFSMSystem.SetCommandSystem(platformerCommandSystem);
+                botFSMSystem.SetShapeExpansion(rebakeContext?.ShapeExpansion);
+            }
 
             // PreUpdate — bots, then command processing.
             // PreviousPosition / PreviousRotation are captured by the engine built-in pass.

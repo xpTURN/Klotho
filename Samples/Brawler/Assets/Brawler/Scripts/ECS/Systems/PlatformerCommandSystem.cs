@@ -2,6 +2,7 @@ using xpTURN.Klotho.Logging;
 
 using xpTURN.Klotho.Core;
 using xpTURN.Klotho.Deterministic.Math;
+using xpTURN.Klotho.Deterministic.Navigation;
 using xpTURN.Klotho.Deterministic.Geometry;
 using xpTURN.Klotho.Deterministic.Physics;
 using xpTURN.Klotho.ECS;
@@ -29,6 +30,18 @@ namespace Brawler
         BasicAttackConfigAsset _attack;
         MovementPhysicsAsset   _movement;
         ItemConfigAsset        _item;
+
+        // Rebake context — per-stage snapshot plus this
+        // room's work buffers (null = building placement unavailable for this stage), botFSM
+        // executes Swap+Reseed.
+        FPNavMeshRebakeContext _rebakeContext;
+        BotFSMSystem _botFSM;
+
+        public void SetRebakeContext(FPNavMeshRebakeContext context, BotFSMSystem botFSM)
+        {
+            _rebakeContext = context;
+            _botFSM = botFSM;
+        }
 
         public PlatformerCommandSystem(EventSystem events)
         {
@@ -78,6 +91,18 @@ namespace Brawler
                     break;
                 case SpawnCharacterCommand spawn:
                     HandleSpawn(ref frame, spawn);
+                    break;
+
+                case PlaceBuildingCommand place:
+                    HandlePlaceBuilding(ref frame, place);
+                    break;
+
+                case PlaceHexBuildingCommand placeHex:
+                    HandlePlaceHexBuilding(ref frame, placeHex);
+                    break;
+
+                case RemoveBuildingCommand remove:
+                    HandleRemoveBuilding(ref frame, remove);
                     break;
                 case UseConsumableCommand consume:
                     HandleUseConsumable(ref frame, consume);
@@ -400,6 +425,387 @@ namespace Brawler
                 _events.Enqueue(slamEvt);
                 return slamCenter;
             }
+        }
+
+        // ────────────────────────────────────────────
+        // Building place/remove — deterministic rebake at the command tick.
+        // Trial rebake IS the placement validation (Rebaker throws on overlap/boundary/
+        // outside-walkable — no duplicated validation logic); on success the trial result
+        // mesh is used directly (single rebake). Rejection = event + no state change
+        // (the rejection verdict is exact-integer, identical on every peer).
+        // ────────────────────────────────────────────
+        // The GAME POLICY cap — how many buildings this sample lets players stand up. Enforced by
+        // the `count >= MaxBuildings` rejection below. A separate concept from the ENGINE STORAGE
+        // cap (BuildingComponent's MaxCount): a future build could lower the policy without
+        // lowering storage, so these must not be collapsed into one number.
+        //
+        // Buffers are neither concept — they are DERIVED, each from whichever one it serves. The
+        // command paths below serve the policy and size off this; the join-time collect must hold
+        // every building that can exist in the frame and sizes off BuildingSlotCapacity instead.
+        const int MaxBuildings = 32;
+
+        // Scratch for the collect-then-rebake path. Both are exactly MaxBuildings-sized and both
+        // are fully overwritten by CollectBuildings before anything reads them, so one instance per
+        // system serves every placement and removal. The +1 is the slot the new building is
+        // appended into before the cap check rejects an overflow.
+        //
+        // Worth doing in a SAMPLE specifically: the engine side of this went to some length to make
+        // a rebake allocation-free (FPNavMeshRebakeBufferPool, measured at 4,536 B for a rebake on
+        // Field), and an example that allocates right in front of it teaches the opposite habit.
+        // Two arrays rather than sharing the larger one, deliberately. CollectBuildings takes its
+        // truncation threshold from buffer.Length, so handing the removal path a MaxBuildings + 1
+        // buffer would silently give it a cap of 33 — a capacity arrived at by accident of sharing
+        // rather than derived from the rule, which is the exact confusion C-6 was about.
+        readonly FPBuildingPlacement[] _placeScratch = new FPBuildingPlacement[MaxBuildings + 1];
+        readonly FPBuildingPlacement[] _removeScratch = new FPBuildingPlacement[MaxBuildings];
+
+        // CollectBuildings sorts `buffer` by this, so it is per-call scratch of the same shape.
+        // Sized to the larger of the two so either caller can pass it.
+        readonly int[] _collectOrder = new int[MaxBuildings + 1];
+
+        /// <summary>
+        /// Engine storage bound for <see cref="BuildingComponent"/>, read from the frozen layout
+        /// rather than transcribed from the attribute. Reading it means a buffer sized off this
+        /// cannot fall out of step with a raised MaxCount — which is exactly how the join path used
+        /// to end up rebaking a strict subset while everyone else rebaked the whole set.
+        /// </summary>
+        public static int BuildingSlotCapacity =>
+            ComponentStorageRegistry.GetLayout(
+                ComponentStorageRegistry.GetTypeId<BuildingComponent>()).SlotCapacity;
+
+        /// <summary>
+        /// Brawler lets players pack buildings wall-to-wall (shared edge / shared corner); only
+        /// overlapping interiors are refused. ONE source for every rebake in the sample — the
+        /// trial rebake below IS the validation, and the join-time rebake replays the set it
+        /// accepted, so if the two used different rules a rejoining peer would throw on a
+        /// placement the placing peer had accepted, and the mismatch would surface as a load
+        /// failure rather than as a rejection.
+        ///
+        /// Same reason it is a constant and not a setting: it must be identical on every peer and
+        /// in every replay. A build that flipped it would diverge from recordings made before.
+        /// (Touching the walkable BOUNDARY has no flag and stays rejected — see
+        /// FPBuildingPlacementRules.)
+        /// </summary>
+        public static readonly FPBuildingPlacementRules PlacementRules =
+            new FPBuildingPlacementRules(allowBuildingTouch: true);
+
+        /// <summary>Log-friendly shape name — a bare pair of indices would make the log unreadable
+        /// once the catalog holds two families.</summary>
+        static string ShapeName(int shape, int orientation)
+        {
+            return shape == BrawlerBuildingShapes.HexShape
+                ? "hex"
+                : $"box@{orientation}/{BrawlerBuildingShapes.Directions}";
+        }
+
+        /// <summary>
+        /// Player-facing text for a refused placement.
+        ///
+        /// <para>This method is the point of the whole change. Before the rebaker reported a
+        /// reason, the only thing a game had was an English sentence built inside the engine, so
+        /// every refusal collapsed into one — telling a player "invalid placement" whether they
+        /// had overlapped a neighbour, hugged a wall, or aimed off the map. Branching on a value
+        /// is what lets the four cases say four different things, and a localised build would
+        /// switch on the same enum instead of matching text.</para>
+        ///
+        /// <para>The wire-level <c>RejectionReason</c> stays <c>InvalidPlacement</c> for all of
+        /// them: that enum has fixed byte values and adding to it is a protocol change, which is
+        /// a separate decision from being able to tell the cases apart locally.</para>
+        /// </summary>
+        static string Describe(in FPBuildingRejectionInfo r)
+        {
+            switch (r.Reason)
+            {
+                case FPBuildingRejection.BuildingsOverlap:
+                    // Deliberately "too close" rather than "overlapping": with touching forbidden
+                    // this also fires on exact contact, and the separating-axis test answers one
+                    // bool — it cannot tell the two apart, so neither should the wording.
+                    return $"too close to another building (#{r.IndexA} and #{r.IndexB})";
+                case FPBuildingRejection.TouchesWalkableBoundary:
+                    return "too close to the edge of the walkable area";
+                case FPBuildingRejection.OutsideWalkableRegion:
+                    return "not on the walkable area";
+                case FPBuildingRejection.SwallowsBakedHole:
+                    return $"would cover a gap in the ground at "
+                        + $"({r.Site.x.ToDouble():F1}, {r.Site.y.ToDouble():F1})";
+                default:
+                    return $"placement refused ({r.Reason})";
+            }
+        }
+
+        void RejectBuilding(ref Frame frame, CommandBase cmd, string log)
+        {
+            frame.Logger?.KWarning($"[Building][Reject] tick={frame.Tick}, player={cmd.PlayerId}: {log}");
+            var rejectEvt = EventPool.Get<CommandRejectedSimEvent>();
+            rejectEvt.PlayerId      = cmd.PlayerId;
+            rejectEvt.CommandTypeId = cmd.CommandTypeId;
+            rejectEvt.ReasonEnum    = RejectionReason.InvalidPlacement;
+            _events.Enqueue(rejectEvt);
+        }
+
+        /// <summary>
+        /// Collects all buildings in canonical order — the rebake input has to be a function of the
+        /// frame, not of entity iteration order. Public static: reused by the join-rebake hook.
+        ///
+        /// <para>Ordered by <see cref="BuildingComponent.Sequence"/>, i.e. by when each building
+        /// was placed. Sorting by centre would be just as deterministic and much slower in
+        /// practice — see the remarks on that field.</para>
+        /// </summary>
+        /// <param name="orderScratch">
+        /// Optional caller-owned scratch for the sort keys, at least <c>buffer.Length</c> long. The
+        /// command paths pass one so a placement allocates nothing here; callers that do not care
+        /// (tests, the join path) can omit it and get a fresh array.
+        /// </param>
+        public static int CollectBuildings(
+            ref Frame frame, FPBuildingPlacement[] buffer, EntityRef skip = default,
+            int[] orderScratch = null)
+        {
+            int[] order = orderScratch != null && orderScratch.Length >= buffer.Length
+                ? orderScratch
+                : new int[buffer.Length];
+            int count = 0;
+            int eligible = 0;
+            var filter = frame.Filter<BuildingComponent>();
+            while (filter.Next(out var entity))
+            {
+                // "skip this one" and "the buffer is full" used to share a `continue`, which made a
+                // truncation indistinguishable from an intentional skip and returned a count that
+                // looked complete. Separated so the overflow can be counted and reported.
+                if (entity == skip)
+                    continue;
+                eligible++;
+                if (count >= buffer.Length)
+                    continue;
+                ref readonly var b = ref frame.GetReadOnly<BuildingComponent>(entity);
+                order[count] = b.Sequence;
+                buffer[count++] = new FPBuildingPlacement(
+                    b.ShapeId, b.Orientation, b.Centre.x, b.Centre.z, b.Centre.y);
+            }
+
+            // Sizing the callers correctly is what actually prevents truncation; this is the audit
+            // on top, in the shape SwapAndReseed/ReseedAgents already established. It has to be
+            // loud because the damage is silent: the dropped buildings are missing from the rebake
+            // input, so this peer's navmesh disagrees with everyone else's while the STATE hash
+            // still matches — no existing check would ask why.
+            if (eligible > count)
+            {
+                frame.Logger?.KError(
+                    $"[Building] CollectBuildings truncated at tick={frame.Tick}: the frame holds {eligible} " +
+                    $"building(s) but the caller's buffer fits {buffer.Length}. The rest are missing from the " +
+                    $"rebake input — size the buffer from BuildingSlotCapacity (join path) or MaxBuildings " +
+                    $"(command paths), never a literal.");
+            }
+
+            // Array.Sort is introsort, which is NOT stable. That is fine here only because the
+            // keys are unique: NextBuildingSequence hands out max + 1, strictly above every live
+            // Sequence, so no two buildings in a frame can share one. Uniqueness is therefore
+            // load-bearing rather than incidental — with a tie, introsort's output depends on the
+            // pre-sort order, which here is entity iteration order, and the rebake input stops
+            // being a function of the frame.
+            System.Array.Sort(order, buffer, 0, count);
+
+            // Which is why this is loud rather than a comment. A game copying this sample is very
+            // likely to number buildings its own way — per owner, or reusing a freed slot's number
+            // — and a duplicate then desyncs instead of misbehaving: every peer sorts its own
+            // iteration order, the navmeshes diverge, and the STATE hash still matches because the
+            // components are identical. Nothing else would ask why. Sorted keys put duplicates
+            // next to each other, so finding them is one pass over at most a few dozen entries.
+            for (int i = 1; i < count; i++)
+            {
+                if (order[i] != order[i - 1])
+                    continue;
+                frame.Logger?.KError(
+                    $"[Building] CollectBuildings found duplicate Sequence {order[i]} at tick={frame.Tick}. " +
+                    $"The sort is unstable, so the rebake input now depends on entity iteration order and " +
+                    $"peers will carve different navmeshes from identical state. Sequence must be unique " +
+                    $"among live buildings — assign it as one past the highest, never reuse a freed number.");
+                break;
+            }
+            return count;
+        }
+
+        /// <summary>One past the highest sequence in the current set — a function of frame state,
+        /// so a rollback re-execution computes the same value.</summary>
+        static int NextBuildingSequence(ref Frame frame)
+        {
+            int max = -1;
+            var filter = frame.Filter<BuildingComponent>();
+            while (filter.Next(out var entity))
+            {
+                ref readonly var b = ref frame.GetReadOnly<BuildingComponent>(entity);
+                if (b.Sequence > max)
+                    max = b.Sequence;
+            }
+            return max + 1;
+        }
+
+        void HandlePlaceBuilding(ref Frame frame, PlaceBuildingCommand cmd)
+        {
+            // Both indices arrive from the network, so both are untrusted. Checked here rather than
+            // in the shared body because it is the one thing the two place commands do NOT have in
+            // common — the hexagon command carries no indices at all (BrawlerBuildingShapes).
+            if (!BrawlerBuildingShapes.IsValidPlacement(cmd.ShapeId, cmd.Orientation))
+            {
+                RejectBuilding(ref frame, cmd,
+                    $"shape {cmd.ShapeId} turned {cmd.Orientation} is not in the shape catalog");
+                return;
+            }
+            PlaceBuildingAt(ref frame, cmd, cmd.ShapeId, cmd.Orientation, cmd.Centre);
+        }
+
+        void HandlePlaceHexBuilding(ref Frame frame, PlaceHexBuildingCommand cmd)
+        {
+            // The shape is a constant, not payload — a hexagon has no orientation to send, so there
+            // is nothing here to validate and nothing on the wire that could be wrong.
+            PlaceBuildingAt(ref frame, cmd, BrawlerBuildingShapes.HexShape, 0, cmd.Centre);
+        }
+
+        /// <summary>
+        /// The half of placement both commands share: grid check, cap, trial rebake (which IS the
+        /// validation), component, swap. Shared rather than duplicated because the trial rebake and
+        /// the join-time rebake have to accept exactly the same set — two copies of this that
+        /// drifted would show up as a rejoining peer throwing on a placement the placing peer had
+        /// accepted, which surfaces as a load failure and not as a rejection.
+        /// </summary>
+        void PlaceBuildingAt(
+            ref Frame frame, CommandBase cmd, int shapeId, int orientation, FPVector3 centre)
+        {
+            if (_rebakeContext == null || _botFSM == null)
+            {
+                RejectBuilding(ref frame, cmd, "rebake unavailable on this stage");
+                return;
+            }
+
+            // Before the trial rebake: an off-grid centre would throw inside it and come back as
+            // "invalid placement", sending whoever reads the log to look at the position when the
+            // problem is the quantisation.
+            if (!FPGeoPredicates.IsOnGrid(centre.x) || !FPGeoPredicates.IsOnGrid(centre.z))
+            {
+                RejectBuilding(ref frame, cmd, "building centre is not on the predicate snap grid");
+                return;
+            }
+
+            FPBuildingPlacement[] buffer = _placeScratch;
+            int count = CollectBuildings(ref frame, buffer, default, _collectOrder);
+            if (count >= MaxBuildings)
+            {
+                RejectBuilding(ref frame, cmd, $"building cap reached ({MaxBuildings})");
+                return;
+            }
+            // Appended, not re-sorted: CollectBuildings already returned the existing set in
+            // placement order and this one is the newest, so the end is where it belongs. Keeping
+            // it there is what lets the rebaker patch instead of rebuild — see
+            // BuildingComponent.Sequence.
+            buffer[count++] = new FPBuildingPlacement(
+                shapeId, orientation, centre.x, centre.z, centre.y);
+
+            // The scratch goes in as-is with its live count. Trimming to an exact-size copy first
+            // is what the array-length-is-the-count reading used to force, and it put one array per
+            // placement on the heap right in front of a rebaker built to allocate nothing.
+            //
+            // A refused placement comes back as a VALUE — it is the normal outcome of a player
+            // pointing somewhere they cannot build. A malformed request still throws, and that
+            // catch stays: a stale shape id is this code's bug, and reporting it as "you cannot
+            // build there" would show a developer error to the player on every peer at once.
+            FPNavMesh newMesh;
+            FPBuildingRejectionInfo rejection;
+            try
+            {
+                if (!FPNavMeshRebaker.TryRebakePlacements(
+                        _rebakeContext, buffer, out newMesh, out rejection,
+                        frame.Logger, PlacementRules, count))
+                {
+                    RejectBuilding(ref frame, cmd, Describe(rejection));
+                    return;
+                }
+            }
+            catch (System.ArgumentException e)
+            {
+                RejectBuilding(ref frame, cmd, e.Message);
+                return;
+            }
+
+            EntityRef entity = frame.CreateEntity();
+            frame.Add(entity, new BuildingComponent
+            {
+                Centre = centre, ShapeId = shapeId, Orientation = orientation,
+                OwnerSlot = cmd.PlayerId, Sequence = NextBuildingSequence(ref frame),
+            });
+            _botFSM.SwapAndReseed(ref frame, newMesh);
+            // The swap has happened — only now may the mesh it replaced be recycled.
+            _rebakeContext.CommitSwap(newMesh);
+            frame.Logger?.KInformation(
+                $"[Building][Placed] tick={frame.Tick}, player={cmd.PlayerId}, entity={entity}, "
+                + $"shape={ShapeName(shapeId, orientation)}, total={count}");
+        }
+
+        void HandleRemoveBuilding(ref Frame frame, RemoveBuildingCommand cmd)
+        {
+            if (_rebakeContext == null || _botFSM == null)
+            {
+                RejectBuilding(ref frame, cmd, "rebake unavailable on this stage");
+                return;
+            }
+
+            EntityRef target = EntityRef.FromId(cmd.TargetEntityId);
+            // IsAlive first, because it is the only half of this pair that reads the VERSION.
+            // Frame.Has passes entity.Index alone, so on a slot that was freed and handed to a
+            // NEW building it answers about the new occupant — and every step after that then
+            // worked on the wrong entity: the collect below did not skip it (EntityRef equality
+            // does compare version), so it stayed in the rebake input, and DestroyEntity strips
+            // components BY INDEX unconditionally, so it deleted a building that was still
+            // standing while its hole stayed carved in the navmesh. No rejection was raised, and
+            // every peer did it identically, so no check would have asked why.
+            //
+            // Not reachable from this sample as it is wired — the only sender is the bot demo,
+            // which reads the id from a live filter and dispatches in the same tick. A game that
+            // puts a remove button on the network opens the window immediately, which is the
+            // reachability this sample is responsible for.
+            if (!frame.Entities.IsAlive(target) || !frame.Has<BuildingComponent>(target))
+            {
+                RejectBuilding(ref frame, cmd, $"building not found: {cmd.TargetEntityId}");
+                return;
+            }
+
+            FPBuildingPlacement[] buffer = _removeScratch;
+            int count = CollectBuildings(ref frame, buffer, target, _collectOrder);
+
+            // Removal shrinks the set, so no GEOMETRY check can newly fail. The catalog lookup
+            // and the grid check run BEFORE the geometry though, and those read stored state this
+            // command did not produce: a BuildingComponent restored from a FullState written by a
+            // build with a different shape catalog names an entry this one does not hold, and
+            // that throws ArgumentException.
+            //
+            // Uncaught it would not stop at this command. The throw leaves EcsSimulation.Tick
+            // through the command loop, so the rest of the tick's commands and every update
+            // system are skipped and frame.Tick never increments — the same tick re-executes and
+            // throws again, forever. Rejecting also repairs the common case: the building that
+            // cannot be resolved is often the one being removed, and the collect above has
+            // already left it out.
+            //
+            // Only the ArgumentException catch remains: a refused PLACEMENT now returns false,
+            // and on a shrinking set no geometry check can produce one anyway.
+            FPNavMesh newMesh;
+            try
+            {
+                if (!FPNavMeshRebaker.TryRebakePlacements(
+                        _rebakeContext, buffer, out newMesh, out FPBuildingRejectionInfo rejection,
+                        frame.Logger, PlacementRules, count))
+                {
+                    RejectBuilding(ref frame, cmd, Describe(rejection));
+                    return;
+                }
+            }
+            catch (System.ArgumentException e)
+            {
+                RejectBuilding(ref frame, cmd, e.Message);
+                return;
+            }
+
+            frame.DestroyEntity(target);
+            _botFSM.SwapAndReseed(ref frame, newMesh);
+            _rebakeContext.CommitSwap(newMesh);
+            frame.Logger?.KInformation($"[Building][Removed] tick={frame.Tick}, player={cmd.PlayerId}, entity={target}, total={count}");
         }
 
         // ────────────────────────────────────────────

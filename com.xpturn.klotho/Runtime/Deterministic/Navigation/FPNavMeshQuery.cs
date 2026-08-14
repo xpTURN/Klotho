@@ -12,22 +12,22 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// </summary>
     public class FPNavMeshQuery
     {
-        private readonly FPNavMesh _navMesh;
+        private FPNavMesh _navMesh;
         private readonly IKLogger _logger;
 
         // Generation counter to avoid duplicate triangle checks
-        private readonly int[] _triVisited;
+        private int[] _triVisited;
         private int _queryGeneration;
 
-        private readonly int[] _raycastVisited;
+        private int[] _raycastVisited;
         private int _raycastGeneration;
 
         // Pre-allocations for MoveAlongSurface
         private const int MOVE_MAX_QUEUE = 48;
         private readonly int[] _moveQueue;
-        private readonly int[] _moveVisitedGen;
+        private int[] _moveVisitedGen;
         private int _moveGeneration;
-        private readonly int[] _moveParent;
+        private int[] _moveParent;
         private readonly int[] _moveVisitedPath;
 
         public FPNavMeshQuery(FPNavMesh navMesh, IKLogger logger)
@@ -42,6 +42,39 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _moveVisitedGen = new int[triCount];
             _moveParent = new int[triCount];
             _moveVisitedPath = new int[MOVE_MAX_QUEUE];
+        }
+
+        /// <summary>
+        /// Points this query at a different mesh, keeping the working arrays.
+        /// Part of a navmesh swap — see FPNavAgentSystem.SwapNavMesh, which is the only thing
+        /// that should call it.
+        /// </summary>
+        internal void Rebind(FPNavMesh newMesh)
+        {
+            _navMesh = newMesh;
+
+            int triCount = newMesh.Triangles.Length;
+            if (triCount > _triVisited.Length)
+            {
+                // Allocate first, install after: a failure partway through would otherwise leave
+                // some arrays sized for the new mesh and some for the old, and half-installed
+                // state in a deterministic simulation is a desync rather than a glitch.
+                var triVisited = new int[triCount];
+                var raycastVisited = new int[triCount];
+                var moveVisitedGen = new int[triCount];
+                var moveParent = new int[triCount];
+
+                _triVisited = triVisited;
+                _raycastVisited = raycastVisited;
+                _moveVisitedGen = moveVisitedGen;
+                _moveParent = moveParent;
+            }
+
+            // The generation counters are deliberately left alone. Zeroing them would alias
+            // generation 1 with every slot still stamped 1 from the previous mesh, and the
+            // arrays above are only replaced when they grow — a fresh array is all zeros, which
+            // never collides because 0 is the "never seen" sentinel and live generations start
+            // at 1. Nothing here needs to touch them; the wrap guards are their only writer.
         }
 
         #region NavMesh query functions
@@ -64,7 +97,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             for (int i = 0; i < count; i++)
             {
                 int triIdx = _navMesh.GridTriangles[start + i];
-                ref FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
+                ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
 
                 FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
                 FPVector2 b = _navMesh.Vertices[tri.v1].ToXZ();
@@ -98,7 +131,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             for (int i = 0; i < count; i++)
             {
                 int triIdx = _navMesh.GridTriangles[start + i];
-                ref FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
+                ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
 
                 FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
                 FPVector2 b = _navMesh.Vertices[tri.v1].ToXZ();
@@ -126,7 +159,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         public FP64 SampleHeight(FPVector2 xz, int triIdx)
         {
-            ref FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
+            ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
 
             FPVector3 va = _navMesh.Vertices[tri.v0];
             FPVector3 vb = _navMesh.Vertices[tri.v1];
@@ -196,7 +229,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             while (queueHead < queueTail)
             {
                 int curTri = _moveQueue[queueHead++];
-                ref FPNavMeshTriangle tri = ref _navMesh.Triangles[curTri];
+                ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[curTri];
 
                 // Terminate immediately if endPos is inside the current triangle
                 FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
@@ -293,6 +326,11 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // Outside NavMesh → search surrounding cells for nearest edge/vertex
             _navMesh.GetCellCoords(xz, out int centerCol, out int centerRow);
             _queryGeneration++;
+            if (_queryGeneration == int.MaxValue)
+            {
+                Array.Clear(_triVisited, 0, _triVisited.Length);
+                _queryGeneration = 1;
+            }
 
             FP64 bestSqrDist = FP64.MaxValue;
             FPVector2 bestPoint = xz;
@@ -319,7 +357,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                             continue;
                         _triVisited[tIdx] = _queryGeneration;
 
-                        ref FPNavMeshTriangle tri = ref _navMesh.Triangles[tIdx];
+                        ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[tIdx];
 
                         FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
                         FPVector2 b = _navMesh.Vertices[tri.v1].ToXZ();
@@ -377,6 +415,11 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             triIdx = -1;
 
             _raycastGeneration++;
+            if (_raycastGeneration == int.MaxValue)
+            {
+                Array.Clear(_raycastVisited, 0, _raycastVisited.Length);
+                _raycastGeneration = 1;
+            }
 
             FP64 cellSize    = _navMesh.GridCellSize;
             FP64 gridOriginX = _navMesh.GridOrigin.x;
@@ -459,7 +502,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     }
                     _raycastVisited[tIdx] = _raycastGeneration;
 
-                    ref FPNavMeshTriangle tri = ref _navMesh.Triangles[tIdx];
+                    ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[tIdx];
                     if (tri.isBlocked)
                     {
                         // _logger?.KTrace($"[Raycast]   tri[{tIdx}] skip (blocked)");

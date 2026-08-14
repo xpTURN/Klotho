@@ -1017,8 +1017,8 @@ namespace Brawler
             _logger?.KInformation(
                 $"[Brawler] Match ended: tick={tick}, winner={endEvt.WinnerPlayerId}, reason={endEvt.Reason}");
 
-            // KlothoSession path: scheduler runs inside Session.Update (B-4 lift) — game side no-op.
-            // Spectator path: same Session-internal scheduler also fires (B-3 lift).
+            // KlothoSession path: the scheduler runs inside Session.Update — game side no-op.
+            // Spectator path: the same Session-internal scheduler also fires.
         }
 
         public void OnMatchReset(ResetReason reason)
@@ -1110,6 +1110,26 @@ namespace Brawler
         public void OnBtnSlot1()
         {
             _simCallbacks?.SendUseConsumableCommand(_session?.Engine);
+        }
+
+        /// <summary>
+        /// Test entry (wire to a UI button or key in the editor): places a BOX in
+        /// front of the local character, at a random one of its 16 orientations, via the reliable
+        /// channel — server-routed, so a single client trigger stays deterministic across all peers.
+        /// </summary>
+        public void OnBtnPlaceBuilding()
+        {
+            _simCallbacks?.SendPlaceBuildingCommand(_session?.Engine);
+        }
+
+        /// <summary>
+        /// Test entry (wire to a second UI button): places a HEXAGON, via its own command.
+        /// The split is in the input, not the state — a hexagon has no orientation to send, and the
+        /// stored BuildingComponent is the same either way.
+        /// </summary>
+        public void OnBtnPlaceHexBuilding()
+        {
+            _simCallbacks?.SendPlaceHexBuildingCommand(_session?.Engine);
         }
     }
 }

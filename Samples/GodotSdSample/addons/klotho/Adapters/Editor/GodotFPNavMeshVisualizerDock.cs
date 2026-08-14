@@ -94,7 +94,7 @@ namespace xpTURN.Klotho.Godot
             int idx = it.SelectedTriangleIndex >= 0 ? it.SelectedTriangleIndex : it.HoveredTriangleIndex;
             if (data.IsLoaded && idx >= 0 && idx < data.NavMesh.Triangles.Length)
             {
-                ref var tri = ref data.NavMesh.Triangles[idx];
+                ref readonly var tri = ref data.NavMesh.Triangles[idx];
                 string n0 = tri.neighbor0 >= 0 ? tri.neighbor0.ToString() : "boundary";
                 string n1 = tri.neighbor1 >= 0 ? tri.neighbor1.ToString() : "boundary";
                 string n2 = tri.neighbor2 >= 0 ? tri.neighbor2.ToString() : "boundary";

@@ -26,6 +26,10 @@ namespace xpTURN.Klotho.Editor
         private FPNavMeshInteraction _interaction;
         private FPNavMeshAgentSimulator _agentSim;
 
+        // Last navmesh the runtime bridge handed us. Deliberately not _data.NavMesh: a file
+        // loaded mid-play must not be overwritten by the next rebake swap.
+        private FPNavMesh _lastBridgeNavMesh;
+
         // UI state
         private TextAsset _navMeshAsset;
         private Vector2 _scrollPosition;
@@ -89,17 +93,39 @@ namespace xpTURN.Klotho.Editor
 
         private void ConnectRuntimeBridge()
         {
-            var bridge = EcsDebugBridge.Instance;
-            if (bridge == null || bridge.NavMesh == null) return;
-
-            _data.LoadFromNavMesh(bridge.NavMesh, bridge.NavQuery);
+            if (!ReloadFromRuntimeBridge()) return;
             _agentSim.Initialize(_data);
+        }
+
+        /// <summary>
+        /// Rebinds the visualizer to the bridge's current navmesh. Split out of
+        /// <see cref="ConnectRuntimeBridge"/> so a mid-play rebake can refresh the view WITHOUT
+        /// re-running <see cref="FPNavMeshAgentSimulator.Initialize"/>, which recreates the sim
+        /// frame and resets the tick — that would wipe an in-progress editor experiment every
+        /// time a building is placed.
+        /// Reloading is the whole of the refresh, not just the render cache: LoadFromNavMesh
+        /// also rebinds Query and clears the path results, which live in the OLD mesh's
+        /// triangle index space.
+        /// </summary>
+        private bool ReloadFromRuntimeBridge()
+        {
+            var bridge = EcsDebugBridge.Instance;
+            if (bridge == null) return false;
+
+            // Read once — the bridge reads through to the live provider (see EcsDebugBridge).
+            FPNavMesh mesh = bridge.NavMesh;
+            if (mesh == null) return false;
+
+            _lastBridgeNavMesh = mesh;
+            _data.LoadFromNavMesh(mesh, bridge.NavQuery);
             _overlay.SetRuntimeSnapshotBuffer(bridge.AgentSnapshots);
             Repaint();
+            return true;
         }
 
         private void DisconnectRuntimeBridge()
         {
+            _lastBridgeNavMesh = null;
             _data.Unload();
             _overlay.SetRuntimeSnapshotBuffer(null);
             _overlay.RuntimeAgentSnapshotCount = 0;
@@ -129,7 +155,16 @@ namespace xpTURN.Klotho.Editor
             if (Application.isPlaying)
             {
                 var bridge = EcsDebugBridge.Instance;
-                if (bridge != null && bridge.AgentSnapshotCount > 0)
+                if (bridge == null) return;
+
+                // A runtime rebake (building placement) swaps the simulation's navmesh.
+                // Track what the BRIDGE last handed us, not _data.NavMesh — the user may have
+                // loaded a file mid-play, and comparing against _data would overwrite it on
+                // every swap.
+                if (!ReferenceEquals(bridge.NavMesh, _lastBridgeNavMesh))
+                    ReloadFromRuntimeBridge();
+
+                if (bridge.AgentSnapshotCount > 0)
                     Repaint();
                 return;
             }
@@ -636,7 +671,7 @@ namespace xpTURN.Klotho.Editor
                 EditorGUILayout.LabelField("Triangle", $"Index {idx}",
                     EditorStyles.boldLabel);
 
-                ref FPNavMeshTriangle tri = ref _data.NavMesh.Triangles[idx];
+                ref readonly FPNavMeshTriangle tri = ref _data.NavMesh.Triangles[idx];
                 EditorGUILayout.LabelField("Vertex Indices", $"v0={tri.v0}, v1={tri.v1}, v2={tri.v2}");
 
                 var rd = _data.CachedTriangles[idx];

@@ -1,3 +1,4 @@
+using System;
 using xpTURN.Klotho.Logging;
 
 using xpTURN.Klotho.Deterministic.Math;
@@ -9,15 +10,29 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// Per-tick agent update system.
     /// Handles path requests, steering, movement, and NavMesh constraints.
     /// </summary>
-    public class FPNavAgentSystem
+    public class FPNavAgentSystem : INavFingerprintSource
     {
-        private readonly FPNavMesh _navMesh;
-        private readonly FPNavMeshQuery _query;
-        private readonly FPNavMeshPathfinder _pathfinder;
-        private readonly FPNavMeshFunnel _funnel;
+        // Non-readonly: SwapNavMesh rebinds these to a rebaked mesh at runtime.
+        private FPNavMesh _navMesh;
+        private FPNavMeshQuery _query;
+        private FPNavMeshPathfinder _pathfinder;
+        private FPNavMeshFunnel _funnel;
         private readonly IKLogger _logger;
 
         private FPNavAvoidance _avoidance;
+
+        /// <summary>
+        /// The navmesh this system is currently running on — the base mesh until the first
+        /// <see cref="SwapNavMesh"/>, a rebaked mesh afterwards. This is the single source of
+        /// truth for "current": the swap rebinds the fields these read, so an
+        /// <c>INavMeshProvider</c> that delegates here cannot go stale, including when
+        /// <see cref="SwapNavMesh"/> is called directly rather than through a game system.
+        /// Diagnostics only — the simulation reads the fields.
+        /// </summary>
+        public FPNavMesh CurrentMesh => _navMesh;
+
+        /// <summary>Query bound to <see cref="CurrentMesh"/>. See that property for the contract.</summary>
+        public FPNavMeshQuery CurrentQuery => _query;
 
         private const int VISITED_BUFFER_SIZE = 48;
         private readonly int[] _visitedBuffer = new int[VISITED_BUFFER_SIZE];
@@ -26,8 +41,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // --- Graph-local obstacle query (BFS here, reusing the navmesh topology directly) ---
         // Forward triangle->segment CSR built alongside LoadObstacles (segment index aligns with
         // FPNavAvoidance._obstacles). null until LoadNavMeshObstacles runs on a navmesh.
-        private int[] _triSegStart;   // CSR offsets, length triCount+1
-        private int[] _triSegList;    // segment indices grouped by owner triangle
+        private int[] _triSegStart;   // CSR offsets, valid over [0, triCount] — may be oversized
+        private int[] _triSegList;    // segment indices grouped by owner triangle — may be oversized
+        private FPNavMeshObstacleExtractor.ExtractScratch _extractScratch;
         // Generation of the avoidance obstacle load captured when the CSR was built, used as a
         // desync guard: if the avoidance is re-loaded out from under us, the CSR is stale -> fall back.
         private int _obstacleLoadGenerationCache = -1;
@@ -136,9 +152,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             if (_avoidance == null)
                 return;
 
-            FPNavMeshObstacleExtractor.Extract(_navMesh, out var vertices, out var polygonOffsets,
+            // This runs on every SwapNavMesh, not just at load — see the note on this method's
+            // summary. The scratch is what keeps the re-extract from re-allocating its working
+            // set: the visited flags, the segment map, the counting-sort cursor, and this pair.
+            // It is a field rather than a shared pool because a snapshot extract can happen on a
+            // worker thread; ownership by the object that re-extracts is what makes serial use
+            // structural (FPNavMeshObstacleExtractor.ExtractScratch).
+            //
+            // EVERYTHING here comes back OVERSIZED — the ring vertices and offsets as well as the
+            // CSR pair. Read them through the counts, never through Length: the CSR through
+            // (_triSegList[_triSegStart[t] .. _triSegStart[t+1])), the other two through the
+            // counts handed to LoadObstacles below. Do not add a Length-based loop over any of
+            // them; that is the whole reason this path allocates nothing per swap.
+            _extractScratch = _extractScratch ?? new FPNavMeshObstacleExtractor.ExtractScratch();
+            FPNavMeshObstacleExtractor.Extract(_navMesh, _extractScratch,
+                out var vertices, out int vertexCount,
+                out var polygonOffsets, out int polygonCount,
                 out _triSegStart, out _triSegList);
-            _avoidance.LoadObstacles(vertices, polygonOffsets);
+            _avoidance.LoadObstacles(vertices, vertexCount, polygonOffsets, polygonCount);
             _obstacleLoadGenerationCache = _avoidance.ObstacleLoadGeneration;
             // The baked asset records its own bake Agent Radius (VERSION 3): apply it as the
             // obstacle inset so clearance is not double-charged (boundary inset + full radius).
@@ -148,10 +179,198 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             // Size the BFS visited-stamp to the navmesh (load-time; hot path stays GC-0). The
             // frontier/candidate buffers are fixed-cap and allocated once with the system.
-            int triCount = _navMesh?.Triangles?.Length ?? 0;
+            //
+            // The generation reset belongs INSIDE the grow branch and nowhere else. SwapNavMesh
+            // re-enters this method mid-match, and the array is only reallocated when it is too
+            // SMALL — so a rebake that does not grow the triangle count (removing a building)
+            // keeps stamps from before the swap. Restarting the counter at 0 there would make
+            // generation 1 alias every slot still holding 1, and the BFS would treat those
+            // triangles as visited and drop their wall segments. Scoped like this the counter
+            // only restarts alongside a freshly zeroed array, and on reuse it keeps climbing
+            // past every stale value, so a collision is impossible rather than merely unlikely.
+            int triCount = _navMesh?.TriangleCount ?? 0;
             if (_bfsStamp == null || _bfsStamp.Length < triCount)
+            {
                 _bfsStamp = new int[triCount];
-            _bfsGeneration = 0;
+                _bfsGeneration = 0;
+            }
+        }
+
+        /// <summary>
+        /// Swaps in a rebaked navmesh, rebinding the query, pathfinder and funnel this system
+        /// already holds. This is the cheap form: their working arrays are kept and only grown
+        /// when the new mesh has more triangles, which on a large stage is the difference between
+        /// a megabyte-and-a-half per building and nothing.
+        ///
+        /// <para><b>Follow with <see cref="ReseedAgents"/> before the next Update.</b> The swap is
+        /// one line now, which makes it easy to read as the whole job — it is not. Every agent is
+        /// still holding a triangle index and corridor that point into the mesh being replaced,
+        /// and both are hashed frame state, so skipping the reseed desyncs the peer rather than
+        /// merely misplacing an agent.</para>
+        ///
+        /// <para>MUST be invoked only from the deterministic command stream (same tick, same order
+        /// on all peers), at a tick boundary. Re-extracts ORCA obstacles from the new mesh (R5)
+        /// and invalidates the graph-local CSR.</para>
+        ///
+        /// <para>Requires the trio to be installed already — by the constructor or by the
+        /// four-argument overload. That is the one thing this form cannot do that the other can:
+        /// it rebinds what is there rather than replacing it.</para>
+        /// </summary>
+        public void SwapNavMesh(FPNavMesh newMesh)
+        {
+            if (newMesh == null)
+                throw new System.ArgumentException("FPNavAgentSystem.SwapNavMesh: newMesh must be non-null");
+            if (_query == null || _pathfinder == null || _funnel == null)
+                throw new System.InvalidOperationException(
+                    "FPNavAgentSystem.SwapNavMesh(mesh): no query/pathfinder/funnel to rebind. " +
+                    "Install them through the constructor or the four-argument overload first.");
+
+            _query.Rebind(newMesh);
+            _pathfinder.Rebind(newMesh);
+            _funnel.Rebind(newMesh);
+
+            InstallSwappedMesh(newMesh);
+        }
+
+        /// <summary>
+        /// Swaps in a rebaked navmesh, taking a query, pathfinder and funnel the caller built
+        /// against <paramref name="newMesh"/>. Prefer <see cref="SwapNavMesh(FPNavMesh)"/>, which
+        /// reuses the existing trio instead of allocating a new one; this form stays for games
+        /// that own their own instances, and for tests that need to install a specific trio.
+        ///
+        /// <para><b>Follow with <see cref="ReseedAgents"/> before the next Update</b> — see the
+        /// other overload for why. MUST be invoked only from the deterministic command stream
+        /// (same tick, same order on all peers), at a tick boundary.</para>
+        /// </summary>
+        public void SwapNavMesh(FPNavMesh newMesh, FPNavMeshQuery query,
+            FPNavMeshPathfinder pathfinder, FPNavMeshFunnel funnel)
+        {
+            if (newMesh == null || query == null || pathfinder == null || funnel == null)
+                throw new System.ArgumentException("FPNavAgentSystem.SwapNavMesh: all arguments must be non-null");
+
+            _query = query;
+            _pathfinder = pathfinder;
+            _funnel = funnel;
+
+            InstallSwappedMesh(newMesh);
+        }
+
+        /// <summary>
+        /// The part of a swap that is the same whichever way the trio got bound: adopt the mesh,
+        /// drop the graph-local CSR, re-extract obstacles, and say so. Shared so the two
+        /// overloads cannot drift — a swap that skipped any of this would be observably different.
+        /// </summary>
+        private void InstallSwappedMesh(FPNavMesh newMesh)
+        {
+            _navMesh = newMesh;
+
+            // Invalidate the graph-local obstacle CSR; LoadNavMeshObstacles rebuilds it (and the
+            // BFS stamp sizing + radius inset) from the new mesh when avoidance is wired.
+            _triSegStart = null;
+            _triSegList = null;
+            _obstacleLoadGenerationCache = -1;
+            LoadNavMeshObstacles();
+
+            _logger?.KInformation($"[FPNavAgentSystem] navmesh swapped: {newMesh.Triangles.Length} triangles, " +
+                $"fingerprint 0x{GetNavFingerprint():X16}");
+        }
+
+        /// <summary>
+        /// Reseeds every agent after a navmesh swap: re-queries
+        /// CurrentTriangleIndex from the agent position on the new mesh and invalidates the
+        /// cached corridor (both live in the hashed frame state — stale values over rebuilt
+        /// triangle indices would corrupt determinism and gameplay alike). Agents that still
+        /// have a destination are set to PathPending with the repath cooldown bypassed, so the
+        /// next Update repaths them deterministically. Agents whose position no longer lies on
+        /// the mesh (e.g. standing inside a carved hole — placement rules should prevent this)
+        /// fail their path and are reported.
+        /// </summary>
+        public unsafe void ReseedAgents(ref Frame frame, EntityRef[] entities, int entityCount)
+        {
+            // The caller hands in its own array and count, and nothing about that pair tells the
+            // engine whether it is the WHOLE agent set or a truncated view of it. An agent that
+            // is missed here keeps a CurrentTriangleIndex and corridor that index the mesh that
+            // was just replaced — and because both fields are hashed frame state, a peer that
+            // reseeds fewer agents than another diverges rather than merely misbehaving.
+            //
+            // That is not hypothetical: the Brawler seam once collected into a fixed-size array
+            // and stopped at its length, so the post-fullstate swap (which can run before that
+            // peer's first Update has grown the array) reseeded fewer agents than the authority.
+            // The engine cannot fix the caller's bookkeeping, but it can refuse to let it pass
+            // silently — which is the only reason this class of bug is expensive.
+            int actual = 0;
+            var audit = frame.Filter<NavAgentComponent>();
+            while (audit.Next(out _))
+                actual++;
+            if (actual != entityCount)
+            {
+                _logger?.KError(
+                    $"[FPNavAgentSystem] ReseedAgents: caller passed {entityCount} agent(s) but the frame " +
+                    $"has {actual} — the difference is NOT reseeded and keeps corridor/triangle indices " +
+                    $"into the replaced mesh. Both fields are hashed state, so peers that disagree here " +
+                    $"desync. Fix the caller's collection (grow, do not truncate).");
+            }
+
+            int lost = 0;
+            for (int i = 0; i < entityCount; i++)
+            {
+                ref var nav = ref frame.Get<NavAgentComponent>(entities[i]);
+
+                nav.CurrentTriangleIndex = _query.FindTriangle(nav.Position.ToXZ(), nav.Position.y);
+                nav.CorridorLength = 0;
+                nav.PathIsValid = false;
+                nav.HasPath = false;
+                nav.OffCorridorTicks = 0;
+
+                if (nav.CurrentTriangleIndex < 0)
+                {
+                    // Off the new mesh — typically a building was placed on top of this agent.
+                    //
+                    // NOTE: leaving it at -1 means it is frozen for good, not just this tick.
+                    // Nothing else in the engine writes CurrentTriangleIndex back to a valid
+                    // value: MoveAlongSurface returns early on startTri < 0 and hands the -1
+                    // straight back, so the next rebake's reseed is the only thing that can
+                    // recover it. Brawler hides this in its own layer (BotFSMSystem re-snaps
+                    // nav.Position from the transform every tick and steers straight at the
+                    // destination when velocity is zero), which is why the gap has never shown
+                    // up in the sample.
+                    //
+                    // That is a deliberate deferral, not an oversight. The current behaviour is
+                    // pinned by FPNavAgentOffMeshFreezeTests, whose tests are written to FAIL once
+                    // a recovery path exists, and which record the conditions that should reopen
+                    // the question.
+                    lost++;
+                    if (nav.HasNavDestination)
+                        nav.Status = (byte)FPNavAgentStatus.PathFailed;
+                    continue;
+                }
+
+                if (nav.HasNavDestination
+                    && (nav.Status == (byte)FPNavAgentStatus.Moving
+                        || nav.Status == (byte)FPNavAgentStatus.PathPending))
+                {
+                    nav.Status = (byte)FPNavAgentStatus.PathPending;
+                    nav.LastRepathTick = 0; // bypass the repath cooldown: repath on the next Update
+                }
+            }
+
+            if (lost > 0)
+                _logger?.KWarning($"[FPNavAgentSystem] ReseedAgents: {lost}/{entityCount} agent(s) off the new mesh " +
+                    $"(inside a carved region?) — paths failed");
+            else
+                _logger?.KInformation($"[FPNavAgentSystem] ReseedAgents: {entityCount} agent(s) reseeded");
+        }
+
+        /// <summary>
+        /// Cross-peer navigation fingerprint: folded into the FullState resync
+        /// static-geometry check. Never 0 while a mesh is present.
+        /// </summary>
+        public long GetNavFingerprint()
+        {
+            if (_navMesh == null)
+                return 0;
+            long fp = unchecked((long)FPNavMeshRebaker.ComputeFingerprint(_navMesh));
+            return fp == 0 ? 1L : fp;
         }
 
         /// <summary>
@@ -332,9 +551,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// the padded BFS expansion gate — never under-approximates for a point outside the
         /// triangle, so an in-range wall edge is never skipped.
         /// </summary>
-        private FP64 TriangleNearestDistSqr(FPVector2 p, int triIdx, FPNavMeshTriangle[] tris)
+        private FP64 TriangleNearestDistSqr(FPVector2 p, int triIdx, ReadOnlySpan<FPNavMeshTriangle> tris)
         {
-            ref FPNavMeshTriangle tri = ref tris[triIdx];
+            ref readonly FPNavMeshTriangle tri = ref tris[triIdx];
             FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
             FPVector2 b = _navMesh.Vertices[tri.v1].ToXZ();
             FPVector2 c = _navMesh.Vertices[tri.v2].ToXZ();

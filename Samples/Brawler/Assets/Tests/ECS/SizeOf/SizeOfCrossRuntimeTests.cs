@@ -34,6 +34,15 @@ namespace xpTURN.Klotho.ECS.Tests
         private const int Expected_CharacterComponent             =  84;
         private const int Expected_SkillCooldownComponent         =  16;
 
+        // Not an ECS component but the navmesh's storage struct. It dominates resident memory
+        // (three copies live at once: base, installed, retired), so its per-runtime layout is
+        // worth pinning. Replacing the six portal ints with a portalFlip byte and moving
+        // isBlocked took it from 120 to 88 bytes. 88 is the measured CoreCLR value
+        // (FPNavMeshTriangleSizeTests, dotnet), and IL2CPP agreed with CoreCLR back when it was
+        // 120. A real number rather than -1 (Ignore) on purpose: if a runtime disagrees, failing
+        // is the signal that is wanted, not a silent skip.
+        private const int Expected_FPNavMeshTriangle              =  88;
+
         // ── Print measured values ────────────────────────────────────────────────────────
 
         [UnityTest]
@@ -50,6 +59,7 @@ namespace xpTURN.Klotho.ECS.Tests
             Debug.Log($"  VelocityComponent              = {Unsafe.SizeOf<VelocityComponent>()}");
             Debug.Log($"  CharacterComponent             = {Unsafe.SizeOf<CharacterComponent>()}");
             Debug.Log($"  SkillCooldownComponent         = {Unsafe.SizeOf<SkillCooldownComponent>()}");
+            Debug.Log($"  FPNavMeshTriangle              = {Unsafe.SizeOf<FPNavMeshTriangle>()}");
             yield return null;
             Assert.Pass("PrintSizes complete — apply the values above to the Expected_* constants.");
         }
@@ -66,6 +76,7 @@ namespace xpTURN.Klotho.ECS.Tests
         [UnityTest] public IEnumerator Verify_VelocityComponent()              { yield return null; AssertSize<VelocityComponent>(Expected_VelocityComponent); }
         [UnityTest] public IEnumerator Verify_CharacterComponent()             { yield return null; AssertSize<CharacterComponent>(Expected_CharacterComponent); }
         [UnityTest] public IEnumerator Verify_SkillCooldownComponent()         { yield return null; AssertSize<SkillCooldownComponent>(Expected_SkillCooldownComponent); }
+        [UnityTest] public IEnumerator Verify_FPNavMeshTriangle()              { yield return null; AssertSize<FPNavMeshTriangle>(Expected_FPNavMeshTriangle); }
 
         private static void AssertSize<T>(int expected) where T : unmanaged
         {

@@ -338,6 +338,19 @@ namespace xpTURN.Klotho.ECS
         // byproduct. This changes the scalar hash value vs the previous chain, which is safe under the
         // same-build-per-match deployment model. SerializeWithHash folds identically so that
         // GetStateHash() stays equal to the FullState-serialization hash used at resync verification.
+        //
+        // CONSEQUENCE — the registered type SET is hash input. A type with zero live instances still
+        // folds in its fresh seed (FNV_OFFSET), so two peers that register DIFFERENT type sets cannot
+        // produce equal hashes even with identical worlds. The chained fold did not have this property:
+        // an empty type contributed no bytes and was invisible. "Same build per match" therefore has to
+        // hold at the level of which ASSEMBLIES are loaded, not just which game code shipped — the case
+        // that bit us was a Unity Editor session registering Editor-only test assemblies' components
+        // against a dedicated server that has none of them (8 extra empty types, every hash divergent
+        // from tick 0). Peers must either load the same set or prune the difference
+        // (ISimulationConfig.SetRuntimePrunedComponentTypeIds — a pruned type leaves
+        // RegisteredTypeIdsSorted and so leaves this fold). ComponentStorageRegistry.LayoutFingerprint
+        // exists to make that mismatch legible: it is logged at boot on every peer and compared at join,
+        // so compare it before reading the per-component breakdown below.
         public ulong CalculateHash(StateHashBreakdown breakdown)
         {
             ulong frameHash = FPHash.FNV_OFFSET;
@@ -556,7 +569,10 @@ namespace xpTURN.Klotho.ECS
 
             // Must fold identically to CalculateHash (per-type from a fresh FNV seed, then fold)
             // so the returned hash equals CalculateHash(), keeping GetStateHash() == the FullState hash
-            // verified after a resync restore.
+            // verified after a resync restore. That symmetry also carries CalculateHash's consequence:
+            // the registered type set is hash input, so a peer with extra empty types cannot verify a
+            // FullState from a peer without them — applying the authoritative state does not reconcile
+            // it, because the difference is in the fold set rather than in the values.
             ulong frameHash = FPHash.FNV_OFFSET;
             frameHash = FPHash.Hash(frameHash, Tick);
             frameHash = FPHash.Hash(frameHash, Entities.Count);

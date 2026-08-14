@@ -45,7 +45,7 @@ namespace xpTURN.Klotho.Godot
 
             FPNavMesh fpNavMesh = FPNavMeshBuildPipeline.Build(
                 vertices, indices, areas, DEFAULT_CELL_SIZE,
-                log: m => GD.Print(m), logError: m => GD.PushError(m),
+                new GodotDebugSink(),
                 // Bake settings block: recorded into the asset so it is self-describing (radius
                 // feeds the obstacle inset at load time; slope/height/climb for future consumers).
                 bakeAgentRadius: navMesh.AgentRadius, bakeMaxSlopeDeg: navMesh.AgentMaxSlope,

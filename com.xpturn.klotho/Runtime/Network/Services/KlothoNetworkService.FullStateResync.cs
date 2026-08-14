@@ -117,8 +117,13 @@ namespace xpTURN.Klotho.Network
             if (IsHost) return;
 
             _logger?.KInformation($"[KlothoNetworkService] FullStateResponse received: tick={msg.Tick}, size={msg.StateData?.Length ?? 0}");
-            (_engine as KlothoEngine)?.CheckStaticGeometryFingerprint(msg.StaticFingerprint);
             OnFullStateReceived?.Invoke(msg.Tick, msg.StateData, msg.StateHash, msg.KindEnum);
+
+            // AFTER the apply — see the same ordering (and the reasoning) in
+            // ServerDrivenClientService.HandleFullStateResponse. The invoke above is a plain event
+            // and runs the apply synchronously, hook included; comparing before it would pit this
+            // peer's PRE-apply navmesh against a fingerprint the sender took POST-rebake.
+            (_engine as KlothoEngine)?.CheckStaticGeometryFingerprint(msg.StaticFingerprint);
 
             // If a reconnect was in progress, transition to completion
             if (_reconnectState == ReconnectState.WaitingForFullState)

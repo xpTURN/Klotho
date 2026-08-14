@@ -13,8 +13,14 @@ namespace xpTURN.Klotho.Unity
         public EcsSimulation Simulation { get; private set; }
         public Dictionary<int, EntityRef> AllEntityIndexMap { get; } = new Dictionary<int, EntityRef>();
 
-        public FPNavMesh NavMesh { get; private set; }
-        public FPNavMeshQuery NavQuery { get; private set; }
+        // Read through to the provider instead of caching: a runtime rebake swaps the
+        // simulation's mesh, and a cached copy would go stale for the rest of the session.
+        // Consumers should read these ONCE into a local per callback — every access is an
+        // independent read, so two reads can straddle a swap and hand you a mismatched
+        // mesh/query pair.
+        private INavMeshProvider _navMeshProvider;
+        public FPNavMesh NavMesh => _navMeshProvider?.NavMesh;
+        public FPNavMeshQuery NavQuery => _navMeshProvider?.NavQuery;
         public INavAgentSnapshotProvider NavAgentSnapshotProvider { get; private set; }
         public NavAgentSnapshot[] AgentSnapshots { get; } = new NavAgentSnapshot[64];
         public int AgentSnapshotCount { get; private set; }
@@ -36,10 +42,15 @@ namespace xpTURN.Klotho.Unity
             HFSMFixedArrayReaders.Register();
         }
 
-        public void RegisterNavMesh(FPNavMesh navMesh, FPNavMeshQuery query)
+        public void RegisterNavMeshProvider(INavMeshProvider provider)
         {
-            NavMesh = navMesh;
-            NavQuery = query;
+            _navMeshProvider = provider;
+        }
+
+        public void UnregisterNavMeshProvider(INavMeshProvider provider)
+        {
+            if (_navMeshProvider == provider)
+                _navMeshProvider = null;
         }
 
         public void RegisterNavAgentProvider(INavAgentSnapshotProvider provider)
@@ -79,8 +90,7 @@ namespace xpTURN.Klotho.Unity
             KlothoSession.OnSessionCreated -= HandleSessionCreated;
 #endif
             if (Instance == this) Instance = null;
-            NavMesh = null;
-            NavQuery = null;
+            _navMeshProvider = null;
             NavAgentSnapshotProvider = null;
             AgentSnapshotCount = 0;
         }
@@ -93,7 +103,7 @@ namespace xpTURN.Klotho.Unity
 
             var cb = session.SimulationCallbacks;
             if (cb is INavMeshProvider navMesh)
-                RegisterNavMesh(navMesh.NavMesh, navMesh.NavQuery);
+                RegisterNavMeshProvider(navMesh);
             if (cb is INavAgentProvider agentProvider)
                 RegisterNavAgentProvider(agentProvider.NavAgentSnapshotProvider);
         }

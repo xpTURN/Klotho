@@ -644,14 +644,20 @@ namespace xpTURN.Klotho.Editor
         private void DrawRuntimeAgentWaypoints(ref NavAgentSnapshot snap, Vector3 snapPos, Vector3 snapDest)
         {
             var bridge = EcsDebugBridge.Instance;
-            if (bridge == null || bridge.NavMesh == null || bridge.NavQuery == null) return;
+            if (bridge == null) return;
+
+            // Read once: the bridge reads through to the live provider, so repeated accesses
+            // can straddle a rebake swap and pair a new mesh with an old query.
+            FPNavMesh mesh = bridge.NavMesh;
+            FPNavMeshQuery query = bridge.NavQuery;
+            if (mesh == null || query == null) return;
 
             // Recreate Pathfinder/Funnel if the NavMesh has changed
-            if (_runtimeNavMeshRef != bridge.NavMesh)
+            if (_runtimeNavMeshRef != mesh)
             {
-                _runtimeNavMeshRef = bridge.NavMesh;
-                _runtimePathfinder = new FPNavMeshPathfinder(bridge.NavMesh, bridge.NavQuery, null);
-                _runtimeFunnel = new FPNavMeshFunnel(bridge.NavMesh, bridge.NavQuery, null);
+                _runtimeNavMeshRef = mesh;
+                _runtimePathfinder = new FPNavMeshPathfinder(mesh, query, null);
+                _runtimeFunnel = new FPNavMeshFunnel(mesh, query, null);
             }
 
             FPVector3 start = snap.Position;

@@ -10,6 +10,20 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     [Serializable]
     public struct FPNavMeshTriangle
     {
+        // The three GETTERS below are `readonly`; the two setters are not, and the split is load
+        // bearing rather than decorative. This is a mutable struct that consumers reach through
+        // read-only references — FPNavMesh.Triangles is a ReadOnlySpan and the query, funnel,
+        // agent and rebaker paths all bind `ref readonly FPNavMeshTriangle`. Calling a
+        // non-`readonly` instance method on such a reference makes the compiler copy the whole
+        // struct defensively, and this struct is 88 bytes (pinned by FPNavMeshTriangleSizeTests);
+        // the A* edge loop alone would take two copies per edge, three edges per triangle expanded.
+        //
+        // Measured, today, that costs nothing: the pathfinding sweep moves 0.55% — noise — because
+        // the JIT inlines these and scalarises the copy away. `readonly` is here because that is an
+        // observation about the current JIT and the current bodies, not a contract. It stops being
+        // true if an accessor grows past the inliner's budget, and nothing in the source would
+        // change when it does.
+
         // vertex indices (reference to FPNavMesh.Vertices)
         public int v0;
         public int v1;
@@ -21,14 +35,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         public int neighbor1;       // edge v1-v2
         public int neighbor2;       // edge v2-v0
 
-        // portal vertex indices for funnel algorithm (left, right)
-        public int portal0Left;
-        public int portal0Right;
-        public int portal1Left;
-        public int portal1Right;
-        public int portal2Left;
-        public int portal2Right;
-
         // precomputed centroid for A* heuristic (XZ)
         public FPVector2 centerXZ;
 
@@ -38,11 +44,27 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // area mask (walkable, water, cost zones, etc.)
         public int areaMask;
 
-        // cost multiplier (1.0 = default, e.g. swamp = 2.0)
-        public FP64 costMultiplier;
-
         // dynamic obstacle blocking flag
         public bool isBlocked;
+
+        // Funnel portal orientation, one bit per edge (bit e = edge e).
+        // The baker's left/right portal pair is ALWAYS a permutation of that edge's own vertex
+        // pair, so the only information it carries is "is it flipped?" — bit clear = (va, vb),
+        // bit set = (vb, va). See GetPortal/SetPortal; boundary edges (neighbor < 0) carry no
+        // portal and their bit is meaningless.
+        //
+        // The sign that decides it is Cross(edgeMid - opposite, va - vb) = -2 * signedArea, which
+        // is the same for all three edges of a triangle — so in a consistently wound mesh this
+        // byte is either 0x00 (CCW) or the triangle's interior-edge mask (CW). It is kept per
+        // triangle rather than per mesh because global winding consistency is a test assertion,
+        // not a contract of this struct.
+        //
+        // Placed next to areaMask/isBlocked so it lands in existing alignment padding: removing
+        // the six portal ints took 120 -> 96 B and this byte costs nothing on top.
+        public byte portalFlip;
+
+        // cost multiplier (1.0 = default, e.g. swamp = 2.0)
+        public FP64 costMultiplier;
 
         // Y-axis height range (multi-floor support)
         public FP64 minY;       // minimum of the three vertices
@@ -52,7 +74,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <summary>
         /// Returns the adjacent triangle index by edge local index (0, 1, 2).
         /// </summary>
-        public int GetNeighbor(int edgeIndex)
+        public readonly int GetNeighbor(int edgeIndex)
         {
             switch (edgeIndex)
             {
@@ -80,7 +102,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// Returns the vertex index pair for an edge.
         /// edgeIndex: 0 = (v0,v1), 1 = (v1,v2), 2 = (v2,v0)
         /// </summary>
-        public void GetEdgeVertices(int edgeIndex, out int va, out int vb)
+        public readonly void GetEdgeVertices(int edgeIndex, out int va, out int vb)
         {
             switch (edgeIndex)
             {
@@ -92,30 +114,64 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
-        /// Returns the portal vertex index pair.
+        /// Returns the portal vertex index pair, or (-1, -1) for a boundary edge.
+        ///
+        /// Decoded from <see cref="portalFlip"/>: the pair is always this edge's own vertices,
+        /// ordered by that edge's bit. Boundary detection comes from <see cref="GetNeighbor"/> —
+        /// neighbor is the single source of truth for "this edge has no portal", which is what
+        /// lets the six stored indices collapse into three bits.
         /// </summary>
-        public void GetPortal(int edgeIndex, out int left, out int right)
+        public readonly void GetPortal(int edgeIndex, out int left, out int right)
         {
-            switch (edgeIndex)
+            if (GetNeighbor(edgeIndex) < 0)
             {
-                case 0: left = portal0Left; right = portal0Right; return;
-                case 1: left = portal1Left; right = portal1Right; return;
-                case 2: left = portal2Left; right = portal2Right; return;
-                default: left = -1; right = -1; return;
+                left = -1;
+                right = -1;
+                return;
+            }
+
+            GetEdgeVertices(edgeIndex, out int va, out int vb);
+            if ((portalFlip & (1 << edgeIndex)) != 0)
+            {
+                left = vb;
+                right = va;
+            }
+            else
+            {
+                left = va;
+                right = vb;
             }
         }
 
         /// <summary>
-        /// Sets the portal vertex indices.
+        /// Records the portal orientation for an edge.
+        ///
+        /// <paramref name="left"/>/<paramref name="right"/> must be that edge's own vertex pair in
+        /// either order (or (-1, -1) for a boundary edge) — anything else cannot be represented and
+        /// means the caller derived the pair from something other than this triangle's edge.
+        ///
+        /// The contract check is NOT compiled out in release builds: the server runs release, and a
+        /// violation that passes silently there would leave the flag at its previous value — the
+        /// quiet-wrong-answer class this encoding exists to avoid. It costs nothing to keep, since
+        /// the only callers are the two adjacency builders and they run at bake time, not per tick.
         /// </summary>
         public void SetPortal(int edgeIndex, int left, int right)
         {
-            switch (edgeIndex)
-            {
-                case 0: portal0Left = left; portal0Right = right; break;
-                case 1: portal1Left = left; portal1Right = right; break;
-                case 2: portal2Left = left; portal2Right = right; break;
-            }
+            if (edgeIndex < 0 || edgeIndex > 2)
+                throw new ArgumentOutOfRangeException(nameof(edgeIndex));
+
+            int bit = 1 << edgeIndex;
+            GetEdgeVertices(edgeIndex, out int va, out int vb);
+
+            if (left == va && right == vb)
+                portalFlip &= (byte)~bit;
+            else if (left == vb && right == va)
+                portalFlip |= (byte)bit;
+            else if (left < 0 && right < 0)
+                portalFlip &= (byte)~bit;   // boundary edge — the bit carries no meaning
+            else
+                throw new ArgumentException(
+                    $"SetPortal(e{edgeIndex}, {left}, {right}): not a permutation of edge ({va},{vb})");
         }
     }
 }

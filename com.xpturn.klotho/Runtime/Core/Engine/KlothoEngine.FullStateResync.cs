@@ -37,7 +37,7 @@ namespace xpTURN.Klotho.Core
         private int _unexpectedFullStateDropCount;
         internal int UnexpectedFullStateDropCount => _unexpectedFullStateDropCount;
 
-        // Counts hash-mismatch observations in ApplyFullState. Quantifies post-②-B residual
+        // Counts hash-mismatch observations in ApplyFullState. Quantifies the residual
         // divergence frequency — operational input for corrective-reset priority.
         private int _resyncHashMismatchCount;
         internal int ResyncHashMismatchCount => _resyncHashMismatchCount;
@@ -300,7 +300,19 @@ namespace xpTURN.Klotho.Core
         /// state and NOTHING was applied — callers must skip all post-processing (clearing input
         /// history for a state that was never applied stalls the chain).
         /// </summary>
-        private enum FullStateApplyResult { Applied, Skipped, HashMismatch }
+        /// <summary>
+        /// Outcome of <see cref="ApplyFullState"/>.
+        /// <para><b>DerivativeRebuildFailed</b> — the state was applied AND its hash matched, but the
+        /// game's <see cref="ISimulationCallbacks.OnFullStateApplied"/> hook threw while rebuilding a
+        /// peer-local derivative (navmesh, …). Distinct from HashMismatch on purpose: the restored
+        /// state is trustworthy, so this must NOT take the SD unrecoverable/abort branch — what is
+        /// wrong is this peer's local derivative, which usually means its assets or config disagree
+        /// with the authority's. Re-requesting the same full state re-runs the same deterministic
+        /// rebuild and fails identically, so there is no automatic recovery to trigger; the value
+        /// exists so a caller can refuse to report this peer as healthy and so the KError beside it
+        /// is not the only trace.</para>
+        /// </summary>
+        private enum FullStateApplyResult { Applied, Skipped, HashMismatch, DerivativeRebuildFailed }
 
         /// <summary>
         /// Common full-state restoration for P2P/SD. The caller performs mode-specific post-processing.
@@ -328,6 +340,19 @@ namespace xpTURN.Klotho.Core
             {
                 _resyncHashMismatchCount++;
                 _logger?.KError($"[KlothoEngine][FullStateResync] hash mismatch: local=0x{localHash:X16}, remote=0x{stateHash:X16}. Deserialization may be non-deterministic - resync state unreliable");
+                // The registered component set is itself state-hash input, so a registry difference
+                // makes every hash differ regardless of world contents. Compare this line with the
+                // other peer's before reading the per-component breakdown below — if they differ,
+                // the components are a symptom and the builds are the cause.
+                //
+                // Information, not Error: this is context for the failure just reported, not a
+                // second failure. Logging it at Error double-counts one problem and — as Unity's
+                // test framework showed — fails any test that deliberately provokes a mismatch and
+                // expects exactly one error. Same level as the component/static diagnostics below.
+                _logger?.KInformation(
+                    $"[KlothoEngine][Registry] local: types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount} " +
+                    $"fp=0x{xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint:X16} " +
+                    $"— compare with the peer's [Registry] line; a mismatch means different builds (e.g. Unity Editor vs player build)");
 
                 // Diagnostic — per-component hash to identify which component(s) diverged.
                 if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSimDiag)
@@ -396,7 +421,51 @@ namespace xpTURN.Klotho.Core
                 }
             }
 
-            return hashMatched ? FullStateApplyResult.Applied : FullStateApplyResult.HashMismatch;
+            // Peer-local derivative rebuild hook: the restored frame is live from
+            // this point (even on HashMismatch the local sim runs on it), so out-of-hash
+            // derivatives (navmesh) must be rebuilt to match it before the next tick.
+            //
+            // The hook runs on the HashMismatch branch too, deliberately: the local sim keeps
+            // ticking on the restored state either way, so its derivatives have to track it. That
+            // also means an UNTRUSTED building set reaches the rebaker, which is why the rebaker's
+            // re-validation is kept (it is provably redundant on the trusted path — every building
+            // cleared a trial rebake of the whole set at placement time and the checks are all
+            // per-building or pairwise-monotone — but that proof does not cover a mismatched state).
+            // If a check that looks at the building set AS A WHOLE is ever added, that monotonicity
+            // argument breaks and this path throws for the first time.
+            //
+            // Caught here rather than left to the callers because the engine owes them a return
+            // value and cannot undo the apply. A throw escaping this method skips not just this
+            // return but every caller's post-apply bookkeeping — replay truncation, sync-state
+            // reset, and the SD client's StartCatchingUp among them — leaving a live restored state
+            // with half-open books. Catch is deliberately unbounded: the contract this defends is
+            // "the implementation does not throw", and a violation of it arrives as an arbitrary
+            // type, so narrowing to the exceptions today's callee happens to raise would reopen
+            // the hole. The KError below carries the full exception so the breadth costs diagnosis
+            // nothing, and the game seam is expected to handle its own domain errors regardless.
+            bool derivativeRebuildFailed = false;
+            if (_simulationCallbacks != null && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsApplied)
+            {
+                try
+                {
+                    _simulationCallbacks.OnFullStateApplied(this, ecsApplied.Frame);
+                }
+                catch (Exception ex)
+                {
+                    derivativeRebuildFailed = true;
+                    _logger?.KError(
+                        $"[KlothoEngine][FullStateResync] OnFullStateApplied threw at tick={tick} reason={reason} " +
+                        $"hashMatched={hashMatched} — the state stays applied but this peer's out-of-hash " +
+                        $"derivatives (navmesh) no longer match it. Implementations must not throw; the game seam " +
+                        $"should handle its own domain errors. {ex}");
+                }
+            }
+
+            if (!hashMatched)
+                return FullStateApplyResult.HashMismatch;   // the worse signal wins and stays honest
+            return derivativeRebuildFailed
+                ? FullStateApplyResult.DerivativeRebuildFailed
+                : FullStateApplyResult.Applied;
         }
 
         /// <summary>
@@ -451,35 +520,70 @@ namespace xpTURN.Klotho.Core
         }
 
         /// <summary>
-        /// Sender-side static geometry fingerprint for outbound FullState messages.
-        /// Returns 0 when no static collider service is present.
+        /// Sender-side static environment fingerprint for outbound FullState messages:
+        /// static collider geometry folded with the peer-local navigation fingerprint
+        /// (the navmesh, including runtime rebakes, is outside the state hash).
+        /// Returns 0 when neither source is present (wire sentinel: "not provided").
         /// </summary>
         public long GetLocalStaticFingerprint()
         {
-            if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecs)
-            {
-                var svc = ecs.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
-                if (svc != null)
-                    return svc.GetStaticFingerprint();
-            }
-            return 0;
+            return ComputeLocalEnvironmentFingerprint();
         }
 
         /// <summary>
-        /// Receiver-side check: compares the server-sent static geometry fingerprint against the local
-        /// one and logs on mismatch. Independent of the state-hash check — static colliders are not part
-        /// of the state hash, so a static-only divergence would otherwise surface only several ticks later
-        /// as a dynamic-body desync. A wire value of 0 means "not provided" and is skipped.
+        /// Static colliders XOR navigation fingerprint. Both sources are per-peer static and
+        /// excluded from the state hash; folding keeps the existing single wire field
+        /// (FullStateResponseMessage.StaticFingerprint) — no wire change. 0 stays reserved as
+        /// the "not provided" sentinel.
+        /// </summary>
+        private long ComputeLocalEnvironmentFingerprint()
+        {
+            if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation ecs)
+                return 0;
+
+            // Component-registry layout is folded in first. It is always present, so peers now
+            // always have something comparable — and a registry difference is worth surfacing
+            // HERE, at join, rather than letting it appear later as an inexplicable state-hash
+            // divergence (the registered type set is state-hash input; see LayoutFingerprint).
+            long fp = xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
+            var svc = ecs.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
+            if (svc != null)
+                fp ^= svc.GetStaticFingerprint();
+
+            var nav = ecs.GetSystem<xpTURN.Klotho.Deterministic.Navigation.INavFingerprintSource>();
+            long navFp = nav != null ? nav.GetNavFingerprint() : 0;
+            fp ^= navFp;
+
+            // The game's own slot. The three sources above are things the engine can see for
+            // itself; this is for what it cannot — a shape catalog, a tuning table, an asset id
+            // map: data that must be identical across builds and is deliberately outside the
+            // state hash. Without it a game with such data has nowhere to put it but inside one
+            // of the engine's terms, which then reports its divergence as a navmesh problem.
+            var game = ecs.GetSystem<xpTURN.Klotho.ECS.IGameFingerprintSource>();
+            if (game != null)
+                fp ^= game.GetGameFingerprint();
+
+            if (fp == 0)
+                fp = 1; // preserve the 0 = "not provided" wire sentinel
+            return fp;
+        }
+
+        /// <summary>
+        /// Receiver-side check: compares the server-sent static environment fingerprint (static
+        /// colliders + navmesh) against the local one and logs on mismatch. Independent of the
+        /// state-hash check — neither source is part of the state hash, so a divergence would
+        /// otherwise surface only several ticks later as a dynamic-body/agent desync. A wire
+        /// value of 0 means "not provided" and is skipped. A navmesh mismatch at join time can
+        /// also mean the joining peer has not yet re-applied runtime rebakes (buildings) from
+        /// the received state — the game seam must rebake after FullState apply.
         /// </summary>
         public void CheckStaticGeometryFingerprint(long serverStaticFingerprint)
         {
             if (serverStaticFingerprint == 0) return;
-            if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation ecs) return;
-            
-            var svc = ecs.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
-            if (svc == null) return;
 
-            long localFp = svc.GetStaticFingerprint();
+            long localFp = ComputeLocalEnvironmentFingerprint();
+            if (localFp == 0) return; // nothing registered locally to compare
+
             if (localFp == serverStaticFingerprint)
             {
                 _staticMismatchLogged = false; // matched — re-arm so a later divergence logs again
@@ -488,8 +592,22 @@ namespace xpTURN.Klotho.Core
 
             if (_staticMismatchLogged) return; // already reported this divergence — suppress per-resync spam
             _staticMismatchLogged = true;
+            // Break the fold down so the reader can tell WHICH source diverged by comparing this
+            // line with the peer's, instead of only knowing that the XOR differs.
+            var colliderSvc = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)
+                ?.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
+            var navSrc = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)
+                ?.GetSystem<xpTURN.Klotho.Deterministic.Navigation.INavFingerprintSource>();
+            var gameSrc = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)
+                ?.GetSystem<xpTURN.Klotho.ECS.IGameFingerprintSource>();
             _logger?.KError(
-                $"[KlothoEngine] Static geometry mismatch: server=0x{serverStaticFingerprint:X16} local=0x{localFp:X16} — client static registration diverged from server (check RegisterSystems static load)");
+                $"[KlothoEngine] Static environment mismatch: server=0x{serverStaticFingerprint:X16} local=0x{localFp:X16} " +
+                $"— local sources: registry(types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount})=0x{xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint:X16} " +
+                $"colliders=0x{(colliderSvc?.GetStaticFingerprint() ?? 0):X16} nav=0x{(navSrc?.GetNavFingerprint() ?? 0):X16} " +
+                $"game=0x{(gameSrc?.GetGameFingerprint() ?? 0):X16}. " +
+                $"Compare each against the peer's: a registry difference means different builds (e.g. Unity Editor vs player build); " +
+                $"a game difference is whatever that game folded in (shape catalog, tuning tables); " +
+                $"otherwise check RegisterSystems static load / post-FullState rebake");
         }
 
         private void HandleFullStateReceived(int tick, byte[] stateData, long stateHash, FullStateKind kind)
@@ -531,7 +649,12 @@ namespace xpTURN.Klotho.Core
                 return;
             }
 
-            bool hashMatched = applyResult == FullStateApplyResult.Applied;
+            // DerivativeRebuildFailed counts as matched here because it IS matched — the restored
+            // state and its hash are sound, only this peer's out-of-hash derivative rebuild failed.
+            // So the state bookkeeping below is correct as-is and must run. What must NOT happen is
+            // treating the peer as fully healthy, which is why the value is distinct and logged.
+            bool hashMatched = applyResult != FullStateApplyResult.HashMismatch;
+            bool derivativeRebuildFailed = applyResult == FullStateApplyResult.DerivativeRebuildFailed;
 
             // Truncate the replay at a corrective reset / resync (F47): the reset's state jump has no
             // replay record, so replaying past it diverges. Applied OR HashMismatch (both applied state;
@@ -569,7 +692,14 @@ namespace xpTURN.Klotho.Core
                 if (hashMatched)
                 {
                     _hasCompletedResync = true;
-                    _logger?.KWarning($"[KlothoEngine][FullStateResync] complete: tick={tick}");
+                    // Still "complete" even when the derivative rebuild failed: the state is
+                    // restored and sound, and suppressing the event would strand a game layer
+                    // that waits on it. The qualifier keeps the log from reading clean — the
+                    // KError from ApplyFullState carries the cause.
+                    if (derivativeRebuildFailed)
+                        _logger?.KWarning($"[KlothoEngine][FullStateResync] complete: tick={tick} (WITH a failed peer-local derivative rebuild — see the preceding KError)");
+                    else
+                        _logger?.KWarning($"[KlothoEngine][FullStateResync] complete: tick={tick}");
                     OnResyncCompleted?.Invoke(tick);
                 }
                 else

@@ -7,6 +7,7 @@ using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.SceneManagement;
 
+using xpTURN.Klotho.Logging;
 using xpTURN.Klotho.Serialization;
 using xpTURN.Klotho.Deterministic.Math;
 using xpTURN.Klotho.Deterministic.Geometry;
@@ -116,10 +117,13 @@ namespace xpTURN.Klotho.Editor
             // Per-triangle area (Clone: pipeline mutates via ref → defensive copy)
             int[] areas = (int[])srcAreas.Clone();
 
-            // Delegate the engine-agnostic geometry pipeline. Diagnostics routed to Unity console.
+            // Delegate the engine-agnostic geometry pipeline. Diagnostics routed to the Unity
+            // console through the IKLogger contract (UnityDebug sink).
+            using var loggerFactory = KLoggerFactory.Create(logging => logging.AddUnityDebug());
+            IKLogger logger = loggerFactory.CreateLogger("FPNavMeshExporter");
             return FPNavMeshBuildPipeline.Build(
                 vertices, indices, areas, cellSize,
-                log: m => Debug.Log(m), logError: m => Debug.LogError(m),
+                logger,
                 bakeAgentRadius: bakeAgentRadius, bakeMaxSlopeDeg: bakeMaxSlopeDeg,
                 bakeAgentHeight: bakeAgentHeight, bakeAgentClimb: bakeAgentClimb);
         }

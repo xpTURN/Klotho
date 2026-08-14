@@ -23,7 +23,7 @@ namespace xpTURN.Klotho.Core.Tests
         private static FPNavMesh Build(FPVector3[] verts, int[] idx)
         {
             var areas = new int[idx.Length / 3];
-            return FPNavMeshBuildPipeline.Build(verts, idx, areas, 5.0, null, null);
+            return FPNavMeshBuildPipeline.Build(verts, idx, areas, 5.0, null);
         }
 
         // Square room [0,size]^2 (agent inside → outer boundary CW).

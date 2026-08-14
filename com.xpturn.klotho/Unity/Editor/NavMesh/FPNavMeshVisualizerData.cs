@@ -161,7 +161,7 @@ namespace xpTURN.Klotho.Editor
             CachedTriangles = new TriangleRenderData[NavMesh.Triangles.Length];
             for (int i = 0; i < NavMesh.Triangles.Length; i++)
             {
-                ref FPNavMeshTriangle tri = ref NavMesh.Triangles[i];
+                ref readonly FPNavMeshTriangle tri = ref NavMesh.Triangles[i];
                 CachedTriangles[i] = new TriangleRenderData
                 {
                     v0 = CachedVertices[tri.v0],
@@ -192,7 +192,7 @@ namespace xpTURN.Klotho.Editor
 
             for (int t = 0; t < NavMesh.Triangles.Length; t++)
             {
-                ref FPNavMeshTriangle tri = ref NavMesh.Triangles[t];
+                ref readonly FPNavMeshTriangle tri = ref NavMesh.Triangles[t];
                 for (int e = 0; e < 3; e++)
                 {
                     tri.GetEdgeVertices(e, out int va, out int vb);
@@ -363,7 +363,7 @@ namespace xpTURN.Klotho.Editor
             {
                 int curTri = corridor[i];
                 int nextTri = corridor[i + 1];
-                ref FPNavMeshTriangle tri = ref NavMesh.Triangles[curTri];
+                ref readonly FPNavMeshTriangle tri = ref NavMesh.Triangles[curTri];
 
                 for (int e = 0; e < 3; e++)
                 {
