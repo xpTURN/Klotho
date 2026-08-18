@@ -10,6 +10,8 @@
 
 A deterministic-simulation framework supporting Client-Side Prediction (CSP), Rollback, Frame Synchronization, Server-Driven mode, and Replay. The simulation core is engine-agnostic pure C# with **Unity** and **Godot (.NET)** adapters on top. By excluding floating-point and building the simulation solely on 32.32 fixed-point (`FP64`) and a deterministic RNG (Xorshift128+), it guarantees full reproducibility across platforms and compilers.
 
+<img src="klotho.png" alt="Klotho" width="800">
+
 > Klotho weaves the simulation, one frame at a time.
 
 **How synchronization works, in one paragraph:** determinism is the keystone — given the same ordered inputs, every peer computes byte-identical state, so the network carries *inputs only* and verification reduces to comparing a hash. On that foundation each peer keeps two timelines over the same tick axis: a **Verified chain** (ticks where every player's real input is known — immutable) and a **Predicted chain** (ticks run ahead using *guessed* remote input — provisional). Like CPU branch prediction, the simulation advances immediately on predicted input instead of waiting; when a real input contradicts a guess, the engine restores a snapshot and re-simulates (**rollback**), which is cheap precisely because state is a pure function of inputs. Input delay and adaptive timing buffers minimize how often that happens, and when determinism genuinely breaks, a graded recovery ladder (hash check → rollback → full-state resync → corrective reset) restores agreement. The same machinery serves both **P2P lockstep** (peers hold equal authority) and **Server-Driven** (the server owns the verified chain). Full rationale: [Docs/SynchronizationDesign.md](Docs/SynchronizationDesign.md).
