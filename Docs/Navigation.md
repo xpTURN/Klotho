@@ -47,6 +47,11 @@ com.xpturn.klotho/Runtime/Deterministic/Navigation/
 ├── NavCorridorHelper.cs      # Corridor helper utilities
 ├── FPNavMeshRebaker.cs       # Runtime rebake orchestrator + snapshot/context/placement types
 ├── FPNavMeshRebakeBufferPool.cs  # Reusable rebake work buffers (per room)
+├── FPNavMeshRebakeDriver.cs  # Derives the installed mesh from the frame; slicing + mesh cache
+├── FPNavMeshRebakeSeam.cs    # What a game supplies the driver (placement table, install/reseed)
+├── FPNavMeshPlacementValidator.cs # Command-path verdict from the driver's own derivation
+├── FPNavMeshPlacementTableOps.cs  # The derivation both share (active set, canonical order, audits)
+├── FPNavAgentInstaller.cs    # Swap/reseed call protocol, as two separate halves
 ├── FPConstrainedDelaunay.cs  # Deterministic constrained Delaunay triangulation
 ├── FPBuildingShapeCatalog.cs # Shape table + radius-expanded derivative
 ├── FPConvexOffset.cs         # Convex footprint ⊕ agent radius (integer miter)
@@ -230,12 +235,21 @@ it happens to sit in.
 The pieces live in this folder — `FPNavMeshRebaker` orchestrates, `FPConstrainedDelaunay` does the
 triangulation on the exact integer grid, `FPBuildingShapeCatalog` holds the footprints a game may
 place, `FPConvexOffset` expands them by the agent radius. The result is an ordinary `FPNavMesh`,
-indistinguishable from a baked one, which you install with
-`FPNavAgentSystem.SwapNavMesh(...)` — that rebinds the query, pathfinder and funnel and reseeds
-every agent, because triangle indices are rebuilt and the old ones mean nothing.
+indistinguishable from a baked one, which you install with `FPNavAgentSystem.SwapNavMesh(...)` —
+that rebinds the query, pathfinder and funnel.
+
+**Installing it is a second decision, not a detail.** The swap does *not* reseed the agents; that
+call is yours and it is not optional, because every agent still holds a triangle index and corridor
+into the mesh you just replaced and both are hashed frame state. And in a rollback netcode you must
+not install where the command was handled at all: the rewind returns the frame and leaves the
+NavMesh ahead of it. `FPNavMeshRebakeDriver` owns that problem — it re-derives the installed mesh
+from frame state every tick, keeps the reseed on the tick that owns it, spreads a large rebake across
+frames, and keeps the two meshes a predicting peer bounces between. **Registering it as a system is
+the whole wiring**: the engine paces its slices and re-derives the mesh at world init and after a full
+state applies, so a game writes a placement table and an installer and nothing else.
 
 **[Navigation.Rebake.md](Navigation.Rebake.md)** is the guide: footprint types, the placement grid,
-what gets rejected, the determinism envelope, and measured costs.
+what gets rejected, the determinism envelope, installing from a command stream, and measured costs.
 
 ## NavMesh Export & Visualization *(Editor)*
 
@@ -269,4 +283,4 @@ Shared bake steps:
 
 ---
 
-*Last updated: 2026-08-12 — runtime NavMesh rebake (deterministic re-triangulation from building footprints, shape catalog, placement grid) — see [Navigation.Rebake.md](Navigation.Rebake.md). (2026-07-23: graph-local obstacle query (BFS multi-floor/ramp, bake-slope climb cap), clearance tuning (`ObstacleRadiusInset` auto-applied from the recorded bake-settings block), position-correction pass, non-convex/dual-source extraction.) (2026-07-22: ORCA static obstacles — hard-constraint LP3, `FPNavMeshObstacleExtractor`, `LoadNavMeshObstacles()`, `MAX_OBST_LINES`.)*
+*Last updated: 2026-08-18 — the rebake driver is self-wiring: registering the system is the whole wiring, and `KlothoEngine` owns slice pacing plus the corrections at world init and after a full-state apply; `FPNavMeshPlacementValidator` gives the command path the driver’s own derivation, order and audits. (2026-08-17: delayed install: `FPNavMeshRebakeDriver` derives the installed mesh from frame state each tick (rollback-safe), time-sliced rebake across frames, two-mesh boundary cache, `FPNavAgentInstaller` swap/reseed protocol.) (2026-08-12: runtime NavMesh rebake (deterministic re-triangulation from building footprints, shape catalog, placement grid) — see [Navigation.Rebake.md](Navigation.Rebake.md).) (2026-07-23: graph-local obstacle query (BFS multi-floor/ramp, bake-slope climb cap), clearance tuning (`ObstacleRadiusInset` auto-applied from the recorded bake-settings block), position-correction pass, non-convex/dual-source extraction.) (2026-07-22: ORCA static obstacles — hard-constraint LP3, `FPNavMeshObstacleExtractor`, `LoadNavMeshObstacles()`, `MAX_OBST_LINES`.)*

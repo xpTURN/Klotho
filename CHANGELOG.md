@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.8.1] - 2026-08-18
+
+### Navigation — the rebake installs itself, and a rollback cannot leave it behind
+
+- **Placing a building no longer means installing the new NavMesh by hand.** Register `FPNavMeshRebakeDriver` as a system and every tick it works out which buildings belong in the mesh — from the frame's own data — and makes sure that mesh is the one the agents are standing on. This is the part a rollback game could not get right on its own: a placement handled on a *predicted* tick used to install the mesh right there, and when the rollback rewound the frame, nothing rewound the mesh with it. Every re-executed tick then ran against a NavMesh its own frame disagreed with, and since the state hash covers components and not the mesh, no peer reported it. Re-deriving the install instead of treating it as an event collapses four situations into one: running forward, re-executing after a rollback, waking up on a full state, and replaying a recording. A game supplies two small pieces — where its placements live in frame state, and how to install a mesh — around seventy lines for a new game.
+- **The engine does the rest of the wiring.** It finds the registered driver when it initializes, then paces the work once per frame and re-establishes the mesh at the two moments a per-tick rule cannot cover: right after the world is created, and immediately after a received full state is applied. A game that used to subscribe to the frame hook by hand is simply told someone else is already pacing, so old wiring steps aside on its own. A failure inside a slice is contained and counted instead of taking the tick down with it.
+- **Installing the mesh and reseeding the agents are two calls, and only one of them may ever be skipped.** Installing is derived state — skipping it when the right mesh is already in place is fine. Reseeding writes hashed frame state, so *every* execution of a tick must do it, including a re-execution that found the mesh already installed. Fusing the two hides the reseed behind a peer-local comparison that does not roll back, which desyncs quietly. `FPNavAgentInstaller` packages the pair as two calls for exactly that reason, and re-collects the agent set on both.
+- **Deciding whether a placement command is legal is now the engine's job too.** `FPNavMeshPlacementValidator` builds the current placement set from frame state, hands out the next placement number, and answers "does this set bake, with the new building added?" — the same verdict on every peer, from the same data. The trial mesh it produces is deliberately thrown away: the tick that accepted the command may be a prediction, so the mesh must be built again on the tick the building actually appears.
+- **A predicting client crosses the same placement tick more than once, so the driver keeps two meshes live.** It arrives at the boundary, rolls back, and arrives again — wanting one of two meshes each time. Holding both turned 147 installs on a live match into 8 rebakes instead of 128, which is the fewest the building sets allow. The cost is a second set of work buffers, about 26.6 MB on a 205,000-triangle stage and nothing worth measuring on a small one; `slotCount: 1` turns it off.
+- **A game that rebakes but has not wired the two cross-check values is now told once, at startup.** Neither the mesh nor the shape table it was carved from is part of the state hash, and both hooks are optional — so forgetting one looked exactly like a game that has nothing to fold, on both peers. It is a warning, not an error (nothing has diverged; what is missing is the net that would report it if it did), and only games that actually rebake see it.
+
+### Navigation — a placement no longer costs one expensive frame
+
+- **A rebake can be spread over the frames between a placement and the tick it takes effect on, which cuts the worst single frame from 9.33 ms to 2.13 ms on a 204,800-triangle stage.** The result is byte-identical however many pieces it was done in, so no two peers need to agree on the pacing. If the pieces do not finish in time, the effective tick completes the remainder on the spot — the same thing that happened before slicing existed, so forgetting to pace it is slow, never wrong. The budget is a constructor argument and peer-local, defaulting to 20,000 work units per frame, which is what lets a phone and a PC use different values.
+- **Two smaller wins came with it.** Ordering the boundary data during extraction is a radix sort now (2.49 ms → 1.04 ms), and the patch path no longer scans its own output for degenerate triangles in release builds — the triangulation cannot produce them, and development builds keep the check as an assertion.
+
+### Dedicated server — one bad minute no longer condemns a room
+
+- **A room's straggler count is now a sliding window over the last 64 dispatched cycles, and force-close happens at 32 of them.** It used to be a lifetime total that only ever went up, so a room that hit a rough patch early carried it for the rest of its life and eventually got closed while running perfectly. Cycles a room completes on time now push the old ones out.
+- **A cycle whose own time budget collapsed is not blamed on the rooms.** When the earlier stage of a server tick overruns and leaves the rooms a couple of milliseconds, their failing to finish says nothing about them. Those cycles are excluded from the count and reported once for the whole cycle, so the log names the real cause instead of listing rooms.
+
+### Breaking changes
+
+- **`Room.StragglerCount` is read-only and now means "in the last 64 dispatched cycles", not "ever".** `MarkStraggler()` takes a flag saying whether this cycle should count toward overload, and `NoteCleanCycle()` is new. Only a host that drove those members itself is affected.
+
+### API additions
+
+- **`FPNavMeshRebakeDriver` is new** — register it as a system and it owns the install: `SetSnapshot`, `Update`, `CorrectNow`, `AdvanceSlice`, plus peer-local counters (`CacheHits` / `CacheMisses` / `SlicedFrames` / `BoundaryFinishes` / `TaskInstalls` / `RebuildInstalls` / `Corrections` / `Reseeds` / `SliceFaults`) that are the only way to see work the mesh cannot show. The two seams a game implements are **`IFPNavMeshPlacementSource`** and **`IFPNavMeshInstaller`**, over **`FPNavMeshTimedPlacement`** (a placement plus the ticks it appears and disappears on).
+- **`FPNavMeshPlacementValidator` is new** — `Survey`, `NextSequence`, `TryPreview` (a removal) and `TryPreviewWith` (a placement), for validating a command against frame state.
+- **`FPNavAgentInstaller` is new** — `Swap`, `Reseed` and `Collect`, the install-and-reseed pair as separate calls.
+- **`FPNavMeshRebaker.TryPreviewPlacements` is new** — asks whether a whole set bakes and hands back no mesh on purpose; **`TryBeginRebake` / `TryBeginRebakePlacements`** return a resumable **`FPNavMeshRebakeTask`** (`Step`, `Result`, `Install`, `Discard`), and **`context.DiscardProduced()`** forgets an output instead of installing it.
+- **`KlothoEngine.OnFrameBoundary` is new** — fires exactly once per update in every mode, for peer-local work that is paced by frames rather than ticks. It must not touch simulation state; the engine uses it for the driver.
+
+### Samples
+
+- **Brawler's building code is now a thin adapter over the engine's driver and validator**, and its command path accepts or refuses a placement through the shared verdict rather than its own copy. Its buildings carry the tick they take effect on, so a placement announced now appears on the same tick for everyone.
+- **The Godot addon and samples are redeployed** with the updated runtime.
+
+> Guides: [Runtime NavMesh Rebake §6](Docs/Navigation.Rebake.md#6-placing-from-a-command-stream) for placing from a command stream, and [SimulationConfigGuide §4.4](Docs/SimulationConfigGuide.md#44-per-device-knobs-that-are-not-in-simulationconfig) for the slice budget as a per-device value.
+
 ## [0.8.0] - 2026-08-14
 
 ### Navigation — the NavMesh changes during the match

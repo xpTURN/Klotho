@@ -163,63 +163,14 @@ namespace Brawler
             );
         }
 
-        /// <summary>
-        /// After a full state is applied (late join /
-        /// corrective reset) the restored BuildingComponents are frame state but the navmesh
-        /// is still the base — rebake once from the components so the nav fingerprint
-        /// matches the peers. No-op when the stage has no rebake snapshot or no buildings.
-        /// </summary>
-        public void OnFullStateApplied(IKlothoEngine engine, Frame frame)
-        {
-            if (RebakeContext == null || BotFSMSystem == null)
-                return;
-            // Sized from the ENGINE STORAGE bound, not the game's policy cap and not a literal:
-            // this must hold every building the frame can possibly contain, whatever policy is in
-            // force. The literal 33 that used to sit here was wrong twice over — it could not
-            // follow a raised MaxCount (so only the joining peer rebaked a subset), and its `+1`
-            // was copied from the placement path, which needs a slot for the candidate being
-            // validated. There is no candidate here.
-            //
-            // A local rather than a field, deliberately. The guide blesses a one-off allocation
-            // ("fine for a one-off") and reserves the reused-buffer rule for paths that run per
-            // placement; this one runs at join and resync. Hoisting it would cost the command
-            // path's _placeScratch its stated reason for existing — that field is there because
-            // THAT path is hot, and a copy of it here would say otherwise.
-            var buffer = new FPBuildingPlacement[PlatformerCommandSystem.BuildingSlotCapacity];
-            int count = PlatformerCommandSystem.CollectBuildings(ref frame, buffer);
-            if (count == 0)
-                return;
-
-            // The hook contract is "do not throw" (ISimulationCallbacks.OnFullStateApplied), so the
-            // rejection cases are ours to report, not the engine's to absorb. They are reachable
-            // here in a way the command path's are not: this also runs on a hash MISMATCH, i.e. on
-            // a building set nothing has vouched for. Leaving the old mesh installed is the honest
-            // outcome — the engine's nav fingerprint check is what surfaces the resulting
-            // divergence, and swapping in a half-carved mesh would be worse than not swapping.
-            FPNavMesh mesh;
-            try
-            {
-                // The buffer goes in with its live count, not trimmed to an exact-size copy —
-                // that trim is what the length-is-the-count reading used to force, and
-                // placementCount exists to remove it.
-                mesh = FPNavMeshRebaker.RebakePlacements(
-                    RebakeContext, buffer, frame.Logger, PlatformerCommandSystem.PlacementRules, count);
-            }
-            catch (System.Exception e)
-            {
-                frame.Logger?.KError(
-                    $"[BrawlerSimulationCallbacks] post-fullstate rebake rejected {count} building(s), " +
-                    $"keeping the current navmesh: {e.Message}");
-                return;
-            }
-
-            // Swap WITHOUT reseeding. Only this peer runs this hook, so a reseed here writes hashed
-            // NavAgent state on one side of a state hash that was just verified — see
-            // BotFSMSystem.SwapForRestoredState for why that is a divergence and not a repair.
-            BotFSMSystem.SwapForRestoredState(ref frame, mesh);
-            RebakeContext.CommitSwap(mesh);
-            frame.Logger?.KInformation($"[BrawlerSimulationCallbacks] post-fullstate rebake: {count} building(s)");
-        }
+        // OnFullStateApplied is deliberately NOT implemented any more. The navmesh correction it
+        // used to delegate is the ENGINE's now — it runs on the same apply, before this hook would
+        // have, and it reaches the test harnesses and every host without a game-side door.
+        //
+        // The interface still offers the hook (it has a default implementation) and a game with its
+        // own out-of-hash derivatives should still use it. This sample has none beyond the navmesh,
+        // so implementing it to delegate would only mean correcting twice — harmless to the state,
+        // but it doubles the Corrections counter that a live match is read by.
 
         public void OnInitializeWorld(IKlothoEngine engine)
         {

@@ -8,6 +8,13 @@ directions) and **circle**, approximated by a hexagon so that it can still be pa
 > **Prerequisite**: [Navigation.md](Navigation.md) covers the static NavMesh runtime — query,
 > pathfinding, agents, ORCA. This document is about changing that NavMesh mid-match.
 >
+> **Where to start**: [2. Quick start](#2-quick-start) is the whole wiring, and
+> [6. Placing from a command stream](#6-placing-from-a-command-stream) is what the placement command
+> itself has to do. Those two are enough to ship. [4. Concepts](#4-concepts) answers "what shape can
+> I place, and why was this one refused" when you get there; 7 to 9 are the determinism envelope,
+> measured costs and limits. [11](#11-doing-it-by-hand) is an appendix for tooling and non-rollback
+> games — skip it otherwise.
+>
 > **Units**: one world unit is **one metre**. Sizes on the shape API are in **snap units**, 1024 to
 > a metre — so a snap unit is just under a millimetre.
 
@@ -46,47 +53,47 @@ Two simpler-looking approaches do not work, and it is worth knowing why before y
 
 ## 2. Quick start
 
-Three steps: build a context once at load, rebake when the building set changes, swap at a tick boundary.
+**If placements come from a deterministic command stream — which in a rollback game they do — this is
+the whole of it:**
 
 ```csharp
-// 1) ONCE per match, at load time (not on the tick thread — see the performance table).
-//    The context holds the stage's immutable snapshot plus this room's work buffers.
+// 1) ONCE per match, at load. The context holds the stage's immutable snapshot plus this
+//    room's work buffers. Not on the tick thread — see the performance table.
 FPNavMeshRebakeContext rebake = FPNavMeshRebaker.CreateContext(baseNavMesh, logger);
 
-// 2) When the building set changes — from the deterministic command stream, never from input.
-//    The rebake IS the validation: no separate "can I place here?" call to keep in sync.
-var buildings = new[]
-{
-    new FPBuildingRect(FP64.FromInt(2), FP64.FromInt(3),      // min x, z
-                       FP64.FromInt(4), FP64.FromInt(5),      // max x, z
-                       FP64.Zero),                            // y
-};
+// 2) Implement two small interfaces over YOUR components: where the placement table comes
+//    from, and how a mesh gets in front of your agents. Roughly 60 lines, all of it about
+//    your own types (see 6. Placing from a command stream).
+var seam = new MyPlacementSeam(rebake);
 
-//    A refused placement is a return value — the player caused it and the player should see it.
-//    A malformed request still throws, because that one is your bug and must not reach them.
-if (!FPNavMeshRebaker.TryRebake(
-        rebake, buildings, out FPNavMesh newMesh, out FPBuildingRejectionInfo rejection, logger))
-{
-    ShowToPlayer(rejection.Reason);   // every peer reaches the same verdict
-    return;
-}
-
-// 3) Swap it in, reseed the agents, then tell the context the swap happened.
-agentSystem.SwapNavMesh(newMesh);    // rebinds the query/pathfinder/funnel it already holds
-agentSystem.ReseedAgents(ref frame, agentEntities, agentCount);
-rebake.CommitSwap(newMesh);          // recycles the retired mesh's storage
+// 3) Register the DRIVER. That is the whole wiring.
+simulation.AddSystem(seam.Driver, SystemPhase.PreUpdate);   // ahead of whatever moves agents
 ```
 
-**Always pass the full current building list, not just the new one.** The rebaker starts from the
-original stage mesh every time and carves the whole list out of it. Removing a building therefore
-means rebaking with a shorter list.
+The engine finds that driver at `Initialize` and takes over from there: it paces the sliced rebake
+on every frame, establishes the invariant at world init, and re-establishes it after a full state
+applies. **Registering it IS the opt-in** — a game that does not register one pays nothing, and there
+is no way to opt out of the pacing once it is registered.
 
-This matters because the result never depends on how you got there: a carved mesh is never carved
-again, so small errors cannot pile up over a long match.
+For the command side, a validator answers "may this placement land?" against the set that will be
+live when it does — the same derivation the driver installs from, so what you accept is what gets
+baked:
 
-Internally the rebaker reuses what the previous rebake already worked out, which makes it much
-faster. The mesh you get is identical either way, so this is not something you manage —
-[7. Performance](#7-performance) covers the one thing you can do to help it.
+```csharp
+int count = validator.Survey(ref frame, atTick: frame.Tick + BuildDelayTicks);
+if (count >= MyPolicyCap) { Reject("cap reached"); return; }
+if (!validator.TryPreviewWith(rebake, candidate, out FPBuildingRejectionInfo why))
+{
+    Reject(why.Reason);        // every peer reaches the same verdict
+    return;
+}
+frame.Add(entity, new MyBuilding { /* … */ Sequence = validator.NextSequence, … });
+```
+
+Nothing swaps here. The component IS the outcome, and the driver installs the mesh on the tick that
+component names — which is what makes a rollback across that tick reproduce the swap instead of
+needing it undone. [6. Placing from a command stream](#6-placing-from-a-command-stream) is the whole
+story, including the four traps that cost live matches to find.
 
 ---
 
@@ -221,46 +228,9 @@ var disc = new FPBuildingPlacement(smallDisc, otherX, otherZ, groundY);
 FPNavMesh mesh = FPNavMeshRebaker.RebakePlacements(rebake, new[] { placement, disc }, logger);
 ```
 
-#### Reuse the buffer — do not build an array per placement
-
-The `new[]` above is fine for a one-off. In a command handler it is not: it puts a fresh array on
-the heap on every placement, directly in front of a rebaker built to allocate nothing
-([7. Performance](#what-each-choice-costs-you)). Keep one buffer for the life of the room, sized to
-your building cap, and tell the rebaker how much of it is live:
-
-```csharp
-readonly FPBuildingPlacement[] _scratch = new FPBuildingPlacement[MaxBuildings + 1];
-
-// Your own: writes the buildings currently in frame state into the buffer, in
-// placement order, and returns how many it wrote.
-int count = CollectBuildings(ref frame, _scratch);
-_scratch[count++] = new FPBuildingPlacement(largeBox, orientation, cx, cz, groundY);
-
-FPNavMesh mesh = FPNavMeshRebaker.RebakePlacements(
-    rebake, _scratch, logger, rules, placementCount: count);
-```
-
-Three things to know about `placementCount`:
-
-- **It is how many entries are live.** Anything past it is ignored. The rebaker does not clear the
-  rest of the buffer, so leftovers from last time are simply not read.
-- **Leave it out and the array's full length is used instead.** That is the trap: a 33-slot buffer
-  holding 5 buildings would rebake all 33 slots, including 28 stale ones. Always pass the count when
-  you reuse a buffer.
-- **Size the buffer one bigger than your cap** if you append before checking it. A cap of 32 needs
-  33 slots.
-
-`-1` means "use the whole array" and is the only negative accepted; anything else is refused. That
-refusal is deliberate. A count that came out negative means your own arithmetic went wrong, and
-quietly treating it as "the whole array" would rebake the stale tail — buildings the *previous*
-rebake accepted. Every peer would do the same thing, so the match would not desync and nothing would
-ever report it. You would just have the wrong map.
-
-**Rectangles take the same argument**, under the name the parameter counts:
-
-```csharp
-FPNavMesh mesh = FPNavMeshRebaker.Rebake(rebake, _rectScratch, logger, rules, buildingCount: count);
-```
+The `new[]` is fine for a one-off. In a game you do not write this call at all — the driver bakes and
+the validator previews, both from buffers they own. If you do call it yourself, reuse one buffer and
+pass a live count: [Reuse the buffer](#reuse-the-buffer--do-not-build-an-array-per-placement).
 
 #### Put the next one flush against it
 
@@ -297,14 +267,14 @@ the pattern, use `TrySnapToLattice` ([4.3](#43-placing-shapes-flush)).
   different shape, with nothing to warn you. Write the table as plain straight-line code — never
   from a loop over a dictionary, a scanned folder, or a config file, because those can come back in
   a different order on another machine. (`catalog.Hash` is your safety net: see
-  [6. Determinism](#6-determinism).)
+  [7. Determinism](#7-determinism).)
 - **Use `AddHexagon`; do not build a hexagon yourself.** A regular hexagon has no integer form, and
   the obvious route (compute the vertices, pass them through `Snap`) loses the ability to pack —
   `Snap` is floor, which is not symmetric about the centre. It still carves perfectly, so the loss
   only shows up much later, the first time someone builds wall to wall.
 
 Raw offsets are available as `ObbOffsets` / `HexagonOffsets` if you are assembling a table without
-the builder ([9. API reference](#9-api-reference)).
+the builder ([10. API reference](#10-api-reference)).
 
 ### 4.3 Placing shapes flush
 
@@ -423,7 +393,7 @@ and mean the asset cannot be rebaked at all:
 | Refusal | Type | Meaning |
 | --- | --- | --- |
 | `base mesh is not predicate-grid snapped` | `NotSupportedException` | The asset's vertices are not on the placement grid — re-export it. |
-| `base mesh has XZ-duplicate vertices (multi-level)` | `NotSupportedException` | Stacked floors — see [Limits](#8-limits). |
+| `base mesh has XZ-duplicate vertices (multi-level)` | `NotSupportedException` | Stacked floors — see [Limits](#9-limits). |
 
 Handle these at load time, where you can still fall back to running that stage without runtime
 building at all. If one of them shows up in a command handler instead, it means you built the
@@ -468,34 +438,8 @@ Two things to get right:
 whatever the local peer currently believes. The rebake runs from the command stream, which is the
 only place every peer sees the same list — that is what makes the verdict identical everywhere.
 
-#### If you rebake without a context
-
-The stateless `Rebake(baseMesh, …)` overloads leave nothing to remember, so those callers pass the
-building list themselves:
-
-```csharp
-// Both kept, not rebuilt per frame. `_placed` is the same array you hand the rebake.
-readonly FPBuildingPreviewScratch _preview = new FPBuildingPreviewScratch();
-FPBuildingRect[] _placed; int _placedCount;
-
-bool canBuild = FPNavMeshRebaker.TryValidateOne(
-    snapshot, _placed, _placedCount, ghost, out FPBuildingRejectionInfo why,
-    _preview, rules);          // ← the SAME rules you pass to the rebake
-```
-
-Three extra things apply to this form, and they are why the context form exists:
-
-- **Pass the same `rules`.** Nothing defaults them for you here. The default forbids contact, so a
-  game that allows wall-to-wall building but omits the argument paints red over ground the player
-  could actually build on — and nothing reports that.
-- **The list must be one the rebaker already accepted.** That is what lets it check one building
-  instead of all of them, and nothing checks it — a list that was never accepted gets a confident
-  wrong answer rather than an error.
-- **Keep the array; do not build one per frame.** The engine allocates nothing here, and the list
-  costs it almost nothing — going from no buildings to 128 adds 0.003 ms, because the expensive
-  part is one walk of the base mesh's edges and that happens once whatever the list length. But
-  `ToArray()` on a query result every time the cursor moves is a few KB per frame on the
-  *caller's* side.
+There is a second form for callers that hold no context, and three rules come with it:
+[If you rebake without a context](#if-you-rebake-without-a-context).
 
 
 ---
@@ -516,10 +460,16 @@ is still holding a triangle index and corridor that point into the mesh you just
 are hashed frame state. Skipping `ReseedAgents` desyncs the peer rather than merely misplacing
 somebody.
 
+`FPNavAgentInstaller` packages that pair — `Swap` and `Reseed`, as two calls rather than one, because
+the second writes hashed state and the first does not. It also re-collects the agent set on both, which
+matters more than it looks: a cached set can be last tick's, and the reseed-only path has no swap ahead
+of it to have refreshed anything. [6. Placing from a command stream](#6-placing-from-a-command-stream)
+is about when to call them at all.
+
 **`CommitSwap` is not optional.** It is what tells the context which mesh is live, and two things
 hang off that: the *previous* mesh's arrays can be recycled, and the next rebake can reuse most of
 it instead of rebuilding. Skip it and you pay full price for both — see
-[7. Performance](#what-each-choice-costs-you).
+[8. Performance](#what-each-choice-costs-you).
 
 > Do not cache an `FPNavMesh` across a swap — read the current one from `FPNavAgentSystem.CurrentMesh`
 > (or your provider) each time. A retired mesh's storage becomes another mesh's; DEBUG builds detect
@@ -527,7 +477,183 @@ it instead of rebuilding. Skip it and you pay full price for both — see
 
 ---
 
-## 6. Determinism
+## 6. Placing from a command stream
+
+Everything above describes one rebake. This section is about the harder question a rollback game
+runs into: **when** to install the result.
+
+### Do not swap when the command arrives
+
+A placement command is handled on a tick, and in a rollback netcode that tick may only have been
+**predicted**. When the rollback comes, it rewinds the frame — and nothing rewinds the NavMesh with
+it. The mesh is now ahead of the state that describes it, and every re-executed tick runs against a
+mesh its own frame does not agree with. Both peers hold identical components, and the state hash
+covers components, so it diverges quietly.
+
+The fix is not to undo the swap. It is to stop treating the install as an event:
+
+> **The installed mesh is derived state. Re-derive it from the frame every tick.**
+>
+> `installed == Bake(snapshot, { b : b.EffectiveTick <= tick < b.RemovalEffectiveTick })`
+
+Stated as an invariant, four situations collapse into one case — moving forward, re-executing after
+a rollback, waking up on a full state, and spectating or replaying a match. A swap performed as an
+event only ever handles the first.
+
+This is why the building's **tick window has to be frame state** (see
+[7. Determinism](#7-determinism)): the invariant is only checkable if "what is in
+the mesh at tick T" is answerable from state that rolls back.
+
+### One rule that costs four matches to learn
+
+Installing the mesh and reseeding the agents look like one operation. They are not:
+
+| | Nature | May it be skipped? |
+| --- | --- | --- |
+| Install the mesh | Derived state | **Yes** — when the right mesh is already in place |
+| Reseed the agents | Writes hashed frame state | **No** — every execution of the tick must do it |
+
+Fusing them puts the reseed behind a peer-local comparison that does not roll back. A boundary tick
+re-executed after its mesh was already installed then skips the reseed entirely: the authority
+reseeded once and kept the value, the client's last pass left the agent with the triangle index it
+had from *before* the swap. That divergence took four live matches to find.
+
+The invariant to carry away: **derived state may be skipped when it is already right; frame state may
+not** — because "already right" is a question about this peer's history, and the frame does not know
+it.
+
+### `FPNavMeshRebakeDriver` does all of this
+
+Rather than reimplement it, hand the engine a placement table and let it own the invariant:
+
+```csharp
+// Your game supplies two things.
+sealed class MyPlacements : IFPNavMeshPlacementSource
+{
+    public int Capacity => MyStorageBound;      // STORAGE bound, tombstones included
+
+    public int Collect(ref Frame frame, FPNavMeshTimedPlacement[] buffer, out int eligible)
+    {
+        // Every placement the frame holds — no tick filtering. The driver needs the windows.
+        // `eligible` is how many were there, so a buffer that is too small gets reported.
+    }
+
+    public void DestroyDue(ref Frame frame, int tick)
+    {
+        // Your components, your write. Use <= tick, not == : a tombstone that slipped past one
+        // tick must still go.
+    }
+}
+
+sealed class MyInstaller : IFPNavMeshInstaller
+{
+    public void Install(ref Frame frame, FPNavMesh mesh)   // swap only, never reseed
+        => FPNavAgentInstaller.Swap(ref frame, _agents, mesh, ref _agentBuffer);
+
+    public void Reseed(ref Frame frame)                    // re-collects, always
+        => FPNavAgentInstaller.Reseed(ref frame, _agents, ref _agentBuffer);
+}
+
+// Register it ahead of whatever drives your agents, so they see the corrected mesh.
+var driver = new FPNavMeshRebakeDriver(new MyPlacements(), new MyInstaller(), rules);
+driver.SetSnapshot(context.Snapshot);
+simulation.AddSystem(driver, SystemPhase.PreUpdate);
+
+// That is the whole wiring. The engine finds the driver at Initialize and paces it.
+```
+
+**The engine owns the two moments the per-tick invariant misses.** It covers every tick that
+*executes*; two moments are outside it. At world init the initial full state's nav fingerprint is
+sampled before tick 0 runs, so a peer that has installed nothing is accused of a mismatch by a peer
+that has. And a receiving peer's fingerprint is compared **synchronously** right after the apply, so
+waiting for the next tick is too late. `KlothoEngine` calls `CorrectNow` at both, and advances slices
+on every frame, so registering the driver is all a game writes. It used to be three separate calls in
+three callbacks that did not know about each other, and a host that reached none of them looked
+perfectly healthy — which is why they are not left to the game any more.
+
+**Why the seam is a table and not a set of predicates.** The driver derives everything else from it
+— whether this tick is a boundary, which tick the next one is, the active set, a digest that detects
+change. Getting the boundary predicate wrong is a desync, and a game that implements two predicates
+has two chances to get it wrong.
+
+### Spreading the cost over frames
+
+A rebake on a large stage does not fit in one tick ([8. Performance](#8-performance)). The driver pays
+for it across the frames between a placement and its effective tick, and the engine drives that for
+you — there is nothing to switch on, and nothing to switch off:
+
+- **Frames, not ticks.** A client catching up runs many ticks in one frame; a tick-paced budget would
+  spend eleven frames' work in the single frame this exists to protect.
+- **Optional, and safe to forget.** If the slices did not get there in time, the boundary finishes the
+  remainder synchronously — the same thing every rebake did before slicing existed.
+- **The output is identical either way**, so the number of slices is peer-local and harmless. That is
+  what lets the budget be a guess rather than a negotiated constant.
+
+Underneath, `FPNavMeshRebaker.TryBeginRebake` hands back a resumable `FPNavMeshRebakeTask`; the driver
+owns it. Drive one yourself only if you are not using the driver:
+
+```csharp
+if (!FPNavMeshRebaker.TryBeginRebake(context, buildings, out var task, out var rejection))
+    return;                              // refused at Begin, before any slice
+while (!task.Step(budgetUnits)) { }       // or once per frame
+FPNavMesh mesh = task.Install();          // announces to the context; then swap and CommitSwap
+```
+
+A task holds its context's pool for as long as it lives, and the pool refuses overlapping use — so a
+synchronous rebake while one is in flight needs a **second context**. Abandon a task with
+`task.Discard()`.
+
+### Crossing a boundary more than once
+
+A predicting client does not cross a placement's effective tick once. It crosses, rolls back, and
+crosses again — and the mesh it wants each time is one of **two**. Measured on a live match, the
+install sequence was a perfect two-cycle.
+
+`slotCount` (default 2) is how many meshes the driver keeps live for that. One context can only hold
+one installed mesh — its next commit recycles the other — so the second slot exists to hold the
+partner:
+
+| Slots | Rebakes for 147 installs |
+| ---: | ---: |
+| 1 | 128 |
+| **2** | **8** |
+| 3+ | 8 |
+
+Eight is the number of distinct sets, i.e. the theoretical minimum. More than two bought nothing.
+The cost is a second work-buffer pool, which scales with the stage — about **+26.6 MB** on a
+205k-triangle stage and nothing worth measuring on a small one. Pass `slotCount: 1` to disable it.
+
+### Validating a command without installing anything
+
+Two different questions, two different calls:
+
+| You are asking | Use | Cost |
+| --- | --- | --- |
+| "Can the player put a building *here*?" — hover preview, one ghost | `TryValidateOne` ([4.6](#46-showing-the-player-before-they-click)) | No carving at all |
+| "Does this whole set bake?" — accepting a command | `FPNavMeshPlacementValidator` ([10. API reference](#validating-a-command)) | A full trial rebake, discarded |
+
+**If you registered a driver, use the validator** — it derives the set, orders it and audits it with
+the driver's own code, so what you accept is what the driver will bake. The raw call below is what it
+uses underneath, and what a host without a placement table calls directly.
+
+```csharp
+if (!FPNavMeshRebaker.TryPreviewPlacements(
+        context, placements, out FPBuildingRejectionInfo rejection, logger, rules, count))
+{
+    RejectCommand(Describe(rejection));
+    return;
+}
+// Accepted. Record the component with its tick window; the driver installs on that tick.
+```
+
+`TryPreviewPlacements` **hands back no mesh, deliberately**. A trial result must not be installed —
+the tick that accepted the command may be a prediction a rollback discards. It also discards the
+trial from the context for you: left in place, the next real rebake would diff against a mesh nobody
+installed and quietly stop patching for the rest of the match.
+
+---
+
+## 7. Determinism
 
 The geometry is exact integer arithmetic, so the mesh is bit-identical across runtimes by
 construction. Three things are yours to keep aligned:
@@ -536,7 +662,7 @@ construction. Three things are yours to keep aligned:
    building list by a stable key too; **placement order** is the one to pick. Any deterministic key
    is equally correct, but this one decides how often the rebaker can take its shortcut — 96% of
    rebakes against 18% — see
-   [7. Performance](#keep-the-building-list-in-placement-order).
+   [8. Performance](#keep-the-building-list-in-placement-order).
 2. **The placement rules value.** See [Building wall to wall](#44-building-wall-to-wall).
 3. **The shape catalog.** A placement is a *reference* into the table, so two builds that disagree
    about the table carve different meshes from identical commands. Carry `catalog.Hash` in your
@@ -548,11 +674,14 @@ peers can compare. Implement `INavFingerprintSource` and the engine compares it 
 
 **Late join and rollback.** Store the building set as frame state (ECS components), not in a
 system-local list — a joining peer restores the components and rebakes once from them. A
-system-local list cannot be reproduced without replaying the whole command history.
+system-local list cannot be reproduced without replaying the whole command history. Carry the tick
+window (`EffectiveTick` / `RemovalEffectiveTick`) on the same components: that is what makes the
+installed mesh derivable rather than something you have to sequence by hand
+([6. Placing from a command stream](#6-placing-from-a-command-stream)).
 
 ---
 
-## 7. Performance
+## 8. Performance
 
 Measured on an Apple Silicon laptop, .NET 8, Release. **Field** is a real shipped asset: 22,321
 triangles, 17,142 vertices. Every figure below comes from one fixture, so you can reproduce them:
@@ -667,7 +796,45 @@ Uncached `Rebake(baseMesh, …)`, so directly comparable to the 49.8 ms row abov
 | Stage02 | 60 | 0.07 ms |
 
 A small stage rebakes inside a tick with room to spare. A Field-sized stage does not sit comfortably
-in a 16.7 ms frame even at 4.6 ms, once the agent reseed is added — apply it at a tick boundary.
+in a 16.7 ms frame even at 4.6 ms, once the agent reseed is added.
+
+### Slicing it across frames
+
+A rebake can be advanced a budget at a time instead of run whole
+([6. Placing from a command stream](#6-placing-from-a-command-stream)). What that buys is not a lower
+total — it is a lower **worst single step**, which is what a frame actually feels:
+
+| Triangles | Whole | Sliced (worst step) |
+| ---: | ---: | ---: |
+| 12,800 | 0.65 ms | 0.30 ms |
+| 51,200 | 2.27 ms | 0.61 ms |
+| 115,200 | 5.11 ms | 1.17 ms |
+| 204,800 | 9.33 ms | **2.13 ms** |
+
+**The worst step is set by the largest unit that cannot be cut, not by the budget you pass.**
+Everything proportional to the triangle count is cut mid-pass and resumed on the next frame — the
+incremental patch included, which is the bulk of a rebake and is stepped through its own phases
+rather than run as one call.
+
+What stays whole is the **spatial-grid rebuild**, about 1.9 ms at 205k triangles. That is the floor;
+no budget goes under it, and it is the first thing to divide if a game needs lower.
+
+**Release does not scan this path for degenerate triangles**, which is worth about 2.5 ms per rebake
+at that size. It cannot need to: the triangulation the patch starts from is non-degenerate by
+construction, and the scan is a full pass over every triangle that no early exit can shorten. DEBUG
+keeps it as an assertion, so a build that breaks the guarantee says so loudly instead of carrying
+slivers into the mesh — which also means a DEBUG step is noticeably slower than the shipped one here.
+
+**Budget.** 20000 work units per frame is at or within noise of the best at every size above and does
+the fewest steps to get there; 100000 starts chaining phases back together (1.27 vs 0.61 ms at 51k)
+and 1000 spends steps for nothing. A game on a different stage size should measure its own —
+`FPNavMeshRebakerPerfTests.P0F_SliceBudgetCalibration` is the fixture.
+
+The budget is a **constructor argument and peer-local**, so a PC build and a phone may pass different
+values; the mesh is byte-identical either way. Set it per platform rather than per engine —
+[SimulationConfigGuide §4.4](SimulationConfigGuide.md#44-per-device-knobs-that-are-not-in-simulationconfig)
+has the per-device guidance, the lower bound that a too-small budget violates, and the counter that
+tells you when you have crossed it.
 
 ### One-off costs
 
@@ -704,7 +871,7 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 
 ---
 
-## 8. Limits
+## 9. Limits
 
 | Limit | Detail |
 | --- | --- |
@@ -713,11 +880,11 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | **No crossing constraints** | Two building edges may not cross transversally; overlap is rejected before it can happen. |
 | **Shape size ceiling** | Around a kilometre of extent, the miter arithmetic runs out of Int64 and refuses by name. Real footprints are a few metres. |
 | **Uniform area/cost only** | A base with non-uniform `areaMask`/`costMultiplier` loses per-triangle values on re-triangulation; the rebaked mesh keeps pipeline defaults and logs an error. |
-| **Not per-tick** | A rebake is a discrete event. Do not call it every frame. |
+| **A rebake is not per-tick** | It is a discrete event; do not call it every frame. The driver's own per-tick work is separate and cheap — one pass over your placement table plus an integer compare, and zero allocation. |
 
 ---
 
-## 9. API reference
+## 10. API reference
 
 ### Entry points
 
@@ -729,6 +896,9 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | `FPNavMeshRebaker.TryRebakePlacements(context, FPBuildingPlacement[], out mesh, out rejection, …)` | Same, from catalog placements |
 | `FPNavMeshRebaker.Rebake(context, FPBuildingRect[], logger, rules, buildingCount)` | The throwing form. `buildingCount` is how much of the array is live |
 | `FPNavMeshRebaker.RebakePlacements(context, FPBuildingPlacement[], logger, rules, placementCount)` | The throwing form, from catalog placements |
+| `FPNavMeshRebaker.TryPreviewPlacements(context, placements, out rejection, …)` | **Command validation.** Asks whether the whole set bakes and throws the answer away — no mesh comes back, and the trial is discarded from the context for you |
+| `FPNavMeshRebaker.TryBeginRebake(context, FPBuildingRect[], out task, out rejection, …)` | **Sliced rebake.** Refuses at Begin, then returns a resumable task |
+| `FPNavMeshRebaker.TryBeginRebakePlacements(context, FPBuildingPlacement[], out task, out rejection, …)` | Same, from catalog placements |
 | `FPNavMeshRebaker.TryValidateOne(context, ghost, out rejection, rules)` | **Placement preview.** Same verdict as a rebake, no carving, no building list ([4.6](#46-showing-the-player-before-they-click)) |
 | `FPNavMeshRebaker.TryValidateOnePlacement(context, ghost, out rejection, rules)` | Same, from a catalog placement |
 | `FPNavMeshRebaker.TryValidateOne(snapshot, existing, count, ghost, out rejection, scratch, rules)` | Preview without a context — you supply the accepted list |
@@ -737,6 +907,7 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | `context.Snapshot` | The stage snapshot, for the snapshot-form calls |
 | `FPNavMeshRebaker.ComputeFingerprint(mesh)` | Cross-peer check value |
 | `context.CommitSwap(mesh)` | Marks the mesh live; retires the previous one |
+| `context.DiscardProduced()` | Forget the last output instead of installing it. `TryPreviewPlacements` does this for you |
 | `context.ShapeExpansion` | The stage's expanded shape table |
 | `context.PatchOutcome` | Running tally of how often this context patched instead of rebuilt |
 
@@ -749,6 +920,128 @@ they skip the buffer reuse and, in the bare-mesh case, redo the whole setup on e
 | --- | --- |
 | `FPBuildingRejection` | Why the map refused — `BuildingsOverlap` · `TouchesWalkableBoundary` · `OutsideWalkableRegion` · `SwallowsBakedHole` · `EmptyWalkableRegion`. Values are wire-stable by convention: add at the end, never reorder |
 | `FPBuildingRejectionInfo` | `Reason` plus `IndexA` / `IndexB` (which buildings) and `Site` (which swallowed hole) |
+
+### Delayed install
+
+The layer that owns *when* a rebake is installed ([6. Placing from a command stream](#6-placing-from-a-command-stream)).
+
+| Member | Purpose |
+| --- | --- |
+| `FPNavMeshRebakeDriver(source, installer, rules, sliceBudgetUnits, slotCount)` | Register as an `ISystem` ahead of whatever drives your agents. **Registering it is the whole wiring** — see below |
+| `driver.SetSnapshot(snapshot)` | The stage it bakes against. Builds `slotCount` contexts of its own; `null` makes `Update` a no-op |
+| `driver.Update(ref frame)` | Re-derives the installed mesh, reseeds on a boundary, destroys due entries, keeps a task in flight |
+| `driver.SliceFaults` | Slices that ended in an exception. **Must be 0.** Non-zero does not break consistency — the boundary rebuilds synchronously and installs the same mesh — but it means a core defect, and the driver logs one error on the next tick |
+
+**The engine wires itself to a registered driver.** It resolves one at `Initialize` and from then on
+owns three things you used to write:
+
+| What the engine does | When |
+| --- | --- |
+| `AdvanceSlice` on every frame | `Update`, ahead of every per-mode early return — so it reaches a server-driven client too, which never runs world init |
+| `CorrectNow` to establish the invariant | right after `OnInitializeWorld`, before the static fingerprint is sampled and before the initial full state goes out |
+| `CorrectNow` to re-establish it | on every full-state apply, before your `OnFullStateApplied` hook, sharing that hook's `DerivativeRebuildFailed` outcome |
+
+**It also tells you what you have not folded.** A rebaking game changes its navmesh from a table no
+state hash covers, so two hooks decide whether a disagreement about it can ever be reported —
+`INavFingerprintSource` (the installed mesh) and `IGameFingerprintSource` (the shape catalog, the
+delay that picks a placement's tick). Both are optional, and a missing one folds 0, which is
+indistinguishable from a game that has nothing to fold. So when a driver is registered and either
+hook is absent, the engine says so once, as a warning:
+
+```text
+[KlothoEngine] a nav rebake driver is registered but no IGameFingerprintSource is — …
+```
+
+`FPNavAgentSystem` implements the nav one, so registering your agent system usually covers it. The
+game one is yours to write. If you check those inputs at load through the match config instead, the
+line is a known false positive — nothing has diverged either way; what the warning reports is the
+absence of the net that would tell you if it did.
+
+**Opt-in is the registration itself, and there is no opt-out.** A game that registers no driver pays a
+null check at each of those points; a game that registers one cannot pace slices itself. The two
+`CorrectNow` calls and the frame subscription used to be the game's, spread over three callbacks that
+did not know about each other — one host reached none of them and went a whole release without
+slicing, which is why they are the engine's now.
+
+| Member | Purpose |
+| --- | --- |
+| `driver.CorrectNow(ref frame)` | Re-derive right now. Still public: a game with its own reason to correct may call it |
+| `driver.AdvanceSlice(deltaTime)` | Advance an in-flight rebake by one frame's budget. The engine calls this; a host without the engine can call it directly |
+| `driver.TryClaimSliceHeartbeat()` | **You do not need this.** The engine claims it at `Initialize`, so a later caller is told "someone else is pacing" — which is how older hand-written wiring steps aside on its own. Pacing happens either way |
+| `IFPNavMeshPlacementSource` | **Yours.** `Capacity` · `Collect(ref frame, buffer, out eligible)` · `DestroyDue(ref frame, tick)` |
+| `IFPNavMeshInstaller` | **Yours.** `Install(ref frame, mesh)` and `Reseed(ref frame)` — two calls, never one |
+| `FPNavMeshTimedPlacement` | `Sequence` · `Placement` · `EffectiveTick` · `RemovalEffectiveTick` |
+| `driver.CacheHits` / `CacheMisses` / `SlicedFrames` / `BoundaryFinishes` / `TaskInstalls` / `RebuildInstalls` / `Corrections` / `Reseeds` / `TaskId` | Peer-local counters. Slicing and caching are invisible from the state, so these are the only way to tell a working one from one that never runs |
+
+`Sequence` must be unique among the entries of one collect, and `Capacity` must be the **storage**
+bound rather than the number of buildings you let stand — a demolished one keeps its slot until its
+removal tick. The driver reports a violation of either loudly; both are otherwise silent desyncs.
+
+### Validating a command
+
+The command half of the same table. Use this instead of deriving the active set yourself — the
+derivation, the canonical order and both audits above are shared with the driver, so what you accept
+is by construction what the driver will bake.
+
+| Member | Purpose |
+| --- | --- |
+| `FPNavMeshPlacementValidator(source, rules)` | One per command system, over the SAME `IFPNavMeshPlacementSource` the driver reads |
+| `validator.Survey(ref frame, atTick, skipSequence)` | Derives the set live at `atTick` and returns its size. `atTick` is when the command TAKES EFFECT, not now — validating against the present set lets two placements queued inside one delay window pass without seeing each other. **Returns -1** when a requested `skipSequence` is ambiguous (see below) |
+| `validator.TryPreviewWith(context, candidate, out rejection, logger)` | Does the surveyed set PLUS the candidate bake? For a placement |
+| `validator.TryPreview(context, out rejection, logger)` | Does the surveyed set bake? For a removal, where the set only shrinks |
+| `validator.NextSequence` | One past the highest `Sequence` in the WHOLE table — the number to give a new entry |
+
+**Two calls, not one**, because your policy cap belongs between them: refusing "you already have 32"
+must not pay for a trial rebake first.
+
+**The context is yours, never the driver's.** The driver holds contexts whose buffer pools an
+in-flight sliced rebake occupies across frames, and the pool refuses overlapping use — which is why
+the driver does not expose them.
+
+**A removal excludes its target by `Sequence`**, because at the moment the command is handled the
+target is still inside its own tick window and nothing else drops it. If two live entries share that
+number, `Survey` returns **-1** and you must refuse the command: with a duplicate, "the one to
+exclude" is not a well-defined entry, and removing whichever the comparison reached first deletes a
+building that is still standing while its hole stays carved in the mesh. That is stricter than
+excluding by entity identity, deliberately — identity is immune to the duplicate, so this is the one
+place sharing the derivation buys strictness rather than mere equivalence.
+
+**Not reentrant.** One command is one `Survey` followed by its preview; a nested `Survey` replaces the
+first, and previewing without one throws.
+
+### Serving several rooms from one stage
+
+A host running many simulations off one stage builds the snapshot **once** and gives each room its own
+context — the snapshot is immutable and safe to share, the context is not (it owns work buffers).
+
+```csharp
+// once per stage, at boot
+FPNavMeshRebakeSnapshot snapshot = FPNavMeshRebaker.CreateSnapshot(baseMesh, logger, prewarm: true);
+
+// once per room, when it is created
+var rebake = new FPNavMeshRebakeContext(snapshot);
+```
+
+Where this runs matters more than it looks. A snapshot costs a full base insertion, and the first
+rebake in a process additionally pays the JIT (`prewarm: true` absorbs it at boot). A dedicated server
+creates rooms on its main loop, so doing it per room puts that cost between the network poll and the
+room dispatch — every OTHER room's tick budget shrinks by exactly that much.
+
+There is no helper for the pattern, and that is deliberate: the stage keying, the missing-stage
+fallback and how many hosting modes you have are yours, and a helper shaped around one server's
+answers would be wrong for the next one.
+
+### Sliced rebake
+
+| Member | Purpose |
+| --- | --- |
+| `FPNavMeshRebakeTask.Step(units)` | Advance; `true` when finished |
+| `task.Result` | The mesh, or `null` if it was refused mid-flight |
+| `task.Install()` | Announce it to the context — only then may the next rebake patch from it |
+| `task.Discard()` | Abandon it and release the pool |
+| `FPNavAgentInstaller.Swap(ref frame, navSystem, mesh, ref agents)` | Install and re-collect. Returns the agent count; does **not** reseed |
+| `FPNavAgentInstaller.Reseed(ref frame, navSystem, ref agents)` | Re-collect and reseed |
+| `FPNavAgentInstaller.Collect(ref frame, ref agents)` | Fill the agent buffer, growing it and never truncating |
 
 ### Shapes
 
@@ -791,3 +1084,134 @@ they skip the buffer reuse and, in the bare-mesh case, redo the whole setup on e
 | `FPNavAgentSystem.LoadNavMeshObstacles()` | Re-extract ORCA obstacles (called by the swap) |
 | `FPNavAgentSystem.CurrentMesh` / `CurrentQuery` | The live instances — read these instead of caching |
 | `INavFingerprintSource` | Implement to fold the nav fingerprint into full-state exchange |
+
+---
+
+## 11. Doing it by hand
+
+Everything in this appendix is for **tooling, editors and games without rollback**. In a rollback
+game the driver ([2. Quick start](#2-quick-start)) does all of it, and doing it by hand reintroduces
+the failure it exists to remove — a swap performed where the command was handled survives a rewind.
+
+Nothing here is required reading to ship a rebaking game.
+
+### Rebaking by hand
+
+Three steps: build a context once at load, rebake when the building set changes, swap at a tick
+boundary.
+
+```csharp
+// 1) ONCE per match, at load time (not on the tick thread — see the performance table).
+//    The context holds the stage's immutable snapshot plus this room's work buffers.
+FPNavMeshRebakeContext rebake = FPNavMeshRebaker.CreateContext(baseNavMesh, logger);
+
+// 2) When the building set changes — from the deterministic command stream, never from input.
+//    The rebake IS the validation: no separate "can I place here?" call to keep in sync.
+var buildings = new[]
+{
+    new FPBuildingRect(FP64.FromInt(2), FP64.FromInt(3),      // min x, z
+                       FP64.FromInt(4), FP64.FromInt(5),      // max x, z
+                       FP64.Zero),                            // y
+};
+
+//    A refused placement is a return value — the player caused it and the player should see it.
+//    A malformed request still throws, because that one is your bug and must not reach them.
+if (!FPNavMeshRebaker.TryRebake(
+        rebake, buildings, out FPNavMesh newMesh, out FPBuildingRejectionInfo rejection, logger))
+{
+    ShowToPlayer(rejection.Reason);   // every peer reaches the same verdict
+    return;
+}
+
+// 3) Swap it in, reseed the agents, then tell the context the swap happened.
+agentSystem.SwapNavMesh(newMesh);    // rebinds the query/pathfinder/funnel it already holds
+agentSystem.ReseedAgents(ref frame, agentEntities, agentCount);
+rebake.CommitSwap(newMesh);          // recycles the retired mesh's storage
+```
+
+**Always pass the full current building list, not just the new one.** The rebaker starts from the
+original stage mesh every time and carves the whole list out of it. Removing a building therefore
+means rebaking with a shorter list.
+
+This matters because the result never depends on how you got there: a carved mesh is never carved
+again, so small errors cannot pile up over a long match.
+
+Internally the rebaker reuses what the previous rebake already worked out, which makes it much
+faster. The mesh you get is identical either way, so this is not something you manage —
+[8. Performance](#8-performance) covers the one thing you can do to help it.
+
+Step 3 is the one this API cannot make safe on its own: it installs the mesh where the command was
+handled. [6. Placing from a command stream](#6-placing-from-a-command-stream) is why that is a desync
+in a rollback game.
+
+#### Reuse the buffer — do not build an array per placement
+
+The `new[]` in step 2 is fine for a one-off. In a handler that runs per placement it is not: it puts a
+fresh array on the heap every time, directly in front of a rebaker built to allocate nothing
+([8. Performance](#what-each-choice-costs-you)). Keep one buffer for the life of the room, sized to
+your building cap, and tell the rebaker how much of it is live:
+
+```csharp
+readonly FPBuildingPlacement[] _scratch = new FPBuildingPlacement[MaxBuildings + 1];
+
+// Your own: writes the buildings currently in frame state into the buffer, in
+// placement order, and returns how many it wrote. (A rollback game does not write
+// this — FPNavMeshPlacementValidator derives it, and the driver bakes from the same
+// derivation. See "Validating a command" in the API reference.)
+int count = CollectLivePlacements(ref frame, _scratch);
+_scratch[count++] = new FPBuildingPlacement(largeBox, orientation, cx, cz, groundY);
+
+FPNavMesh mesh = FPNavMeshRebaker.RebakePlacements(
+    rebake, _scratch, logger, rules, placementCount: count);
+```
+
+Three things to know about `placementCount`:
+
+- **It is how many entries are live.** Anything past it is ignored. The rebaker does not clear the
+  rest of the buffer, so leftovers from last time are simply not read.
+- **Leave it out and the array's full length is used instead.** That is the trap: a 33-slot buffer
+  holding 5 buildings would rebake all 33 slots, including 28 stale ones. Always pass the count when
+  you reuse a buffer.
+- **Size the buffer one bigger than your cap** if you append before checking it. A cap of 32 needs
+  33 slots.
+
+`-1` means "use the whole array" and is the only negative accepted; anything else is refused. That
+refusal is deliberate. A count that came out negative means your own arithmetic went wrong, and
+quietly treating it as "the whole array" would rebake the stale tail — buildings the *previous*
+rebake accepted. Every peer would do the same thing, so the match would not desync and nothing would
+ever report it. You would just have the wrong map.
+
+**Rectangles take the same argument**, under the name the parameter counts:
+
+```csharp
+FPNavMesh mesh = FPNavMeshRebaker.Rebake(rebake, _rectScratch, logger, rules, buildingCount: count);
+```
+
+### If you rebake without a context
+
+The stateless `Rebake(baseMesh, …)` overloads leave nothing to remember, so those callers pass the
+building list themselves:
+
+```csharp
+// Both kept, not rebuilt per frame. `_placed` is the same array you hand the rebake.
+readonly FPBuildingPreviewScratch _preview = new FPBuildingPreviewScratch();
+FPBuildingRect[] _placed; int _placedCount;
+
+bool canBuild = FPNavMeshRebaker.TryValidateOne(
+    snapshot, _placed, _placedCount, ghost, out FPBuildingRejectionInfo why,
+    _preview, rules);          // ← the SAME rules you pass to the rebake
+```
+
+Three extra things apply to this form, and they are why the context form exists:
+
+- **Pass the same `rules`.** Nothing defaults them for you here. The default forbids contact, so a
+  game that allows wall-to-wall building but omits the argument paints red over ground the player
+  could actually build on — and nothing reports that.
+- **The list must be one the rebaker already accepted.** That is what lets it check one building
+  instead of all of them, and nothing checks it — a list that was never accepted gets a confident
+  wrong answer rather than an error.
+- **Keep the array; do not build one per frame.** The engine allocates nothing here, and the list
+  costs it almost nothing — going from no buildings to 128 adds 0.003 ms, because the expensive
+  part is one walk of the base mesh's edges and that happens once whatever the list length. But
+  `ToArray()` on a query result every time the cursor moves is a few KB per frame on the
+  *caller's* side.

@@ -18,6 +18,7 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
 
         private readonly List<FPStaticCollider> _staticColliders;
         private readonly FPNavMesh _navMesh;
+        private readonly FPNavMeshRebakeSnapshot _rebakeSnapshot;   // shared per stage; null → build one here
         private readonly List<IDataAsset> _dataAssets;
 
         private readonly int _maxPlayers;
@@ -28,6 +29,16 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
         private IKlothoEngine _engine;          // captured at OnInitializeWorld for the dev abort trigger
 #endif
 
+        /// <param name="rebakeSnapshot">
+        /// The stage's shared rebake snapshot, built once at boot (see
+        /// <c>BrawlerBuildingShapes.CreateSnapshot</c>). MUST be the snapshot of
+        /// <paramref name="navMesh"/> — the rebake carves from the snapshot's base while the nav
+        /// systems query <paramref name="navMesh"/>, so two different meshes would put the two out
+        /// of step with nothing to refuse it. Resolve both from the same stage key.
+        /// <para>null → this room builds its own, which costs a base insertion (and, in a cold
+        /// process, the JIT) on whatever thread constructs the room. Fine for a single-room host
+        /// or a test; not for the multi-room server, where that thread is the shared main loop.</para>
+        /// </param>
         public BrawlerServerCallbacks(IKLogger logger,
                                         List<FPStaticCollider> staticColliders,
                                         FPNavMesh navMesh,
@@ -35,11 +46,13 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
                                         int botCount,
                                         List<IDataAsset> dataAssets = null,
                                         int stageId = 0,
-                                        long devAbortAfterMs = 0)
+                                        long devAbortAfterMs = 0,
+                                        FPNavMeshRebakeSnapshot rebakeSnapshot = null)
         {
             _logger = logger;
             _staticColliders = staticColliders;
             _navMesh = navMesh;
+            _rebakeSnapshot = rebakeSnapshot;
             _dataAssets = dataAssets;
 
             _maxPlayers = maxPlayers;
@@ -80,12 +93,20 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
                 _logger?.KWarning($"[BrawlerServerCallbacks] building demo enabled: every {demoTicks} ticks (headless-only)");
             }
 
-            // Per-match rebake snapshot (JIT warming is built into CreateSnapshot;
-            // no-op under IL2CPP). Throws on unsupported bases — building placement is then
+            // Per-room rebake context. The snapshot behind it is per STAGE, not per room: when the
+            // host hands one in, this is just a work-buffer allocation. Building it here instead
+            // would cost a full base insertion (plus the JIT on the first room) on the caller's
+            // thread — which on the multi-room server is the main loop, between the poll and the
+            // room dispatch, so every room in the process waits on it.
+            //
+            // No snapshot supplied → fall back to building one, so a single-room host or a test
+            // stays a one-liner. Throws on unsupported bases — building placement is then
             // unavailable for this stage, surfaced at load time.
             try
             {
-                RebakeContext = BrawlerBuildingShapes.CreateContext(_navMesh, _logger);
+                RebakeContext = _rebakeSnapshot != null
+                    ? new FPNavMeshRebakeContext(_rebakeSnapshot)
+                    : BrawlerBuildingShapes.CreateContext(_navMesh, _logger);
             }
             catch (System.Exception e)
             {

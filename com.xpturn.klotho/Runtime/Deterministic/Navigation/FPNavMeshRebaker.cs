@@ -218,19 +218,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     }
 
     /// <summary>
-    /// Everything one room needs to rebake: the stage's immutable
-    /// <see cref="FPNavMeshRebakeSnapshot"/> plus that room's private work-buffer pool
-    /// Create one per room at match load and hold it where
-    /// the snapshot used to be held — the pool never appears in game code, and its ownership
-    /// rule ("one per room, used serially") is enforced by construction instead of by
-    /// convention.
-    ///
-    /// The two halves are deliberately not merged: a snapshot is a pure function of the base
-    /// mesh and is safe to share read-only across rooms and worker threads (the multi-room
-    /// case that is reserved for), while a pool is mutable and must never be shared. Two rooms
-    /// running the same stage therefore share one snapshot and build one context each.
-    /// </summary>
-    /// <summary>
     /// Working buffers for the placement-preview calls, owned by the game rather than by a rebake
     /// context.
     ///
@@ -337,6 +324,19 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
     }
 
+    /// <summary>
+    /// Everything one room needs to rebake: the stage's immutable
+    /// <see cref="FPNavMeshRebakeSnapshot"/> plus that room's private work-buffer pool
+    /// Create one per room at match load and hold it where
+    /// the snapshot used to be held — the pool never appears in game code, and its ownership
+    /// rule ("one per room, used serially") is enforced by construction instead of by
+    /// convention.
+    ///
+    /// The two halves are deliberately not merged: a snapshot is a pure function of the base
+    /// mesh and is safe to share read-only across rooms and worker threads (the multi-room
+    /// case that is reserved for), while a pool is mutable and must never be shared. Two rooms
+    /// running the same stage therefore share one snapshot and build one context each.
+    /// </summary>
     public sealed class FPNavMeshRebakeContext
     {
         /// <summary>
@@ -474,6 +474,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _installed = installed;
             _lastProduced = null;
         }
+
+        /// <summary>
+        /// Says the last output will never be installed, so the NEXT rebake may still patch the
+        /// mesh that is live now.
+        ///
+        /// <para>For the caller that rebakes to decide something rather than to install: a trial
+        /// rebake is how a building placement is validated, and its mesh is thrown away whatever
+        /// the answer is. Without this, that mesh stays the uninstalled <c>_lastProduced</c>, and
+        /// <see cref="PreviousForPatch"/> — which withholds the previous mesh precisely to stop an
+        /// abandoned chain from growing — turns the next real rebake into a full rebuild. Correct
+        /// output either way, at about twice the time and three orders of magnitude more garbage,
+        /// once per validated placement.</para>
+        ///
+        /// <para>Retires nothing. The discarded mesh's storage is already the pool's to hand out
+        /// again, and the live mesh is untouched — which is the whole difference from
+        /// <see cref="CommitSwap"/>: this one says "forget it", not "it is live now".</para>
+        /// </summary>
+        public void DiscardProduced() => _lastProduced = null;
     }
 
     /// <summary>
@@ -506,21 +524,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     public static class FPNavMeshRebaker
     {
         /// <summary>
-        /// Rebakes the base navmesh with the given buildings carved out as holes.
-        /// Throws <see cref="ArgumentException"/> on malformed input,
-        /// <see cref="NotSupportedException"/> on multi-level or non-grid base meshes,
-        /// <see cref="InvalidOperationException"/> on invalid placement
-        /// (touching/overlapping buildings, building touching or leaving the walkable region).
-        /// </summary>
-        /// <summary>
-        /// Builds the per-stage rebake snapshot: validates the base (grid-snapped,
-        /// single-level), extracts boundary rings, assembles base constraints and freezes the
-        /// CDT base state. Throws on unsupported bases (multi-level / off-grid) — snapshot
-        /// failure means the rebake feature itself is unavailable for this stage (surface it
-        /// at load time; contrast with the best-effort Prewarm). Call at match load or on a
-        /// worker — never on the tick thread (costs a full base insertion, ~30ms at 22k tris).
-        /// </summary>
-        /// <summary>
         /// Builds a room's rebake context in one step: snapshot (see
         /// <see cref="CreateSnapshot"/> for the cost and the throwing contract) + that room's
         /// buffer pool. This is what a game seam normally calls at match load; rooms that
@@ -534,6 +537,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             return new FPNavMeshRebakeContext(CreateSnapshot(baseMesh, logger, prewarm, shapeCatalog));
         }
 
+        /// <summary>
+        /// Builds the per-stage rebake snapshot: validates the base (grid-snapped,
+        /// single-level), extracts boundary rings, assembles base constraints and freezes the
+        /// CDT base state. Throws on unsupported bases (multi-level / off-grid) — snapshot
+        /// failure means the rebake feature itself is unavailable for this stage (surface it
+        /// at load time; contrast with the best-effort Prewarm). Call at match load or on a
+        /// worker — never on the tick thread (costs a full base insertion, ~30ms at 22k tris).
+        /// </summary>
         public static FPNavMeshRebakeSnapshot CreateSnapshot(
             FPNavMesh baseMesh, IKLogger logger = null, bool prewarm = true,
             FPBuildingShapeCatalog shapeCatalog = null)
@@ -670,6 +681,99 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // patching the previous mesh — slower and far heavier, with no visible symptom.
             context.NoteProduced(mesh);
             rejection = default;
+            return true;
+        }
+
+        /// <summary>
+        /// Begins a rebake that the caller advances itself, instead of running it to completion
+        /// here. Same acceptance semantics as <see cref="TryRebake(FPNavMeshRebakeContext, FPBuildingRect[], out FPNavMesh, out FPBuildingRejectionInfo, IKLogger, FPBuildingPlacementRules, int)"/>:
+        /// a refused placement comes back as <c>false</c> on this call, before any slice runs.
+        ///
+        /// <para>The task holds <paramref name="context"/>'s pool until it finishes or is
+        /// discarded, and the pool refuses overlapping use — so a caller that spans frames must
+        /// give the task a context of its own rather than the room's.</para>
+        ///
+        /// <para>Completion does NOT announce the mesh to the context. Call
+        /// <see cref="FPNavMeshRebakeTask.Install"/> when the mesh is actually going to be used;
+        /// a task that is abandoned must leave the patch chain untouched, which is exactly the
+        /// case where announcing early would cost the most.</para>
+        /// </summary>
+        /// <inheritdoc cref="Rebake(FPNavMeshRebakeContext, FPBuildingRect[], IKLogger, FPBuildingPlacementRules, int)" path="/param[@name='buildingCount']"/>
+        public static bool TryBeginRebake(
+            FPNavMeshRebakeContext context, FPBuildingRect[] buildings,
+            out FPNavMeshRebakeTask task, out FPBuildingRejectionInfo rejection,
+            IKLogger logger = null, FPBuildingPlacementRules rules = default, int buildingCount = -1)
+        {
+            if (context == null)
+                throw new ArgumentException("FPNavMeshRebaker: context is null");
+            context.WarnIfUncommitted(logger);
+
+            FPNavMeshRebakeSnapshot snapshot = context.Snapshot;
+            buildings = buildings ?? Array.Empty<FPBuildingRect>();
+            int liveCount = ResolveLiveCount(buildingCount, buildings.Length, "buildingCount");
+
+            var buffers = context.Pool;
+            FP64[] polyYs = buffers.PolyYs(liveCount == 0 ? 1 : liveCount);
+            BuildRectPolygons(snapshot, buildings, liveCount, buffers,
+                out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds, polyYs);
+
+            if (!TryBeginRebakeFromPolygons(
+                    snapshot, polyX, polyZ, polyStart, polyBounds, polyYs, liveCount,
+                    polyStart[liveCount], logger, buffers, rules, out rejection, out task,
+                    context.PreviousForPatch, context.PatchOutcome, context.Accepted))
+                return false;
+
+            task.BindContext(context);
+            return true;
+        }
+
+        /// <summary>
+        /// <see cref="TryBeginRebake"/> for catalog placements — the form a game with a shape
+        /// catalog uses, and the one a delayed install needs: the whole point of starting a rebake
+        /// early is that the placement set is already known, and a game that places shapes rather
+        /// than axis-aligned rects has no way to express that set as
+        /// <see cref="FPBuildingRect"/>.
+        ///
+        /// <para>Acceptance is decided here and synchronously, the same as every other entry: the
+        /// polygon build, the carve and the CDT resume all run on this call, so a refused set comes
+        /// back as <c>false</c> before any slice happens.</para>
+        ///
+        /// <para>The pool caveat from <see cref="TryBeginRebake"/> applies unchanged — the task
+        /// holds <paramref name="context"/>'s pool until it finishes or is discarded, so a caller
+        /// that spans frames needs a context of its own.</para>
+        /// </summary>
+        /// <inheritdoc cref="RebakePlacements(FPNavMeshRebakeContext, FPBuildingPlacement[], IKLogger, FPBuildingPlacementRules, int)" path="/param[@name='placementCount']"/>
+        public static bool TryBeginRebakePlacements(
+            FPNavMeshRebakeContext context, FPBuildingPlacement[] placements,
+            out FPNavMeshRebakeTask task, out FPBuildingRejectionInfo rejection,
+            IKLogger logger = null, FPBuildingPlacementRules rules = default,
+            int placementCount = -1)
+        {
+            if (context == null)
+                throw new ArgumentException("FPNavMeshRebaker: context is null");
+            context.WarnIfUncommitted(logger);
+
+            FPNavMeshRebakeSnapshot snapshot = context.Snapshot;
+            placements = placements ?? Array.Empty<FPBuildingPlacement>();
+            int liveCount = ResolveLiveCount(placementCount, placements.Length, "placementCount");
+
+            FPBuildingShapeExpansion expansion = snapshot.ShapeExpansion;
+            if (liveCount > 0 && expansion == null)
+                throw new ArgumentException(
+                    "FPNavMeshRebaker: this stage's snapshot was built without a shape catalog");
+
+            var buffers = context.Pool;
+            FP64[] polyYs = buffers.PolyYs(liveCount == 0 ? 1 : liveCount);
+            BuildPlacementPolygons(snapshot, placements, liveCount, buffers,
+                out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds, polyYs);
+
+            if (!TryBeginRebakeFromPolygons(
+                    snapshot, polyX, polyZ, polyStart, polyBounds, polyYs, liveCount,
+                    polyStart[liveCount], logger, buffers, rules, out rejection, out task,
+                    context.PreviousForPatch, context.PatchOutcome, context.Accepted))
+                return false;
+
+            task.BindContext(context);
             return true;
         }
 
@@ -847,6 +951,49 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // Success only — see TryRebake for why a rejection must not reach NoteProduced.
             context.NoteProduced(mesh);
             rejection = default;
+            return true;
+        }
+
+        /// <summary>
+        /// Asks whether a placement set WOULD bake, and throws the answer away.
+        ///
+        /// <para>For validating a command: the caller wants the accept/reject verdict and must not
+        /// install what the trial produced, because the tick that accepted the command may be a
+        /// prediction a rollback discards, and a navmesh does not roll back with the frame. The
+        /// mesh belongs to whoever installs on the effective tick, deriving it from frame state.</para>
+        ///
+        /// <para><b>Why this exists as its own name.</b> The trial has to be followed by
+        /// <see cref="FPNavMeshRebakeContext.DiscardProduced"/> — without it the context keeps the
+        /// discarded mesh as its most recent output, the next real rebake diffs against a mesh that
+        /// was never installed, and <see cref="FPNavMeshRebakeContext.CommitSwap"/> refuses the one
+        /// that IS installed. Nothing about
+        /// <see cref="TryRebakePlacements(FPNavMeshRebakeContext, FPBuildingPlacement[], out FPNavMesh, out FPBuildingRejectionInfo, IKLogger, FPBuildingPlacementRules, int)"/>
+        /// says so at the call site, so every validating caller has to remember it, and forgetting
+        /// is silent — the patch chain degrades and the meshes stay correct.</para>
+        ///
+        /// <para><b>No mesh comes back, deliberately.</b> The signature is the contract: a trial
+        /// result must not be installed. Returning it and documenting "do not use this" would leave
+        /// the mistake reachable.</para>
+        ///
+        /// <para>Refusal is a VALUE (<c>false</c> + <paramref name="rejection"/>) because a player
+        /// pointing somewhere they cannot build is the normal case. A malformed request — a shape id
+        /// this catalog does not hold, an off-grid centre — still throws, and callers should keep
+        /// catching <see cref="ArgumentException"/>: that is their bug, not the player's.</para>
+        /// </summary>
+        /// <inheritdoc cref="RebakePlacements(FPNavMeshRebakeContext, FPBuildingPlacement[], IKLogger, FPBuildingPlacementRules, int)" path="/param[@name='placementCount']"/>
+        public static bool TryPreviewPlacements(
+            FPNavMeshRebakeContext context, FPBuildingPlacement[] placements,
+            out FPBuildingRejectionInfo rejection,
+            IKLogger logger = null, FPBuildingPlacementRules rules = default,
+            int placementCount = -1)
+        {
+            if (!TryRebakePlacements(context, placements, out _, out rejection, logger, rules,
+                    placementCount))
+                return false;
+
+            // Refusal produces nothing, so this belongs on the success path only — the same
+            // asymmetry NoteProduced has, for the same reason.
+            context.DiscardProduced();
             return true;
         }
 
@@ -1508,115 +1655,127 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FPNavMesh previous = null, FPNavMeshBuildPipeline.IncrementalOutcome outcome = null,
             FPBuildingAcceptedSet accepted = null)
         {
-            if (!ValidatePolygons(snapshot, polyX, polyZ, polyStart, polyBounds,
-                    buildingCount, rules, out rejection))
+            if (!TryBeginRebakeFromPolygons(
+                    snapshot, polyX, polyZ, polyStart, polyBounds, polyYs,
+                    buildingCount, polyVertCount, logger, pool, rules, out rejection,
+                    out FPNavMeshRebakeTask task, previous, outcome, accepted))
                 return null;
 
-            FPNavMesh baseMesh = snapshot.BaseMesh;
+            while (!task.Step(int.MaxValue)) { }
+            rejection = task.Rejection;
+            return task.Result;
+        }
+
+        /// <summary>
+        /// Begins a resumable rebake. Everything that decides ACCEPTANCE runs here and
+        /// synchronously — polygon validation, the hole carve, and the CDT resume — so a refused
+        /// placement is refused on the calling tick, exactly as the one-shot path refuses it, and
+        /// no work buffer is held for a rebake that will not happen.
+        ///
+        /// <para>What is left to <see cref="FPNavMeshRebakeTask.Step"/> is the part that scales
+        /// with the mesh: extract, the vertex array, and the build. The insertion above is not
+        /// worth slicing — the base is already frozen into the snapshot, so a rebake inserts only
+        /// the hole corners.</para>
+        ///
+        /// <para>The task holds this pool until it finishes or is discarded. A caller that spans
+        /// frames must therefore give it a pool of its own — the overlap guard says so out loud.</para>
+        /// </summary>
+        internal static bool TryBeginRebakeFromPolygons(
+            FPNavMeshRebakeSnapshot snapshot,
+            long[] polyX, long[] polyZ, int[] polyStart, long[] polyBounds, FP64[] polyYs,
+            int buildingCount, int polyVertCount,
+            IKLogger logger, FPNavMeshRebakeBufferPool pool, FPBuildingPlacementRules rules,
+            out FPBuildingRejectionInfo rejection, out FPNavMeshRebakeTask task,
+            FPNavMesh previous = null, FPNavMeshBuildPipeline.IncrementalOutcome outcome = null,
+            FPBuildingAcceptedSet accepted = null)
+        {
+            task = null;
+            if (!ValidatePolygons(snapshot, polyX, polyZ, polyStart, polyBounds,
+                    buildingCount, rules, out rejection))
+                return false;
+
             long[] xs = snapshot.BaseXs;
             long[] zs = snapshot.BaseZs;
             int baseCount = xs.Length;
-            var buffers0 = pool ?? FPNavMeshRebakeBufferPool.NonPooling;
+            var buffers = pool ?? FPNavMeshRebakeBufferPool.NonPooling;
 
-            // Append building corners + hole ring constraints (combined index space: base
-            // 0..baseCount-1, new hole vertices appended after — matches the CDT resume
-            // contract). Corners coinciding with base vertices reuse the base index (dedup —
-            // the CDT-level duplicate check is the defense line behind this).
-            // Arrays + explicit counts rather than List<T>: a reused
-            // List would still allocate at the CDT boundary via ToArray(), so the count travels
-            // instead and no conversion happens. Every consumer below must use the count, never
-            // Length — these are pool buffers whose tail is the previous rebake's holes.
-            var buffers = buffers0;
-            // Sized by the actual vertex total, not buildings * 4 — a polygon carries as many
-            // vertices as it has, and a rect is just the n = 4 case.
-            int holeCapacity = polyVertCount;
-            long[] holeXs = buffers.HoleXs(holeCapacity);
-            long[] holeZs = buffers.HoleZs(holeCapacity);
-            FP64[] holeYs = buffers.HoleYs(holeCapacity);
-            int[] holeConstraints = buffers.HoleConstraints(polyVertCount * 2);
-            int holeCount = 0;
-            int holeConstraintCount = 0;
-
-            // The only hash container left in the rebake step. It is looked up and assigned but
-            // NEVER enumerated — enumeration order is what would make a reused hash container a
-            // determinism hazard, and that surface does not exist here. Adding a foreach over
-            // this map would reopen it (pinned by a test).
-            var holeMap = new Dictionary<(long, long), int>(holeCapacity);
-
-            int AddHoleVertex(long hx, long hz, FP64 y)
+            // Held from here until the task finishes or is discarded — see the guard's summary.
+            buffers.EnterUse();
+            try
             {
-                if (snapshot.CoordToIndex.TryGetValue((hx, hz), out int baseIdx))
-                    return baseIdx;
-                if (holeMap.TryGetValue((hx, hz), out int holeIdx))
-                    return holeIdx;
-                int combined = baseCount + holeCount;
-                holeMap[(hx, hz)] = combined;
-                holeXs[holeCount] = hx;
-                holeZs[holeCount] = hz;
-                holeYs[holeCount] = y;
-                holeCount++;
-                return combined;
-            }
+                // Append building corners + hole ring constraints (combined index space: base
+                // 0..baseCount-1, new hole vertices appended after — matches the CDT resume
+                // contract). Corners coinciding with base vertices reuse the base index (dedup —
+                // the CDT-level duplicate check is the defense line behind this).
+                // Arrays + explicit counts rather than List<T>: a reused
+                // List would still allocate at the CDT boundary via ToArray(), so the count travels
+                // instead and no conversion happens. Every consumer below must use the count, never
+                // Length — these are pool buffers whose tail is the previous rebake's holes.
+                // Sized by the actual vertex total, not buildings * 4 — a polygon carries as many
+                // vertices as it has, and a rect is just the n = 4 case.
+                int holeCapacity = polyVertCount;
+                long[] holeXs = buffers.HoleXs(holeCapacity);
+                long[] holeZs = buffers.HoleZs(holeCapacity);
+                FP64[] holeYs = buffers.HoleYs(holeCapacity);
+                int[] holeConstraints = buffers.HoleConstraints(polyVertCount * 2);
+                int holeCount = 0;
+                int holeConstraintCount = 0;
 
-            for (int b = 0; b < buildingCount; b++)
-            {
-                int vs = polyStart[b], ve = polyStart[b + 1];
-                FP64 y = polyYs[b];
-                int first = AddHoleVertex(polyX[vs], polyZ[vs], y);
-                int prev = first;
-                for (int v = vs + 1; v < ve; v++)
+                // The only hash container left in the rebake step. It is looked up and assigned but
+                // NEVER enumerated — enumeration order is what would make a reused hash container a
+                // determinism hazard, and that surface does not exist here. Adding a foreach over
+                // this map would reopen it (pinned by a test).
+                var holeMap = new Dictionary<(long, long), int>(holeCapacity);
+
+                int AddHoleVertex(long hx, long hz, FP64 y)
                 {
-                    int cur = AddHoleVertex(polyX[v], polyZ[v], y);
-                    holeConstraints[holeConstraintCount++] = prev;
-                    holeConstraints[holeConstraintCount++] = cur;
-                    prev = cur;
+                    if (snapshot.CoordToIndex.TryGetValue((hx, hz), out int baseIdx))
+                        return baseIdx;
+                    if (holeMap.TryGetValue((hx, hz), out int holeIdx))
+                        return holeIdx;
+                    int combined = baseCount + holeCount;
+                    holeMap[(hx, hz)] = combined;
+                    holeXs[holeCount] = hx;
+                    holeZs[holeCount] = hz;
+                    holeYs[holeCount] = y;
+                    holeCount++;
+                    return combined;
                 }
-                holeConstraints[holeConstraintCount++] = prev;
-                holeConstraints[holeConstraintCount++] = first;
-            }
 
-            // --- CDT resume (clone + ghost rebase + incremental hole insertion) + pipeline.
-            // `tris` is a pool buffer valid over [0, indexCount) and only until the next rebake.
-            int[] tris = FPConstrainedDelaunay.TriangulateFromSnapshot(
-                snapshot.Cdt, holeXs, holeZs, holeCount, holeConstraints, holeConstraintCount,
-                out int indexCount, true, logger, pool);
-            if (indexCount == 0)
+                for (int b = 0; b < buildingCount; b++)
+                {
+                    int vs = polyStart[b], ve = polyStart[b + 1];
+                    FP64 y = polyYs[b];
+                    int first = AddHoleVertex(polyX[vs], polyZ[vs], y);
+                    int prev = first;
+                    for (int v = vs + 1; v < ve; v++)
+                    {
+                        int cur = AddHoleVertex(polyX[v], polyZ[v], y);
+                        holeConstraints[holeConstraintCount++] = prev;
+                        holeConstraints[holeConstraintCount++] = cur;
+                        prev = cur;
+                    }
+                    holeConstraints[holeConstraintCount++] = prev;
+                    holeConstraints[holeConstraintCount++] = first;
+                }
+
+                // CDT resume: clone + ghost rebase + incremental hole insertion. The extract that
+                // used to follow it here is now the task's first phase.
+                FPConstrainedDelaunay.Cdt cdt = FPConstrainedDelaunay.ResumeFromSnapshot(
+                    snapshot.Cdt, holeXs, holeZs, holeCount, holeConstraints, holeConstraintCount,
+                    logger, buffers);
+
+                task = new FPNavMeshRebakeTask(
+                    snapshot, cdt, buffers, holeXs, holeYs, holeZs, holeCount, baseCount,
+                    logger, previous, outcome, accepted,
+                    polyX, polyZ, polyStart, buildingCount, polyVertCount, rules);
+                return true;
+            }
+            catch
             {
-                rejection = new FPBuildingRejectionInfo(FPBuildingRejection.EmptyWalkableRegion);
-                return null;
+                buffers.ExitUse();
+                throw;
             }
-
-            int vertexCount = baseCount + holeCount;
-            var vertices = buffers.RentOutputVertices(vertexCount);
-            for (int i = 0; i < baseCount; i++)
-                vertices[i] = new FPVector3(FPGeoPredicates.Unsnap(xs[i]), snapshot.BaseYs[i], FPGeoPredicates.Unsnap(zs[i]));
-            for (int k = 0; k < holeCount; k++)
-                vertices[baseCount + k] = new FPVector3(FPGeoPredicates.Unsnap(holeXs[k]), holeYs[k], FPGeoPredicates.Unsnap(holeZs[k]));
-
-            // Conforming fast path: the CDT output is
-            // on-grid, weld-complete, exactly non-degenerate and T-junction-free by
-            // construction — skips the pipeline's snap + T-junction scan (its only
-            // input-dependent double/epsilon arithmetic) and their allocations.
-            FPNavMesh mesh = FPNavMeshBuildPipeline.BuildFromConformingTriangulation(
-                vertices, new ReadOnlySpan<int>(tris, 0, indexCount),
-                SharedZeroAreas(indexCount / 3), baseMesh.GridCellSize, logger,
-                baseMesh.BakeAgentRadius, baseMesh.BakeMaxSlopeDeg,
-                baseMesh.BakeAgentHeight, baseMesh.BakeAgentClimb, pool, vertexCount,
-                previous, outcome);
-
-            InheritUniformAreaAttributes(baseMesh, mesh, logger);
-
-            // The one place a rebake is known to have produced a mesh, and therefore the only
-            // place the preview cache may be told what the current building set is. Deliberately
-            // NOT next to ValidatePolygons above: one rejection (EmptyWalkableRegion) is decided
-            // during the carve, so "validated" and "carved" are not the same set of placements.
-            // The carve only reads the polygons, so they are still what validation saw.
-            accepted?.Capture(polyX, polyZ, polyStart, buildingCount, polyVertCount,
-                snapshot.ShapeExpansion?.Catalog?.MaxVertexCount ?? 4, rules);
-
-            logger?.KInformation($"[FPNavMeshRebaker] rebaked: {baseMesh.Triangles.Length} → {mesh.Triangles.Length} triangles, " +
-                $"{buildingCount} building(s), fingerprint 0x{ComputeFingerprint(mesh):X16}");
-            return mesh;
         }
 
         /// <summary>
@@ -1928,7 +2087,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         private static int[] _sharedZeroAreas = Array.Empty<int>();
 
-        private static void InheritUniformAreaAttributes(FPNavMesh baseMesh, FPNavMesh mesh, IKLogger logger)
+        internal static void InheritUniformAreaAttributes(FPNavMesh baseMesh, FPNavMesh mesh, IKLogger logger)
         {
             if (baseMesh.Triangles.Length == 0)
                 return;
@@ -1955,5 +2114,266 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         #endregion
+    }
+
+    /// <summary>
+    /// A rebake in progress. <see cref="FPNavMeshRebaker.TryBeginRebakeFromPolygons"/> has already
+    /// validated the placement, carved the holes and resumed the CDT; what is left here is the
+    /// work that scales with the mesh, and the caller decides how much of it runs per call.
+    ///
+    /// <para>Phases: extract (the parity labelling and canonicalize), the vertex array, the build
+    /// (patch attempt whole, full path sliced), and the finish. A unit is the natural item of the
+    /// phase, and leftover units carry into the next one — <c>Step(int.MaxValue)</c> is the
+    /// one-shot rebake, which is exactly how <see cref="FPNavMeshRebaker.RebakeFromPolygons"/>
+    /// still runs.</para>
+    ///
+    /// <para><b>Buffers.</b> The task holds its pool from Begin until it finishes or is
+    /// discarded, and the pool's overlap guard enforces that nothing else uses it meanwhile. A
+    /// task that spans frames therefore needs a pool of its own; sharing the room's pool is only
+    /// safe when the task starts and finishes inside one call.</para>
+    ///
+    /// <para><b>Rejection.</b> One outcome is decided in here rather than at Begin: an empty
+    /// walkable region is only known after the extract. <see cref="Result"/> is then null and
+    /// <see cref="Rejection"/> carries the reason.</para>
+    /// </summary>
+    public sealed class FPNavMeshRebakeTask
+    {
+        private enum Phase { Extract, Vertices, Build, Finish, Done }
+
+        private readonly FPNavMeshRebakeSnapshot _snapshot;
+        private readonly FPConstrainedDelaunay.Cdt _cdt;
+        private readonly FPNavMeshRebakeBufferPool _buffers;
+        private readonly long[] _holeXs, _holeZs;
+        private readonly FP64[] _holeYs;
+        private readonly int _holeCount, _baseCount;
+        private readonly IKLogger _logger;
+        private readonly FPNavMesh _previous;
+        private readonly FPNavMeshBuildPipeline.IncrementalOutcome _outcome;
+        private readonly FPBuildingAcceptedSet _accepted;
+        private readonly long[] _polyX, _polyZ;
+        private readonly int[] _polyStart;
+        private readonly int _buildingCount, _polyVertCount;
+        private readonly FPBuildingPlacementRules _rules;
+
+        private Phase _phase;
+        private int[] _tris;
+        private int _indexCount;
+        private FPVector3[] _vertices;
+        private int _vertexCount;
+        private FPNavMeshBuildPipeline.BuildTask _build;
+        private FPNavMeshBuildPipeline.PatchTask _patch;
+        private bool _poolHeld = true;
+        private FPNavMeshRebakeContext _context;
+
+        /// <summary>The mesh, once <see cref="Step"/> has returned true. Null on rejection.</summary>
+        public FPNavMesh Result { get; private set; }
+
+        /// <summary>Why <see cref="Result"/> is null; meaningless while the task is running.</summary>
+        public FPBuildingRejectionInfo Rejection { get; private set; }
+
+        internal FPNavMeshRebakeTask(
+            FPNavMeshRebakeSnapshot snapshot, FPConstrainedDelaunay.Cdt cdt,
+            FPNavMeshRebakeBufferPool buffers,
+            long[] holeXs, FP64[] holeYs, long[] holeZs, int holeCount, int baseCount,
+            IKLogger logger, FPNavMesh previous,
+            FPNavMeshBuildPipeline.IncrementalOutcome outcome, FPBuildingAcceptedSet accepted,
+            long[] polyX, long[] polyZ, int[] polyStart, int buildingCount, int polyVertCount,
+            FPBuildingPlacementRules rules)
+        {
+            _snapshot = snapshot;
+            _cdt = cdt;
+            _buffers = buffers;
+            _holeXs = holeXs;
+            _holeYs = holeYs;
+            _holeZs = holeZs;
+            _holeCount = holeCount;
+            _baseCount = baseCount;
+            _logger = logger;
+            _previous = previous;
+            _outcome = outcome;
+            _accepted = accepted;
+            _polyX = polyX;
+            _polyZ = polyZ;
+            _polyStart = polyStart;
+            _buildingCount = buildingCount;
+            _polyVertCount = polyVertCount;
+            _rules = rules;
+
+            _phase = Phase.Extract;
+            _cdt.ExtractBegin(true);
+        }
+
+        /// <summary>
+        /// Runs up to <paramref name="units"/> work units. Returns true when the task has
+        /// settled — with a mesh in <see cref="Result"/> or a reason in <see cref="Rejection"/>.
+        /// Calling again after that is a no-op.
+        /// </summary>
+        public bool Step(int units)
+        {
+            while (units > 0 && _phase != Phase.Done)
+            {
+                switch (_phase)
+                {
+                    case Phase.Extract:
+                        if (!_cdt.ExtractStep(units))
+                        {
+                            units = 0;
+                            break;
+                        }
+                        units--;
+                        _tris = _cdt.ExtractResult(out _indexCount);
+                        if (_indexCount == 0)
+                        {
+                            // Decided during the carve, not at validation: "validated" and
+                            // "carved" are not the same set of placements.
+                            Rejection = new FPBuildingRejectionInfo(FPBuildingRejection.EmptyWalkableRegion);
+                            Finish(null);
+                            break;
+                        }
+                        _phase = Phase.Vertices;
+                        break;
+
+                    case Phase.Vertices:
+                    {
+                        _vertexCount = _baseCount + _holeCount;
+                        _vertices = _buffers.RentOutputVertices(_vertexCount);
+                        long[] xs = _snapshot.BaseXs;
+                        long[] zs = _snapshot.BaseZs;
+                        for (int i = 0; i < _baseCount; i++)
+                            _vertices[i] = new FPVector3(
+                                FPGeoPredicates.Unsnap(xs[i]), _snapshot.BaseYs[i], FPGeoPredicates.Unsnap(zs[i]));
+                        for (int k = 0; k < _holeCount; k++)
+                            _vertices[_baseCount + k] = new FPVector3(
+                                FPGeoPredicates.Unsnap(_holeXs[k]), _holeYs[k], FPGeoPredicates.Unsnap(_holeZs[k]));
+                        units--;
+                        _phase = Phase.Build;
+                        break;
+                    }
+
+                    case Phase.Build:
+                        if (_build == null)
+                        {
+                            // Conforming fast path: the CDT output is on-grid, weld-complete,
+                            // exactly non-degenerate and T-junction-free by construction — skips
+                            // the pipeline's snap + T-junction scan (its only input-dependent
+                            // double/epsilon arithmetic) and their allocations.
+                            _build = FPNavMeshBuildPipeline.BeginBuildFromConformingTriangulation(
+                                _vertices, _vertexCount, _tris, _indexCount,
+                                FPNavMeshRebaker.SharedZeroAreas(_indexCount / 3),
+                                _snapshot.BaseMesh.GridCellSize, _logger,
+                                _snapshot.BaseMesh.BakeAgentRadius, _snapshot.BaseMesh.BakeMaxSlopeDeg,
+                                _snapshot.BaseMesh.BakeAgentHeight, _snapshot.BaseMesh.BakeAgentClimb,
+                                _buffers, _previous, _outcome, out FPNavMesh patched, out _patch);
+                            units--;
+                            if (patched != null)
+                            {
+                                Finish(patched);
+                                break;
+                            }
+                            if (units <= 0)
+                                break;
+                        }
+                        // The patch first when there is one — it is the cheaper way to the SAME
+                        // mesh. A rejection at its last phase is not an error: the full job was
+                        // built alongside it for exactly that, and the budget already spent is
+                        // simply gone: a removed building's triangles are not replaced by anything,
+                        // so the survivor count drops rather than the added count rising.
+                        if (_patch != null)
+                        {
+                            if (!_patch.Step(units))
+                            {
+                                units = 0;
+                                break;
+                            }
+                            FPNavMesh patchedMesh = _patch.Result;
+                            _patch = null;
+                            if (patchedMesh != null)
+                            {
+                                Finish(patchedMesh);
+                                break;
+                            }
+                            units = 0;   // charge the rest of this slice to the abandoned patch
+                            break;
+                        }
+                        if (_build.Step(units))
+                        {
+                            Finish(_build.Result);
+                            break;
+                        }
+                        units = 0;
+                        break;
+
+                    case Phase.Finish:
+                    default:
+                        _phase = Phase.Done;
+                        break;
+                }
+            }
+            return _phase == Phase.Done;
+        }
+
+        internal void BindContext(FPNavMeshRebakeContext context) { _context = context; }
+
+        /// <summary>The phase a slice is about to run, for calibration. See BuildTask.PhaseName.</summary>
+        internal string PhaseName =>
+            _patch != null ? "Patch/" + _patch.PhaseName
+            : _build != null ? "Build/" + _build.PhaseName
+            : _phase.ToString();
+
+        /// <summary>
+        /// Announces the finished mesh to the context and returns it — the caller's statement that
+        /// this mesh is the one going to be used.
+        ///
+        /// <para>Not automatic on completion, and that is the point. The context's generation
+        /// guard turns "produced but not committed" into "no patching next time", so announcing a
+        /// mesh that is then thrown away (latest-wins merges do exactly that) would disable
+        /// patching through the burst where it matters most. A discarded task must leave the chain
+        /// as it found it.</para>
+        /// </summary>
+        public FPNavMesh Install()
+        {
+            if (Result != null)
+                _context?.NoteProduced(Result);
+            return Result;
+        }
+
+        /// <summary>
+        /// Abandons the task and releases its pool. The context is untouched: an output that was
+        /// never installed leaves the patch chain alone, which is why the produced mesh is only
+        /// announced at install time.
+        /// </summary>
+        public void Discard()
+        {
+            ReleasePool();
+            _phase = Phase.Done;
+        }
+
+        private void Finish(FPNavMesh mesh)
+        {
+            if (mesh != null)
+            {
+                FPNavMeshRebaker.InheritUniformAreaAttributes(_snapshot.BaseMesh, mesh, _logger);
+
+                // The one place a rebake is known to have produced a mesh, and therefore the only
+                // place the preview cache may be told what the current building set is.
+                _accepted?.Capture(_polyX, _polyZ, _polyStart, _buildingCount, _polyVertCount,
+                    _snapshot.ShapeExpansion?.Catalog?.MaxVertexCount ?? 4, _rules);
+
+                _logger?.KInformation(
+                    $"[FPNavMeshRebaker] rebaked: {_snapshot.BaseMesh.Triangles.Length} → {mesh.Triangles.Length} triangles, " +
+                    $"{_buildingCount} building(s), fingerprint 0x{FPNavMeshRebaker.ComputeFingerprint(mesh):X16}");
+            }
+            Result = mesh;
+            ReleasePool();
+            _phase = Phase.Done;
+        }
+
+        private void ReleasePool()
+        {
+            if (!_poolHeld)
+                return;
+            _poolHeld = false;
+            _buffers.ExitUse();
+        }
     }
 }

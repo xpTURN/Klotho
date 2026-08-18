@@ -110,7 +110,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             ReadOnlySpan<int> effective = indices;
             if (CountDegenerate(vertices, indices, FP64.FromDouble(DEGENERATE_AREA_EPSILON)) != 0)
             {
+#if DEBUG
                 DegenerateCompactions++;
+#endif
                 CompactDegenerate(vertices, indices, areas, DEGENERATE_AREA_EPSILON,
                     out int[] keptIndices, out int[] keptAreas);
                 effective = keptIndices;
@@ -135,6 +137,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 bakeAgentRadius, bakeMaxSlopeDeg, bakeAgentHeight, bakeAgentClimb, pool);
         }
 
+#if DEBUG
         /// <summary>
         /// How many times the conforming path has actually compacted degenerate triangles.
         ///
@@ -143,8 +146,51 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// means to cover that interaction has to know whether the compaction ever fired — with
         /// integer-ish coordinates it essentially never does, so a sweep can silently stop
         /// exercising the case it was written for.</para>
+        ///
+        /// <para>DEBUG only, like the T-junction counters below, and for the same reason: it is a
+        /// process-global with no interlock, so in a host that builds meshes on several threads
+        /// (a multi-room server rebakes on each room's worker) the value is approximate at best.
+        /// A test may read it as an absolute — which is exactly what the one reader does — and
+        /// that reading only holds while nothing else in the process is building. Keeping it out
+        /// of release builds is what makes the field's contract match its only use.</para>
         /// </summary>
         internal static int DegenerateCompactions;
+#endif
+
+        /// <summary>
+        /// Per-pass tick accumulator for the incremental patch, off unless a caller turns it on.
+        ///
+        /// <para>Exists because deciding whether to DIVIDE the patch or make it do less needs the
+        /// distribution inside it, and that is not readable from the
+        /// code (the passes are all linear; which one dominates is an empirical question about
+        /// 88-byte struct copies versus edge records). One bool test per pass, ten per rebake, so
+        /// leaving the seam in costs nothing measurable and saves the next person from
+        /// re-instrumenting a private method.</para>
+        ///
+        /// <para>Indices are <see cref="PatchPass"/>. Not thread-safe and not meant to be: it is a
+        /// measurement aid for a single-threaded harness, never read by the engine.</para>
+        /// </summary>
+        internal static bool ProfilePatchPasses;
+        internal static readonly long[] PatchPassTicks = new long[(int)PatchPass.Count];
+
+        internal enum PatchPass
+        {
+            Bounds, VertexPrefixGuard, Diff, Survivors, Added,
+            EdgeCollect, EdgeRadix, EdgePair, Grid, DuplicateScan, Count
+        }
+
+        private static long _patchPassMark;
+
+        private static void PatchPassBegin()
+        {
+            if (ProfilePatchPasses) _patchPassMark = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        private static void PatchPassEnd(PatchPass pass)
+        {
+            if (ProfilePatchPasses)
+                PatchPassTicks[(int)pass] += System.Diagnostics.Stopwatch.GetTimestamp() - _patchPassMark;
+        }
 
         /// <summary>
         /// Why a rebake did or did not take the incremental path. Exists so a test can assert
@@ -266,6 +312,373 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 vertexCount, triCount, gridTriangleCount);
         }
 
+        /// <summary>
+        /// Begins a resumable build — the same stages <see cref="BuildCore"/> runs, in the same
+        /// order, but the caller decides how many run per call.
+        ///
+        /// <para>Takes the triangulation as an ARRAY plus a count rather than a
+        /// <see cref="ReadOnlySpan{T}"/>: a span is a ref struct and cannot be a field, so a job
+        /// that outlives the call has to hold the array. Each stage re-forms the span, so the
+        /// stage code is shared with <see cref="BuildCore"/> rather than duplicated — what the two
+        /// entry points do not share is only the ORDER, ten lines of it, and
+        /// <c>FPNavMeshBuildTaskTests</c> pins that the two produce identical meshes.</para>
+        ///
+        /// <para>The buffers come from <paramref name="pool"/> and a job holds them until it
+        /// finishes, so a job that spans frames needs its OWN pool — see
+        /// <see cref="FPNavMeshRebakeBufferPool.EnterUse"/>.</para>
+        /// </summary>
+        internal static BuildTask BeginBuild(
+            FPVector3[] vertices, int vertexCount, int[] indices, int indexCount, int[] areas,
+            FP64 cellSize, IKLogger logger,
+            FP64 bakeAgentRadius, FP64 bakeMaxSlopeDeg, FP64 bakeAgentHeight, FP64 bakeAgentClimb,
+            FPNavMeshRebakeBufferPool pool)
+        {
+            return new BuildTask(
+                vertices, vertexCount, indices, indexCount, areas, cellSize, logger,
+                bakeAgentRadius, bakeMaxSlopeDeg, bakeAgentHeight, bakeAgentClimb, pool);
+        }
+
+        /// <summary>
+        /// Begins a resumable build from a conforming triangulation — the sliceable counterpart of
+        /// <see cref="BuildFromConformingTriangulation"/>.
+        ///
+        /// <para>The degenerate check and the PATCH attempt run synchronously here. The patch is
+        /// all-or-nothing: it builds everything and then validates, discarding the whole thing if
+        /// a duplicate boundary edge turns up. Slicing that would spend a budget across frames and
+        /// then throw the work away, so it is better spent whole — and when it succeeds there is
+        /// nothing left to slice. <paramref name="patched"/> then carries the mesh and the return
+        /// is null; otherwise the returned job runs the full path a slice at a time.</para>
+        /// </summary>
+        internal static BuildTask BeginBuildFromConformingTriangulation(
+            FPVector3[] vertices, int vertexCount, int[] indices, int indexCount, int[] areas,
+            FP64 cellSize, IKLogger logger,
+            FP64 bakeAgentRadius, FP64 bakeMaxSlopeDeg, FP64 bakeAgentHeight, FP64 bakeAgentClimb,
+            FPNavMeshRebakeBufferPool pool, FPNavMesh previous, IncrementalOutcome outcome,
+            out FPNavMesh patched, out PatchTask patchTask)
+        {
+            var span = new ReadOnlySpan<int>(indices, 0, indexCount);
+            VerifyConformingContract(vertices, vertexCount < 0 ? vertices.Length : vertexCount, span);
+
+            int[] effIndices = indices;
+            int effCount = indexCount;
+#if DEBUG
+            // DEBUG only — and that is a claim about the INPUT, not a relaxation.
+            //
+            // This entry point exists because the CDT's output is on-grid, weld-complete, exactly
+            // non-degenerate and T-junction-free BY CONSTRUCTION; the T-junction scan next door is
+            // already skipped for that reason. The degeneracy scan was the one that stayed, and it
+            // is a full O(triangles) area computation on every rebake — measured at 2.50 ms of a
+            // 16 ms rebake at 205k triangles, which made it the second largest
+            // indivisible unit in the whole path.
+            //
+            // Early-exiting it does not help: the count is structurally always zero here (the
+            // predicate is area < 1e-4 while vertices sit on the 1/1024 grid a whole unit apart —
+            // FPNavMeshIncrementalPatchTests.DegenerateCompactionNeverFiresHere_SoTheDiffNeverMeetsIt
+            // pins that), so a first-hit exit never fires and the loop still walks everything.
+            //
+            // So it becomes an assertion. If the construction guarantee is ever wrong, a DEBUG run
+            // says so loudly rather than silently compacting — the general Build path keeps its
+            // unconditional scan, because there the input is raw bake data and degeneracy is real.
+            if (CountDegenerate(vertices, span, FP64.FromDouble(DEGENERATE_AREA_EPSILON)) != 0)
+            {
+                DegenerateCompactions++;
+                logger?.KError(
+                    $"[FPNavMeshBuildPipeline] conforming input contains degenerate triangles, which "
+                    + $"the CDT is supposed to make impossible. The release build no longer scans for "
+                    + $"this, so it will carry them into the mesh. Do not ship until this is "
+                    + $"understood.");
+                CompactDegenerate(vertices, span, areas, DEGENERATE_AREA_EPSILON,
+                    out int[] keptIndices, out int[] keptAreas);
+                effIndices = keptIndices;
+                effCount = keptIndices.Length;
+                areas = keptAreas;
+            }
+#endif
+
+            // Same ordering rule as the one-shot path: the patch diffs against the previous
+            // mesh's POST-compaction triangle array, so this branch has to sit after the block
+            // above.
+            // The patch is HANDED BACK rather than run. It was the single largest indivisible unit
+            // in the whole rebake, so running it here would put 80% of the work into
+            // one slice no budget can reach — the caller advances it instead.
+            //
+            // The full job is constructed either way, because a patch can still be rejected at its
+            // last phase and the caller then has to build. The constructor only stores fields, so
+            // the one that goes unused costs an object.
+            patched = null;
+            patchTask = previous == null ? null : TryBeginPatch(
+                previous, vertices, vertexCount, new ReadOnlySpan<int>(effIndices, 0, effCount),
+                areas, cellSize, bakeAgentRadius, bakeMaxSlopeDeg, bakeAgentHeight,
+                bakeAgentClimb, pool, outcome, logger);
+
+            return new BuildTask(
+                vertices, vertexCount, effIndices, effCount, areas, cellSize, logger,
+                bakeAgentRadius, bakeMaxSlopeDeg, bakeAgentHeight, bakeAgentClimb, pool);
+        }
+
+        /// <summary>
+        /// Resumable <see cref="BuildCore"/>. Stage granularity for now: one
+        /// <see cref="Step"/> unit runs one stage to completion, so the longest step is the
+        /// longest stage (adjacency). Cursors INSIDE a stage are the next increment; the shape
+        /// here is what makes that a local change rather than a restructuring.
+        /// </summary>
+        internal sealed class BuildTask
+        {
+            private enum Phase { StructFill, EdgeCollect, EdgeHistogram, EdgeScatterLow, EdgeScatterHigh, EdgePair, Bounds, GridBucket, GridFlatten, Assemble, Done }
+
+            private readonly FPVector3[] _vertices;
+            private readonly int _vertexCount;
+            private readonly int[] _indices;
+            private readonly int _indexCount;
+            private readonly int[] _areas;
+            private readonly FP64 _cellSize;
+            private readonly IKLogger _logger;
+            private readonly FP64 _bakeAgentRadius, _bakeMaxSlopeDeg, _bakeAgentHeight, _bakeAgentClimb;
+            private readonly FPNavMeshRebakeBufferPool _pool;
+            private readonly int _triCount;
+
+            private Phase _phase;
+            private int _cursor;                 // position inside the current phase
+            private FPNavMeshTriangle[] _triangles;
+            private EdgeRecord[] _records;
+            private int _edgeWritten, _edgeMaxIndex;
+            private EdgeRecord[] _edgeScratch;
+            private int[] _countMax, _countMin;
+            private List<int>[] _cellLists;
+            private int _totalCells, _gridOffset;
+            private FPBounds2 _boundsXZ;
+            private int _gridWidth, _gridHeight, _gridTriangleCount;
+            private FPVector2 _gridOrigin;
+            private int[] _gridCells, _gridTriangles;
+
+            /// <summary>The mesh, once <see cref="Step"/> has returned true. Null before that.</summary>
+            internal FPNavMesh Result { get; private set; }
+
+            /// <summary>Stages still to run — the pacing input, and 0 exactly when done.</summary>
+            internal int RemainingStages => (int)Phase.Done - (int)_phase;
+
+            internal BuildTask(
+                FPVector3[] vertices, int vertexCount, int[] indices, int indexCount, int[] areas,
+                FP64 cellSize, IKLogger logger,
+                FP64 bakeAgentRadius, FP64 bakeMaxSlopeDeg, FP64 bakeAgentHeight, FP64 bakeAgentClimb,
+                FPNavMeshRebakeBufferPool pool)
+            {
+                _vertices = vertices;
+                _vertexCount = vertexCount < 0 ? vertices.Length : vertexCount;
+                _indices = indices;
+                _indexCount = indexCount < 0 ? indices.Length : indexCount;
+                _areas = areas;
+                _cellSize = cellSize;
+                _logger = logger;
+                _bakeAgentRadius = bakeAgentRadius;
+                _bakeMaxSlopeDeg = bakeMaxSlopeDeg;
+                _bakeAgentHeight = bakeAgentHeight;
+                _bakeAgentClimb = bakeAgentClimb;
+                _pool = pool ?? FPNavMeshRebakeBufferPool.NonPooling;
+                _triCount = _indexCount / 3;
+                _phase = Phase.StructFill;
+            }
+
+            private ReadOnlySpan<int> Indices => new ReadOnlySpan<int>(_indices, 0, _indexCount);
+
+            /// <summary>
+            /// Which phase the job is about to run. Diagnostics only, and specifically for the
+            /// slice-budget calibration: when one step dominates, "which one" is the difference
+            /// between a budget to tune and a phase to divide, and reading the switch is not
+            /// enough to tell — several phases can chain inside a single Step when one of them
+            /// completes without consuming a unit.
+            /// </summary>
+            internal string PhaseName => _phase.ToString();
+
+            /// <summary>
+            /// Runs up to <paramref name="units"/> work units. A unit is the natural item of the
+            /// current phase — a triangle while filling structs or collecting edges, a record
+            /// while pairing — and phases with no interior cursor cost one unit. Leftover units
+            /// carry into the next phase, so a large budget still finishes in one call.
+            /// Returns true when the mesh is ready; calling again after that is a no-op.
+            /// </summary>
+            internal bool Step(int units)
+            {
+                while (units > 0 && _phase != Phase.Done)
+                {
+                    switch (_phase)
+                    {
+                        case Phase.StructFill:
+                        {
+                            if (_cursor == 0)
+                                _triangles = _pool.RentOutputTriangles(_triCount);
+                            // Clamp by REMAINING rather than _cursor + units: a caller passing
+                            // int.MaxValue to mean "finish it" would otherwise overflow to a
+                            // negative end and the phase would stop advancing.
+                            int end = units >= _triCount - _cursor ? _triCount : _cursor + units;
+                            for (int i = _cursor; i < end; i++)
+                                _triangles[i] = MakeTriangle(_vertices, Indices, i, _areas[i]);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            if (_cursor >= _triCount)
+                            {
+                                _cursor = 0;
+                                // BuildAdjacency returns early on an empty mesh; the three edge
+                                // phases stand in for it, so they are skipped the same way.
+                                _phase = _triCount > 0 ? Phase.EdgeCollect : Phase.Bounds;
+                            }
+                            break;
+                        }
+
+                        case Phase.EdgeCollect:
+                        {
+                            if (_cursor == 0)
+                            {
+                                _records = _pool.BuildEdges(_triCount * 3);
+                                _edgeWritten = 0;
+                                _edgeMaxIndex = 0;
+                            }
+                            int end = units >= _triCount - _cursor ? _triCount : _cursor + units;
+                            for (int t = _cursor; t < end; t++)
+                                AppendEdges(_triangles, t, _records, ref _edgeWritten, ref _edgeMaxIndex);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            if (_cursor >= _triCount)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.EdgeHistogram;
+                            }
+                            break;
+                        }
+
+                        case Phase.EdgeHistogram:
+                        {
+                            int n = _triCount * 3;
+                            if (_cursor == 0)
+                                RadixBegin(_records, n, _edgeMaxIndex, _pool,
+                                    out _edgeScratch, out _countMax, out _countMin);
+                            int end = units >= n - _cursor ? n : _cursor + units;
+                            RadixHistogram(_records, _cursor, end, _countMax, _countMin);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            if (_cursor >= n)
+                            {
+                                // Both prefix sums are taken here, before either scatter: after a
+                                // prefix the count array IS the write cursor, so re-running it
+                                // between scatter chunks would move every offset.
+                                RadixPrefix(_countMax, _edgeMaxIndex + 1);
+                                RadixPrefix(_countMin, _edgeMaxIndex + 1);
+                                _cursor = 0;
+                                _phase = Phase.EdgeScatterLow;
+                            }
+                            break;
+                        }
+
+                        case Phase.EdgeScatterLow:
+                        {
+                            int n = _triCount * 3;
+                            int end = units >= n - _cursor ? n : _cursor + units;
+                            RadixScatterLow(_records, _edgeScratch, _countMax, _cursor, end);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            if (_cursor >= n)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.EdgeScatterHigh;
+                            }
+                            break;
+                        }
+
+                        case Phase.EdgeScatterHigh:
+                        {
+                            int n = _triCount * 3;
+                            int end = units >= n - _cursor ? n : _cursor + units;
+                            RadixScatterHigh(_edgeScratch, _records, _countMin, _cursor, end);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            if (_cursor >= n)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.EdgePair;
+                            }
+                            break;
+                        }
+
+                        case Phase.EdgePair:
+                        {
+                            int n = _triCount * 3;
+                            int before = _cursor;
+                            _cursor = PairSortedEdges(_triangles, _records, n, _vertices, _cursor, units);
+                            units -= _cursor - before;
+                            if (_cursor >= n)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.Bounds;
+                            }
+                            break;
+                        }
+
+                        case Phase.Bounds:
+                            _boundsXZ = ComputeBoundsXZ(_vertices, _vertexCount);
+                            units--;
+                            _phase = Phase.GridBucket;
+                            break;
+
+                        case Phase.GridBucket:
+                        {
+                            if (_cursor == 0)
+                            {
+                                GridSetup(_boundsXZ, _cellSize, out _gridWidth, out _gridHeight,
+                                    out _gridOrigin, out _totalCells);
+                                _cellLists = _pool.GridCellLists(_totalCells);
+                            }
+                            int end = units >= _triCount - _cursor ? _triCount : _cursor + units;
+                            GridBucketTriangles(_vertices, _triangles, _gridOrigin, _cellSize,
+                                _gridWidth, _gridHeight, _cellLists, _cursor, end);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            if (_cursor >= _triCount)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.GridFlatten;
+                            }
+                            break;
+                        }
+
+                        case Phase.GridFlatten:
+                        {
+                            if (_cursor == 0)
+                            {
+                                _gridCells = _pool.RentOutputGridCells(_totalCells * 2);
+                                _gridTriangleCount = GridTotalTriangles(_cellLists, _totalCells);
+                                _gridTriangles = _pool.RentOutputGridTriangles(_gridTriangleCount);
+                                _gridOffset = 0;
+                            }
+                            int end = units >= _totalCells - _cursor ? _totalCells : _cursor + units;
+                            // _gridOffset crosses cell boundaries, so it is carried, not recomputed.
+                            GridFlatten(_cellLists, _gridCells, _gridTriangles, _cursor, end, ref _gridOffset);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            if (_cursor >= _totalCells)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.Assemble;
+                            }
+                            break;
+                        }
+
+                        case Phase.Assemble:
+                            Result = new FPNavMesh(
+                                _vertices, _triangles, _boundsXZ,
+                                _gridCells, _gridTriangles,
+                                _gridWidth, _gridHeight, _cellSize, _gridOrigin,
+                                _bakeAgentRadius, _bakeMaxSlopeDeg,
+                                _bakeAgentHeight, _bakeAgentClimb,
+                                _vertexCount, _triCount, _gridTriangleCount);
+                            units--;
+                            _phase = Phase.Done;
+                            break;
+                    }
+                }
+                return _phase == Phase.Done;
+            }
+        }
+
         #region Incremental patch
 
         /// <summary>
@@ -291,6 +704,33 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FP64 bakeAgentHeight, FP64 bakeAgentClimb,
             FPNavMeshRebakeBufferPool pool, IncrementalOutcome outcome, IKLogger logger = null)
         {
+            PatchTask task = TryBeginPatch(
+                previous, vertices, vertexCount, indices, areas, cellSize, bakeAgentRadius,
+                bakeMaxSlopeDeg, bakeAgentHeight, bakeAgentClimb, pool, outcome, logger);
+            if (task == null)
+                return null;
+            while (!task.Step(int.MaxValue)) { }
+            return task.Result;
+        }
+
+        /// <summary>
+        /// Decides whether the patch applies, and if it does, returns it as a job the caller
+        /// advances (see <see cref="PatchTask"/>). Null means "cannot patch" — the caller runs the
+        /// full build, exactly as before.
+        ///
+        /// <para><b>The guards run here and synchronously</b>, the same shape the rebake uses for
+        /// acceptance: whether the patch applies is settled before any slice, so a caller never
+        /// spends a frame's budget on work it is about to throw away. They are also cheap — the
+        /// bounds pass and the vertex-prefix pass together measured 0.29 ms of a 8.3 ms patch at
+        /// 205k triangles, so slicing them would buy 3.5% and cost two more
+        /// resumable cursors.</para>
+        /// </summary>
+        private static PatchTask TryBeginPatch(
+            FPNavMesh previous, FPVector3[] vertices, int vertexCount, ReadOnlySpan<int> indices,
+            int[] areas, FP64 cellSize, FP64 bakeAgentRadius, FP64 bakeMaxSlopeDeg,
+            FP64 bakeAgentHeight, FP64 bakeAgentClimb,
+            FPNavMeshRebakeBufferPool pool, IncrementalOutcome outcome, IKLogger logger = null)
+        {
             pool = pool ?? FPNavMeshRebakeBufferPool.NonPooling;
             if (vertexCount < 0)
                 vertexCount = vertices.Length;
@@ -309,7 +749,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // bounds are the base's — but that is an argument, not an invariant. Checking is a
             // handful of comparisons; being wrong would rewrite the grid against the wrong
             // dimensions.
+            PatchPassBegin();
             FPBounds2 boundsXZ = ComputeBoundsXZ(vertices, vertexCount);
+            PatchPassEnd(PatchPass.Bounds);
             int gridWidth = FP64.Ceiling(boundsXZ.size.x / cellSize).ToInt() + 1;
             int gridHeight = FP64.Ceiling(boundsXZ.size.y / cellSize).ToInt() + 1;
             if (gridWidth != previous.GridWidth || gridHeight != previous.GridHeight
@@ -332,6 +774,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // longer one. Checking it costs one pass over the vertices and turns the diff's key
             // from "usually meaningful" into "meaningful".
             ReadOnlySpan<FPVector3> oldVerts = previous.Vertices;
+            PatchPassBegin();
             int shared = oldVerts.Length < vertexCount ? oldVerts.Length : vertexCount;
             for (int i = 0; i < shared; i++)
             {
@@ -339,181 +782,414 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     || oldVerts[i].y.RawValue != vertices[i].y.RawValue
                     || oldVerts[i].z.RawValue != vertices[i].z.RawValue)
                 {
+                    PatchPassEnd(PatchPass.VertexPrefixGuard);
                     if (outcome != null) outcome.FallbackVertexShift++;
                     return null;
                 }
             }
+            PatchPassEnd(PatchPass.VertexPrefixGuard);
 
-            ReadOnlySpan<FPNavMeshTriangle> oldTris = previous.Triangles;
-
-            // ── diff: one merge over two arrays sorted by the same key ──────────
-            int[] newIndexByOld = pool.PatchNewIndexByOld(oldTriCount);
-            int[] added = pool.PatchAdded(newTriCount);
-            int addedCount = 0;
-            {
-                int i = 0, j = 0;
-                while (i < oldTriCount && j < newTriCount)
-                {
-                    int c = CompareTriple(
-                        oldTris[i].v0, oldTris[i].v1, oldTris[i].v2,
-                        indices[j * 3], indices[j * 3 + 1], indices[j * 3 + 2]);
-                    if (c == 0) { newIndexByOld[i] = j; i++; j++; }
-                    else if (c < 0) { newIndexByOld[i] = -1; i++; }
-                    else { added[addedCount++] = j; j++; }
-                }
-                while (i < oldTriCount) newIndexByOld[i++] = -1;
-                while (j < newTriCount) added[addedCount++] = j++;
-            }
-
-            var triangles = pool.RentOutputTriangles(newTriCount);
-
-            // ── survivors: copy, then remap the only fields that hold triangle indices ──
-            // A neighbour that was deleted becomes -1 here and its edge is re-paired below.
-            for (int o = 0; o < oldTriCount; o++)
-            {
-                int n = newIndexByOld[o];
-                if (n < 0)
-                    continue;
-                FPNavMeshTriangle t = oldTris[o];
-
-                // The copy brings the GEOMETRY-derived fields — vertex ids, area, centres, Y range —
-                // which a survivor keeps by definition. It must not bring the fields the BUILD owns.
-                // Those are re-derived from `areas` exactly as the full path derives them, because
-                // `previous` is an INSTALLED mesh and carries post-build writes a from-scratch
-                // rebuild would never reproduce: FPNavMeshRebaker.InheritUniformAreaAttributes
-                // stamps areaMask/costMultiplier onto it after its own build, and isBlocked carries
-                // whatever the runtime mutated. Carrying either across made the patched mesh differ
-                // from the full build in precisely the fields nothing downstream re-derives — and
-                // for isBlocked nothing downstream normalises it either, so a patching peer and a
-                // from-scratch joiner ended up with different meshes.
-                t.areaMask = 1 << areas[n];
-                t.costMultiplier = FP64.One;
-                t.isBlocked = false;
-
-                for (int e = 0; e < 3; e++)
-                {
-                    int nb = t.GetNeighbor(e);
-                    if (nb >= 0)
-                    {
-                        int mapped = newIndexByOld[nb];
-                        if (mapped < 0)
-                        {
-                            t.SetNeighbor(e, -1);
-                            t.SetPortal(e, -1, -1);
-                        }
-                        else
-                        {
-                            t.SetNeighbor(e, mapped);
-                        }
-                    }
-                }
-                triangles[n] = t;
-            }
-
-            // ── added: built exactly as the full path builds them ───────────────
-            // Including the area index. Omitting it defaulted every added triangle to area 0 while
-            // the full path used areas[i], so on any mesh with a non-default area the two paths
-            // disagreed on the added band as well.
-            for (int a = 0; a < addedCount; a++)
-                triangles[added[a]] = MakeTriangle(vertices, indices, added[a], areas[added[a]]);
-
-            // ── re-pair only the edges whose pairing can have changed ───────────
-            // Three sources, and the third is the one that is easy to miss: a survivor's edge that
-            // was ALREADY a boundary can gain a neighbour, when a change frees up the space on the
-            // other side of it. That survivor is neither added nor a deleted triangle's neighbour,
-            // so leaving it out leaves both sides unpaired and the space stays walled off.
-            //
-            // It is tempting to drop: on integer-aligned placements it never fires, and removing it
-            // passes every fixed fixture here. It fires on placements at sub-unit offsets, which is
-            // why the randomised sweep jitters its coordinates — and when it was tried without this
-            // source, the duplicate-boundary-edge scan named the two triangles within seconds.
-            // Keeping it also costs nothing measurable: the pass below already walks every triangle
-            // to find them, and the extra records sort in the noise.
-            int recordCap = addedCount * 3 + newTriCount * 3;
-            EdgeRecord[] records = pool.PatchEdges(recordCap);
-            int n2 = 0;
-            int maxIndex = 0;
-            for (int a = 0; a < addedCount; a++)
-                AppendEdges(triangles, added[a], records, ref n2, ref maxIndex);
-            // `added` is ascending and so is t, so one cursor replaces a scan per triangle.
-            int addedCursor = 0;
-            for (int t = 0; t < newTriCount; t++)
-            {
-                if (addedCursor < addedCount && added[addedCursor] == t)
-                {
-                    addedCursor++;
-                    continue;
-                }
-                for (int e = 0; e < 3; e++)
-                {
-                    if (triangles[t].GetNeighbor(e) < 0)
-                        AppendEdge(triangles, t, e, records, ref n2, ref maxIndex);
-                }
-            }
-
-            RadixSortByKey(records, n2, maxIndex, pool);
-            PairSortedEdges(triangles, records, n2, vertices);
-
-            // ── grid CSR: remap in place, splice the added triangles in ─────────
-            PatchSpatialGrid(previous, vertices, triangles, newTriCount, newIndexByOld, oldTriCount,
-                added, addedCount, boundsXZ, cellSize, gridWidth, gridHeight, pool,
-                out int[] gridCells, out int[] gridTriangles, out int gridTriangleCount);
-
-            var patched = new FPNavMesh(
-                vertices, triangles, boundsXZ,
-                gridCells, gridTriangles,
-                gridWidth, gridHeight, cellSize, boundsXZ.min,
-                bakeAgentRadius, bakeMaxSlopeDeg,
-                bakeAgentHeight, bakeAgentClimb,
-                vertexCount, newTriCount, gridTriangleCount);
-
-            // The one correctness check on this path that runs in RELEASE too.
-            //
-            // Everything else guarding the patch is [Conditional("DEBUG")], and comparing
-            // fingerprints is not a substitute: ComputeFingerprint covers vertices, vertex indices,
-            // areaMask, costMultiplier and isBlocked, and NOT neighbours, portals or the grid — a
-            // patch that forgets to re-pair an edge hashes identical to a correct mesh. This
-            // implementation has already shipped exactly that bug once.
-            //
-            // Adjacency symmetry cannot see it either: a MISSED pairing leaves both sides at -1,
-            // and "if A says B then B says A" is satisfied by that. Two triangles that share an
-            // edge and both call it boundary is the shape that betrays it, and no correct mesh
-            // produces it. Measured on Field at 0.429 ms inside an 11.645 ms PATCH rebake — 3.7%,
-            // with zero allocation, which is what makes it affordable outside DEBUG. The
-            // alternative, rebuilding the whole mesh to compare, is not: that is the 9.5 ms full
-            // build, i.e. the check would cost more than twenty times what it does.
-            //
-            // A violation DISCARDS the patch rather than throwing. The patch is an optimisation and
-            // the full build is the reference, so the caller falling back is both correct and
-            // already the contract for every other guard in this method. Throwing would abort a
-            // placement over something the engine can simply do the slow way.
-            string duplicateEdge = DescribeDuplicateBoundaryEdge(patched, pool);
-            if (duplicateEdge != null)
-            {
-                logger?.KError($"[FPNavMeshBuildPipeline] incremental patch produced a duplicate "
-                    + $"boundary edge and was discarded — {duplicateEdge}");
-                if (outcome != null) outcome.FallbackDuplicateBoundaryEdge++;
-                return null;
-            }
-
-            if (outcome != null) outcome.Incremental++;
-            VerifyPatchMatchesFullBuild(patched, vertices, vertexCount, indices, areas, cellSize,
-                bakeAgentRadius, bakeMaxSlopeDeg, bakeAgentHeight, bakeAgentClimb);
-            return patched;
+            return new PatchTask(
+                previous, vertices, vertexCount, indices, areas, cellSize,
+                bakeAgentRadius, bakeMaxSlopeDeg, bakeAgentHeight, bakeAgentClimb,
+                pool, outcome, logger, boundsXZ, gridWidth, gridHeight, newTriCount, oldTriCount);
         }
 
         /// <summary>
-        /// DEBUG-only: builds the same mesh the long way and compares it element by element.
+        /// The incremental patch, resumable.
         ///
-        /// <para>This is not a sampled check — it runs on EVERY patched rebake, because the way
-        /// this optimisation fails is not "slower" but "a mesh that differs from what a peer who
-        /// rebuilt from scratch would get", and the first symptom of that is a desync at the next
-        /// join. Sampling would turn a deterministic failure into an intermittent one.</para>
+        /// <para><b>Why this is a job and not a method.</b> It was one indivisible call, and at the
+        /// target scale it was 9.84 ms of a ~16 ms rebake — 80% of the single step that no slice
+        /// budget could reach. Time-slicing the rebake spread Extract and nothing else until this
+        /// existed.</para>
         ///
-        /// <para>The reference build runs UNPOOLED. Both paths otherwise draw their output arrays
-        /// from the same retirement chain, which hands out one generation — they would be handed
-        /// the same arrays and the comparison would be reading what it just wrote.</para>
+        /// <para><b>What is sliced and what is not.</b> Measured shares at 204,800 triangles:
+        /// Survivors 30.8%, Grid 22.5%, EdgeCollect 17.3%, DuplicateScan 16.2%, Diff
+        /// 8.0%, everything else 5.2%. The three that are pure loops in this file — Diff,
+        /// Survivors, EdgeCollect — carry cursors. <see cref="PatchSpatialGrid"/> and
+        /// <see cref="DescribeDuplicateBoundaryEdge"/> stay whole, at 1.86 ms and 1.35 ms, because
+        /// slicing them means splitting two more methods and the largest of them already sits
+        /// under the 5 ms target this was written to reach. They are the floor now; anyone who
+        /// needs lower starts with Grid.</para>
+        ///
+        /// <para><b>Failure is still a value.</b> The duplicate-boundary-edge scan can reject the
+        /// patch after every phase has run. <see cref="Result"/> is then null and the caller builds
+        /// the full mesh — the same contract the synchronous version had, except the budget spent
+        /// getting here is gone. A caller measuring how often the boundary had to finish the job
+        /// synchronously will see those rejections in that number, not in a separate one.</para>
         /// </summary>
+        internal sealed class PatchTask
+        {
+            private enum Phase
+            {
+                Diff, Survivors, Added, EdgeAdded, EdgeBoundary, EdgeSort,
+                Grid, Assemble, DuplicateScan, Done
+            }
+
+            private readonly FPNavMesh _previous;
+            private readonly FPVector3[] _vertices;
+            private readonly int _vertexCount;
+            private readonly int[] _indices;      // span cannot be a field; rebuilt per use
+            private readonly int _indexCount;
+            private readonly int[] _areas;
+            private readonly FP64 _cellSize, _bakeAgentRadius, _bakeMaxSlopeDeg;
+            private readonly FP64 _bakeAgentHeight, _bakeAgentClimb;
+            private readonly FPNavMeshRebakeBufferPool _pool;
+            private readonly IncrementalOutcome _outcome;
+            private readonly IKLogger _logger;
+            private readonly FPBounds2 _boundsXZ;
+            private readonly int _gridWidth, _gridHeight, _newTriCount, _oldTriCount;
+
+            private readonly int[] _newIndexByOld;
+            private readonly int[] _added;
+            private int _addedCount;
+            private FPNavMeshTriangle[] _triangles;
+            private EdgeRecord[] _records;
+            private int _n2, _maxIndex;
+
+            private Phase _phase = Phase.Diff;
+            private int _cursor;          // per-phase, reset on transition
+            private int _cursorB;         // the diff's second cursor / EdgeBoundary's added cursor
+            private FPNavMesh _assembled;
+
+            /// <summary>The patched mesh, or null when a guard rejected it and the caller must build.</summary>
+            internal FPNavMesh Result { get; private set; }
+
+            internal string PhaseName => _phase.ToString();
+
+            internal PatchTask(
+                FPNavMesh previous, FPVector3[] vertices, int vertexCount, ReadOnlySpan<int> indices,
+                int[] areas, FP64 cellSize, FP64 bakeAgentRadius, FP64 bakeMaxSlopeDeg,
+                FP64 bakeAgentHeight, FP64 bakeAgentClimb, FPNavMeshRebakeBufferPool pool,
+                IncrementalOutcome outcome, IKLogger logger, FPBounds2 boundsXZ,
+                int gridWidth, int gridHeight, int newTriCount, int oldTriCount)
+            {
+                _previous = previous;
+                _vertices = vertices;
+                _vertexCount = vertexCount;
+                // A span cannot be a field, and the patch now spans frames. Copied into POOLED
+                // storage rather than ToArray()d: the first version allocated here and the
+                // steady-state allocation gate went from 2,280 B to 270,696 B per rebake — caught
+                // by FPNavMeshRebakeAllocGateTests, which is exactly what it is for.
+                _indexCount = indices.Length;
+                _indices = pool.PatchIndices(_indexCount);
+                indices.CopyTo(new Span<int>(_indices, 0, _indexCount));
+                _areas = areas;
+                _cellSize = cellSize;
+                _bakeAgentRadius = bakeAgentRadius;
+                _bakeMaxSlopeDeg = bakeMaxSlopeDeg;
+                _bakeAgentHeight = bakeAgentHeight;
+                _bakeAgentClimb = bakeAgentClimb;
+                _pool = pool;
+                _outcome = outcome;
+                _logger = logger;
+                _boundsXZ = boundsXZ;
+                _gridWidth = gridWidth;
+                _gridHeight = gridHeight;
+                _newTriCount = newTriCount;
+                _oldTriCount = oldTriCount;
+
+                _newIndexByOld = pool.PatchNewIndexByOld(oldTriCount);
+                _added = pool.PatchAdded(newTriCount);
+            }
+
+            /// <summary>Advances by at most <paramref name="units"/> work units. True when done.</summary>
+            internal bool Step(int units)
+            {
+                ReadOnlySpan<int> indices = new ReadOnlySpan<int>(_indices, 0, _indexCount);
+
+                while (units > 0 && _phase != Phase.Done)
+                {
+                    switch (_phase)
+                    {
+                        case Phase.Diff:
+                        {
+                            // One merge over two arrays sorted by the same key. Both cursors are
+                            // state: a slice can stop anywhere in the interleave.
+                            PatchPassBegin();
+                            ReadOnlySpan<FPNavMeshTriangle> oldTris = _previous.Triangles;
+                            while (units > 0 && _cursor < _oldTriCount && _cursorB < _newTriCount)
+                            {
+                                int c = CompareTriple(
+                                    oldTris[_cursor].v0, oldTris[_cursor].v1, oldTris[_cursor].v2,
+                                    indices[_cursorB * 3], indices[_cursorB * 3 + 1], indices[_cursorB * 3 + 2]);
+                                if (c == 0) { _newIndexByOld[_cursor] = _cursorB; _cursor++; _cursorB++; }
+                                else if (c < 0) { _newIndexByOld[_cursor] = -1; _cursor++; }
+                                else { _added[_addedCount++] = _cursorB; _cursorB++; }
+                                units--;
+                            }
+                            while (units > 0 && _cursor < _oldTriCount)
+                            {
+                                _newIndexByOld[_cursor++] = -1;
+                                units--;
+                            }
+                            while (units > 0 && _cursorB < _newTriCount)
+                            {
+                                _added[_addedCount++] = _cursorB++;
+                                units--;
+                            }
+                            PatchPassEnd(PatchPass.Diff);
+                            if (_cursor >= _oldTriCount && _cursorB >= _newTriCount)
+                            {
+                                _triangles = _pool.RentOutputTriangles(_newTriCount);
+                                _cursor = 0;
+                                _phase = Phase.Survivors;
+                            }
+                            break;
+                        }
+
+                        case Phase.Survivors:
+                        {
+                            // Copy, then remap the only fields that hold triangle indices. A
+                            // neighbour that was deleted becomes -1 here and its edge is re-paired
+                            // later.
+                            //
+                            // Reads oldTris, writes _triangles — two different arrays, which is
+                            // what makes the cursor safe. If they were ever the same, a slice
+                            // boundary would let a later triangle read an index that has already
+                            // been rewritten.
+                            PatchPassBegin();
+                            ReadOnlySpan<FPNavMeshTriangle> oldTris = _previous.Triangles;
+                            int end = units >= _oldTriCount - _cursor ? _oldTriCount : _cursor + units;
+                            for (int o = _cursor; o < end; o++)
+                            {
+                                int n = _newIndexByOld[o];
+                                if (n < 0)
+                                    continue;
+                                FPNavMeshTriangle t = oldTris[o];
+
+                                // The copy brings the GEOMETRY-derived fields — vertex ids, area,
+                                // centres, Y range — which a survivor keeps by definition. It must
+                                // not bring the fields the BUILD owns. Those are re-derived from
+                                // `areas` exactly as the full path derives them, because `previous`
+                                // is an INSTALLED mesh and carries post-build writes a from-scratch
+                                // rebuild would never reproduce: InheritUniformAreaAttributes stamps
+                                // areaMask/costMultiplier onto it after its own build, and isBlocked
+                                // carries whatever the runtime mutated. Carrying either across made
+                                // the patched mesh differ from the full build in precisely the
+                                // fields nothing downstream re-derives — and for isBlocked nothing
+                                // normalises it either, so a patching peer and a from-scratch
+                                // joiner ended up with different meshes.
+                                t.areaMask = 1 << _areas[n];
+                                t.costMultiplier = FP64.One;
+                                t.isBlocked = false;
+
+                                for (int e = 0; e < 3; e++)
+                                {
+                                    int nb = t.GetNeighbor(e);
+                                    if (nb >= 0)
+                                    {
+                                        int mapped = _newIndexByOld[nb];
+                                        if (mapped < 0)
+                                        {
+                                            t.SetNeighbor(e, -1);
+                                            t.SetPortal(e, -1, -1);
+                                        }
+                                        else
+                                        {
+                                            t.SetNeighbor(e, mapped);
+                                        }
+                                    }
+                                }
+                                _triangles[n] = t;
+                            }
+                            units -= end - _cursor;
+                            _cursor = end;
+                            PatchPassEnd(PatchPass.Survivors);
+                            if (_cursor >= _oldTriCount)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.Added;
+                            }
+                            break;
+                        }
+
+                        case Phase.Added:
+                        {
+                            // Built exactly as the full path builds them, area index included:
+                            // omitting it defaulted every added triangle to area 0 while the full
+                            // path used areas[i], so on any mesh with a non-default area the two
+                            // paths disagreed on the added band as well.
+                            //
+                            // Not sliced. A placement adds tens of triangles, and it measured 0.000
+                            // ms at 205k — a cursor here would be pure ceremony.
+                            PatchPassBegin();
+                            for (int a = 0; a < _addedCount; a++)
+                                _triangles[_added[a]] =
+                                    MakeTriangle(_vertices, indices, _added[a], _areas[_added[a]]);
+                            units--;
+                            PatchPassEnd(PatchPass.Added);
+                            _records = _pool.PatchEdges(_addedCount * 3 + _newTriCount * 3);
+                            _n2 = 0;
+                            _maxIndex = 0;
+                            _cursor = 0;
+                            _phase = Phase.EdgeAdded;
+                            break;
+                        }
+
+                        case Phase.EdgeAdded:
+                        {
+                            PatchPassBegin();
+                            int end = units >= _addedCount - _cursor ? _addedCount : _cursor + units;
+                            for (int a = _cursor; a < end; a++)
+                                AppendEdges(_triangles, _added[a], _records, ref _n2, ref _maxIndex);
+                            units -= end - _cursor;
+                            _cursor = end;
+                            PatchPassEnd(PatchPass.EdgeCollect);
+                            if (_cursor >= _addedCount)
+                            {
+                                _cursor = 0;
+                                _cursorB = 0;
+                                _phase = Phase.EdgeBoundary;
+                            }
+                            break;
+                        }
+
+                        case Phase.EdgeBoundary:
+                        {
+                            // Re-pair only the edges whose pairing can have changed. Three sources,
+                            // and the third is the one that is easy to miss: a survivor's edge that
+                            // was ALREADY a boundary can gain a neighbour when a change frees up
+                            // the space on the other side of it. That survivor is neither added nor
+                            // a deleted triangle's neighbour, so leaving it out leaves both sides
+                            // unpaired and the space stays walled off.
+                            //
+                            // Tempting to drop: on integer-aligned placements it never fires, and
+                            // removing it passes every fixed fixture. It fires at sub-unit offsets,
+                            // which is why the randomised sweep jitters its coordinates — and when
+                            // it was tried without this source, the duplicate-boundary-edge scan
+                            // named the two triangles within seconds.
+                            //
+                            // `_added` is ascending and so is t, so one cursor replaces a scan per
+                            // triangle — and that cursor is job state, not a local, because a slice
+                            // can land in the middle of the walk.
+                            PatchPassBegin();
+                            int end = units >= _newTriCount - _cursor ? _newTriCount : _cursor + units;
+                            for (int t = _cursor; t < end; t++)
+                            {
+                                if (_cursorB < _addedCount && _added[_cursorB] == t)
+                                {
+                                    _cursorB++;
+                                    continue;
+                                }
+                                for (int e = 0; e < 3; e++)
+                                {
+                                    if (_triangles[t].GetNeighbor(e) < 0)
+                                        AppendEdge(_triangles, t, e, _records, ref _n2, ref _maxIndex);
+                                }
+                            }
+                            units -= end - _cursor;
+                            _cursor = end;
+                            PatchPassEnd(PatchPass.EdgeCollect);
+                            if (_cursor >= _newTriCount)
+                            {
+                                _cursor = 0;
+                                _phase = Phase.EdgeSort;
+                            }
+                            break;
+                        }
+
+                        case Phase.EdgeSort:
+                            // 1.6% and 0.1% measured. Split variants exist (RadixBegin/... and the
+                            // PairSortedEdges range overload) and can be dropped in if the floor
+                            // ever needs to go below these; today they would add two resumable
+                            // cursors to save 0.14 ms.
+                            PatchPassBegin();
+                            RadixSortByKey(_records, _n2, _maxIndex, _pool);
+                            PatchPassEnd(PatchPass.EdgeRadix);
+                            PatchPassBegin();
+                            PairSortedEdges(_triangles, _records, _n2, _vertices);
+                            PatchPassEnd(PatchPass.EdgePair);
+                            units--;
+                            _phase = Phase.Grid;
+                            break;
+
+                        case Phase.Grid:
+                        {
+                            // Whole, at 1.86 ms — the largest indivisible unit left, and the first
+                            // thing to divide if the floor has to come down further.
+                            PatchPassBegin();
+                            PatchSpatialGrid(
+                                _previous, _vertices, _triangles, _newTriCount, _newIndexByOld,
+                                _oldTriCount, _added, _addedCount, _boundsXZ, _cellSize,
+                                _gridWidth, _gridHeight, _pool,
+                                out int[] gridCells, out int[] gridTriangles, out int gridTriangleCount);
+                            PatchPassEnd(PatchPass.Grid);
+                            units--;
+                            _assembled = new FPNavMesh(
+                                _vertices, _triangles, _boundsXZ,
+                                gridCells, gridTriangles,
+                                _gridWidth, _gridHeight, _cellSize, _boundsXZ.min,
+                                _bakeAgentRadius, _bakeMaxSlopeDeg,
+                                _bakeAgentHeight, _bakeAgentClimb,
+                                _vertexCount, _newTriCount, gridTriangleCount);
+                            _phase = Phase.Assemble;
+                            // An explicit slice boundary. Grid and DuplicateScan are the two units
+                            // that are still whole (1.86 ms and 1.35 ms at 205k), and with a budget
+                            // large enough to reach both they ran back to back — 4.0 ms in one step
+                            // instead of two steps of about half that, for no reason other than
+                            // that the loop had budget left. Ending the slice here costs a step and
+                            // halves the worst frame.
+                            units = 0;
+                            break;
+                        }
+
+                        case Phase.Assemble:
+                            _phase = Phase.DuplicateScan;
+                            break;
+
+                        case Phase.DuplicateScan:
+                        {
+                            // The one correctness check on this path that runs in RELEASE too.
+                            //
+                            // Everything else guarding the patch is [Conditional("DEBUG")], and
+                            // comparing fingerprints is not a substitute: ComputeFingerprint covers
+                            // vertices, vertex indices, areaMask, costMultiplier and isBlocked, and
+                            // NOT neighbours, portals or the grid — a patch that forgets to re-pair
+                            // an edge hashes identical to a correct mesh. This implementation has
+                            // already shipped exactly that bug once.
+                            //
+                            // Adjacency symmetry cannot see it either: a MISSED pairing leaves both
+                            // sides at -1, and "if A says B then B says A" is satisfied by that.
+                            // Two triangles that share an edge and both call it boundary is the
+                            // shape that betrays it, and no correct mesh produces it.
+                            //
+                            // A violation DISCARDS the patch rather than throwing. The patch is an
+                            // optimisation and the full build is the reference, so the caller
+                            // falling back is both correct and already the contract for every other
+                            // guard here. Throwing would abort a placement over something the
+                            // engine can simply do the slow way.
+                            //
+                            // Whole, at 16.2% measured on a 205k stage — four times the 3.7% this
+                            // check was originally costed at on Field, which is why it is named in
+                            // the slicing plan instead of dismissed.
+                            PatchPassBegin();
+                            string duplicateEdge = DescribeDuplicateBoundaryEdge(_assembled, _pool);
+                            PatchPassEnd(PatchPass.DuplicateScan);
+                            units--;
+                            if (duplicateEdge != null)
+                            {
+                                _logger?.KError($"[FPNavMeshBuildPipeline] incremental patch produced a "
+                                    + $"duplicate boundary edge and was discarded — {duplicateEdge}");
+                                if (_outcome != null) _outcome.FallbackDuplicateBoundaryEdge++;
+                                Result = null;
+                                _phase = Phase.Done;
+                                break;
+                            }
+                            if (_outcome != null) _outcome.Incremental++;
+                            VerifyPatchMatchesFullBuild(
+                                _assembled, _vertices, _vertexCount, indices, _areas, _cellSize,
+                                _bakeAgentRadius, _bakeMaxSlopeDeg, _bakeAgentHeight, _bakeAgentClimb);
+                            Result = _assembled;
+                            _phase = Phase.Done;
+                            break;
+                        }
+                    }
+                }
+                return _phase == Phase.Done;
+            }
+        }
+
         [System.Diagnostics.Conditional("DEBUG")]
         private static void VerifyPatchMatchesFullBuild(
             FPNavMesh patched, FPVector3[] vertices, int vertexCount, ReadOnlySpan<int> indices,
@@ -972,11 +1648,18 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// When a vertex of one triangle lies on the edge of another,
         /// splits that triangle to restore 1-to-1 edge adjacency.
         /// </summary>
+#if DEBUG
         // Test-only knob: 0 = auto (index when
         // vertex count warrants it), 1 = force index, 2 = force linear scan. The composite
         // (tParam, vertIdx) sort makes both modes output-identical.
+        //
+        // DEBUG only, and this one for a stronger reason than the counters below it: it is the
+        // only static here that is READ rather than merely written, and what it selects is the
+        // build path. Left in release it would be a process-global behaviour switch inside a
+        // multi-room server — and if the two modes ever stopped agreeing, the navmesh sits
+        // outside the state hash, so nothing would notice until a FullState resync compared
+        // fingerprints. Release folds the knob away in VertexGridIndex.TryBuild.
         internal static int TJunctionIndexModeForTests = 0;
-#if DEBUG
         // Query counter: per-vertex predicate tests during T-junction detection.
         internal static long TJunctionCandidateChecks;
         internal static bool LastTJunctionUsedIndex;
@@ -1232,11 +1915,18 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             /// </param>
             public static VertexGridIndex TryBuild(FPVector3[] vertices, int vertexCount)
             {
+#if DEBUG
+                // The forced modes exist so a test can assert the two produce the same mesh;
+                // release has no way to select either, which is the point.
                 int mode = TJunctionIndexModeForTests;
                 if (mode == 2)
                     return null;
                 if (mode != 1 && vertexCount < MIN_VERTS)
                     return null;
+#else
+                if (vertexCount < MIN_VERTS)
+                    return null;
+#endif
                 return new VertexGridIndex(vertices, vertexCount);
             }
 
@@ -1476,8 +2166,25 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         internal static void PairSortedEdges(
             FPNavMeshTriangle[] triangles, EdgeRecord[] records, int n, FPVector3[] vertices)
         {
-            int i = 0;
-            while (i < n)
+            PairSortedEdges(triangles, records, n, vertices, 0, int.MaxValue);
+        }
+
+        /// <summary>
+        /// Resumable form: pairs from <paramref name="start"/> and stops once
+        /// <paramref name="budget"/> records are consumed, returning where to resume.
+        ///
+        /// <para>Stops on a GROUP boundary, never inside one. The loop pairs two at a time, so a
+        /// cut in the middle of a group would leave the second half pairing from the wrong parity
+        /// — an edge that appears three or more times would then pair a different occurrence.
+        /// That difference is invisible on any valid triangulation and invisible to the
+        /// fingerprint, which is exactly why the cut has to be structural rather than checked.</para>
+        /// </summary>
+        internal static int PairSortedEdges(
+            FPNavMeshTriangle[] triangles, EdgeRecord[] records, int n, FPVector3[] vertices,
+            int start, int budget)
+        {
+            int i = start;
+            while (i < n && budget > 0)
             {
                 long key = records[i].Key;
                 int end = i + 1;
@@ -1501,8 +2208,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     triangles[tb].SetPortal(eb, leftV, rightV);
                 }
 
+                budget -= end - i;
                 i = end;
             }
+            return i;
         }
 
         /// <summary>
@@ -1526,44 +2235,85 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         internal static void RadixSortByKey(
             EdgeRecord[] records, int n, int maxIndex, FPNavMeshRebakeBufferPool pool)
         {
+            RadixBegin(records, n, maxIndex, pool, out EdgeRecord[] scratch,
+                out int[] countMax, out int[] countMin);
+            RadixHistogram(records, 0, n, countMax, countMin);
+            RadixPrefix(countMax, maxIndex + 1);
+            RadixScatterLow(records, scratch, countMax, 0, n);
+            RadixPrefix(countMin, maxIndex + 1);
+            RadixScatterHigh(scratch, records, countMin, 0, n);
+        }
+
+        /// <summary>Rents the sort's buffers and clears the bucket range this call uses.</summary>
+        internal static void RadixBegin(
+            EdgeRecord[] records, int n, int maxIndex, FPNavMeshRebakeBufferPool pool,
+            out EdgeRecord[] scratch, out int[] countMax, out int[] countMin)
+        {
             int buckets = maxIndex + 1;
-            EdgeRecord[] scratch = pool.BuildEdgesScratch(n);
-            int[] countMax = pool.BuildEdgeCountsMax(buckets + 1);
-            int[] countMin = pool.BuildEdgeCountsMin(buckets + 1);
+            scratch = pool.BuildEdgesScratch(n);
+            countMax = pool.BuildEdgeCountsMax(buckets + 1);
+            countMin = pool.BuildEdgeCountsMin(buckets + 1);
 
             // Both arrays outlive a rebake and buckets shrinks as well as grows, so a stale tail
             // is live data from an earlier, larger mesh — clear the range this call uses.
             Array.Clear(countMax, 0, buckets + 1);
             Array.Clear(countMin, 0, buckets + 1);
+        }
 
-            for (int i = 0; i < n; i++)
+        /// <summary>
+        /// Counts both digits over <c>[from, to)</c>. Resumable by record, but it must run to
+        /// completion before either prefix sum: a partial histogram yields wrong offsets, and the
+        /// scatters then write over each other.
+        /// </summary>
+        internal static void RadixHistogram(
+            EdgeRecord[] records, int from, int to, int[] countMax, int[] countMin)
+        {
+            for (int i = from; i < to; i++)
             {
                 long key = records[i].Key;
                 countMax[(int)(key & 0xFFFFFFFFL)]++;
                 countMin[(int)(key >> 32)]++;
             }
+        }
 
-            // Pass 1: low digit (maxV), records -> scratch.
+        /// <summary>
+        /// Counts to exclusive prefix sums. Whole-bucket-range by design: after this the array is
+        /// a set of write cursors, so re-running it on an already-scanned array would be a
+        /// different (and wrong) transform — that is why the scatters below carry it rather than
+        /// recompute it.
+        /// </summary>
+        internal static void RadixPrefix(int[] counts, int buckets)
+        {
             int sum = 0;
             for (int b = 0; b < buckets; b++)
             {
-                int c = countMax[b];
-                countMax[b] = sum;
+                int c = counts[b];
+                counts[b] = sum;
                 sum += c;
             }
-            for (int i = 0; i < n; i++)
-                scratch[countMax[(int)(records[i].Key & 0xFFFFFFFFL)]++] = records[i];
+        }
 
-            // Pass 2: high digit (minV), scratch -> records. Two passes, so the result lands back
-            // in the caller's array and nothing has to be copied.
-            sum = 0;
-            for (int b = 0; b < buckets; b++)
-            {
-                int c = countMin[b];
-                countMin[b] = sum;
-                sum += c;
-            }
-            for (int i = 0; i < n; i++)
+        /// <summary>
+        /// Pass 1 over <c>[from, to)</c>: low digit (maxV), records -&gt; scratch. Resumable by
+        /// record because <paramref name="countMax"/> IS the cursor — forward scan with an
+        /// incrementing counter is what keeps ties in order, and carrying the array across calls
+        /// carries the position with it.
+        /// </summary>
+        internal static void RadixScatterLow(
+            EdgeRecord[] records, EdgeRecord[] scratch, int[] countMax, int from, int to)
+        {
+            for (int i = from; i < to; i++)
+                scratch[countMax[(int)(records[i].Key & 0xFFFFFFFFL)]++] = records[i];
+        }
+
+        /// <summary>
+        /// Pass 2 over <c>[from, to)</c>: high digit (minV), scratch -&gt; records. Two passes, so
+        /// the result lands back in the caller's array and nothing has to be copied.
+        /// </summary>
+        internal static void RadixScatterHigh(
+            EdgeRecord[] scratch, EdgeRecord[] records, int[] countMin, int from, int to)
+        {
+            for (int i = from; i < to; i++)
                 records[countMin[(int)(scratch[i].Key >> 32)]++] = scratch[i];
         }
 
@@ -1852,19 +2602,43 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             out int gridWidth, out int gridHeight, out FPVector2 gridOrigin,
             out int[] gridCells, out int[] gridTriangles, out int gridTriangleCount)
         {
+            GridSetup(boundsXZ, cellSize, out gridWidth, out gridHeight, out gridOrigin,
+                out int totalCells);
+            List<int>[] cellLists = pool.GridCellLists(totalCells);
+            GridBucketTriangles(vertices, triangles, gridOrigin, cellSize, gridWidth, gridHeight,
+                cellLists, 0, triangleCount);
+
+            gridCells = pool.RentOutputGridCells(totalCells * 2);
+            gridTriangleCount = GridTotalTriangles(cellLists, totalCells);
+            gridTriangles = pool.RentOutputGridTriangles(gridTriangleCount);
+            int offset = 0;
+            GridFlatten(cellLists, gridCells, gridTriangles, 0, totalCells, ref offset);
+        }
+
+        /// <summary>Grid geometry, which the buckets and the flatten both need up front.</summary>
+        private static void GridSetup(
+            FPBounds2 boundsXZ, FP64 cellSize,
+            out int gridWidth, out int gridHeight, out FPVector2 gridOrigin, out int totalCells)
+        {
             gridOrigin = boundsXZ.min;
             FPVector2 size = boundsXZ.size;
-
             gridWidth = FP64.Ceiling(size.x / cellSize).ToInt() + 1;
             gridHeight = FP64.Ceiling(size.y / cellSize).ToInt() + 1;
+            totalCells = gridWidth * gridHeight;
+        }
 
-            int totalCells = gridWidth * gridHeight;
-
-            // Pass 1: collect list of triangles per cell (pooled: the List instances are the
-            // reused storage, cleared not poisoned — Count is authoritative).
-            List<int>[] cellLists = pool.GridCellLists(totalCells);
-
-            for (int t = 0; t < triangleCount; t++)
+        /// <summary>
+        /// Pass 1 over <c>[from, to)</c> triangles: append each to every cell it touches. The
+        /// pooled List instances are the reused storage, cleared rather than poisoned — Count is
+        /// authoritative. Resumable by triangle; a triangle is appended to all of its cells in one
+        /// go, so the unit is the triangle and not the cell.
+        /// </summary>
+        private static void GridBucketTriangles(
+            FPVector3[] vertices, FPNavMeshTriangle[] triangles,
+            FPVector2 gridOrigin, FP64 cellSize, int gridWidth, int gridHeight,
+            List<int>[] cellLists, int from, int to)
+        {
+            for (int t = from; t < to; t++)
             {
                 TriangleCellRange(vertices, triangles[t], gridOrigin, cellSize, gridWidth, gridHeight,
                     out int colMin, out int colMax, out int rowMin, out int rowMax);
@@ -1878,18 +2652,28 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     }
                 }
             }
+        }
 
-            // Pass 2: compress to flat arrays
-            gridCells = pool.RentOutputGridCells(totalCells * 2);
-            int totalTris = 0;
+        /// <summary>Total bucket entries — the size of the flat triangle array. Needs every cell.</summary>
+        private static int GridTotalTriangles(List<int>[] cellLists, int totalCells)
+        {
+            int total = 0;
             for (int i = 0; i < totalCells; i++)
-                totalTris += cellLists[i].Count;
+                total += cellLists[i].Count;
+            return total;
+        }
 
-            gridTriangles = pool.RentOutputGridTriangles(totalTris);
-            gridTriangleCount = totalTris;
-            int offset = 0;
-
-            for (int i = 0; i < totalCells; i++)
+        /// <summary>
+        /// Pass 2 over <c>[from, to)</c> cells: compress the buckets into the CSR pair array and
+        /// the flat triangle array. <paramref name="offset"/> is the running write position and
+        /// must be carried across calls — it crosses cell boundaries, so recomputing it per call
+        /// would overwrite what earlier cells wrote.
+        /// </summary>
+        private static void GridFlatten(
+            List<int>[] cellLists, int[] gridCells, int[] gridTriangles,
+            int from, int to, ref int offset)
+        {
+            for (int i = from; i < to; i++)
             {
                 gridCells[i * 2] = offset;
                 gridCells[i * 2 + 1] = cellLists[i].Count;

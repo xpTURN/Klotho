@@ -299,9 +299,6 @@ namespace xpTURN.Klotho.Core
         /// Outcome of <see cref="ApplyFullState"/>. Skipped means the retreat guard rejected the
         /// state and NOTHING was applied — callers must skip all post-processing (clearing input
         /// history for a state that was never applied stalls the chain).
-        /// </summary>
-        /// <summary>
-        /// Outcome of <see cref="ApplyFullState"/>.
         /// <para><b>DerivativeRebuildFailed</b> — the state was applied AND its hash matched, but the
         /// game's <see cref="ISimulationCallbacks.OnFullStateApplied"/> hook threw while rebuilding a
         /// peer-local derivative (navmesh, …). Distinct from HashMismatch on purpose: the restored
@@ -444,6 +441,44 @@ namespace xpTURN.Klotho.Core
             // the hole. The KError below carries the full exception so the breadth costs diagnosis
             // nothing, and the game seam is expected to handle its own domain errors regardless.
             bool derivativeRebuildFailed = false;
+
+            // The navmesh half of that rebuild, done by the engine. The restored BuildingComponents
+            // are frame state but the mesh is still whatever this peer had, so it has to be made to
+            // match — and it has to happen HERE rather than on the next tick, because the receive
+            // path compares this peer's nav fingerprint against the sender's post-rebake one
+            // immediately after the apply. A peer one tick stale reports a false mismatch, and that
+            // report is one-shot: the false one consumes the report a real divergence in the same
+            // window would have needed.
+            //
+            // ⚠ Its own block, deliberately NOT inside the `_simulationCallbacks != null` guard
+            // below. The test harnesses initialize without callbacks (three of them, and roughly
+            // fifty call sites), so anything placed behind that guard cannot be reached by a test at
+            // all — a net that is always green. That mistake has been made in this codebase before,
+            // in the same seam, and it is why this reads as duplicated structure rather than being
+            // folded into the block below.
+            //
+            // Runs on the HashMismatch branch too, for the same reason the game hook does: the local
+            // simulation keeps ticking on the restored state either way, so its derivatives have to
+            // track it. That also means an UNTRUSTED building set reaches the rebaker, which is why
+            // the rebaker's re-validation is kept.
+            if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsNav && _navRebakeDriver != null)
+            {
+                try
+                {
+                    var navFrame = ecsNav.Frame;
+                    _navRebakeDriver.CorrectNow(ref navFrame);
+                }
+                catch (Exception ex)
+                {
+                    derivativeRebuildFailed = true;
+                    _logger?.KError(
+                        $"[KlothoEngine][FullStateResync] the navmesh correction threw at tick={tick} " +
+                        $"reason={reason} hashMatched={hashMatched} — the state stays applied but this " +
+                        $"peer's navmesh no longer matches it, so the next fingerprint comparison will " +
+                        $"report a divergence this peer caused. {ex}");
+                }
+            }
+
             if (_simulationCallbacks != null && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsApplied)
             {
                 try

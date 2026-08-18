@@ -50,6 +50,48 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         private readonly bool _reuse;
 
+        // DEBUG overlap guard. Zero when idle; a second entrant means two consumers are holding
+        // the same one-per-role buffers at once.
+        private int _useDepth;
+
+        /// <summary>
+        /// Marks the pool as in use for the duration of one rebake (DEBUG only).
+        ///
+        /// <para>Work buffers have no return call — each role is a single slot that the next rent
+        /// hands straight back — so two overlapping consumers do not fail, they overwrite. Worse,
+        /// they overwrite PARTIALLY: <c>Array.Resize</c> inside the CDT replaces a grown array
+        /// without writing it back to the slot, so some fields survive and some do not. The result
+        /// is a wrong mesh, and <c>ComputeFingerprint</c> does not cover adjacency, portals or the
+        /// grid, so it can pass. This guard is what turns that into a loud failure.</para>
+        ///
+        /// <para>A second consumer is legitimate — the placement preview is one — but it must
+        /// bring its own pool. The shared <see cref="NonPooling"/> instance is exempt because
+        /// every rent there allocates fresh storage, which is precisely what makes sharing safe.</para>
+        /// </summary>
+        [System.Diagnostics.Conditional("DEBUG")]
+        internal void EnterUse()
+        {
+            if (!_reuse)
+                return;
+            if (System.Threading.Interlocked.Increment(ref _useDepth) != 1)
+            {
+                System.Threading.Interlocked.Decrement(ref _useDepth);
+                throw new InvalidOperationException(
+                    "FPNavMeshRebakeBufferPool: overlapping use. Work buffers are one slot per role " +
+                    "with no return call, so the second consumer overwrites the first (partially — " +
+                    "the CDT's Array.Resize does not write back to the slot). Give it its own pool, " +
+                    "the way the placement preview does.");
+            }
+        }
+
+        /// <summary><see cref="EnterUse"/>'s counterpart; call it from a finally block.</summary>
+        [System.Diagnostics.Conditional("DEBUG")]
+        internal void ExitUse()
+        {
+            if (_reuse)
+                System.Threading.Interlocked.Decrement(ref _useDepth);
+        }
+
         /// <summary>
         /// Arrays this pool has allocated (as opposed to handed back from a slot). This is the
         /// counter gate for zero-allocation rebakes: after warmup, a rebake that repeats at the same
@@ -84,6 +126,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private int[] _extractDepth;
         private int[] _extractDeque;
         private FPConstrainedDelaunay.Cdt.Triple[] _extractTriples;
+        private FPConstrainedDelaunay.Cdt.Triple[] _extractTriplesScratch;
+        private int[] _extractTripleCounts;
         private int[] _extractOutput;
 
         // Rebake hole assembly. Arrays rather than List<T> on purpose:
@@ -109,6 +153,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // Incremental build-stage patch.
         private int[] _patchNewIndexByOld;
         private int[] _patchAdded;
+        private int[] _patchIndices;
         private long[] _patchAddedCellPairs;
         private FPNavMeshBuildPipeline.EdgeRecord[] _patchBoundaryEdges;
         private FPNavMeshBuildPipeline.EdgeRecord[] _patchEdges;
@@ -198,6 +243,32 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
+        /// Ping-pong partner of <see cref="ExtractTriples"/> for the radix sort. Three passes is
+        /// odd, so the sorted result ends up in whichever of the two the last pass wrote — the
+        /// sort returns that array rather than copying back.
+        /// </summary>
+        internal FPConstrainedDelaunay.Cdt.Triple[] ExtractTriplesScratch(int minSize)
+        {
+            if (!_reuse)
+                return Counted(new FPConstrainedDelaunay.Cdt.Triple[minSize]);
+            if (_extractTriplesScratch == null || _extractTriplesScratch.Length < minSize)
+                _extractTriplesScratch = Counted(new FPConstrainedDelaunay.Cdt.Triple[
+                    Grow(_extractTriplesScratch == null ? 0 : _extractTriplesScratch.Length, minSize)]);
+#if DEBUG
+            Array.Fill(_extractTriplesScratch, new FPConstrainedDelaunay.Cdt.Triple(POISON_INT, POISON_INT, POISON_INT));
+#endif
+            return _extractTriplesScratch;
+        }
+
+        /// <summary>
+        /// Digit histograms for the triple radix sort — one array holding three contiguous
+        /// bucket ranges (A, B, C). The caller clears the range it uses: this outlives a rebake
+        /// and the bucket count shrinks as well as grows, so a stale tail is live data from an
+        /// earlier, larger mesh.
+        /// </summary>
+        internal int[] ExtractTripleCounts(int minSize) { return RentInts(ref _extractTripleCounts, minSize); }
+
+        /// <summary>
         /// Storage for <see cref="FPConstrainedDelaunay.Cdt.Extract"/>'s result. This one leaves
         /// the CDT as a return value, so unlike the other work buffers it carries a lifetime the
         /// caller can violate: it is valid until the next rebake on this pool and must not be
@@ -205,26 +276,43 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         internal int[] ExtractOutput(int minSize) { return RentInts(ref _extractOutput, minSize); }
 
-        // Expanded building polygons, CSR-packed across all buildings
-        // of one rebake: vertices of building b live in [PolyStart[b], PolyStart[b+1]). Pooled
-        // for the same reason the hole arrays are — the zero-alloc gate counts every array that
-        // goes through here, and a per-rebake `new` would show up in the byte gate as well.
         // The placement preview appends its ghost to the caller's list, and doing that in place
         // would make the game's own array grow by one every frame. These hold the joined copy.
+        // Pooled for the same reason the hole arrays are — a per-preview `new` would show up in
+        // the byte gate (FPBuildingPreviewTests.V3_ReusedScratch_AllocatesNothing), and the
+        // counter gate sees it through Counted like every other buffer here.
         private FPBuildingRect[] _previewRects;
         private FPBuildingPlacement[] _previewPlacements;
 
         internal FPBuildingRect[] PreviewRects(int minSize)
         {
+            if (!_reuse)
+                return Counted(new FPBuildingRect[minSize]);
             if (_previewRects == null || _previewRects.Length < minSize)
-                _previewRects = new FPBuildingRect[minSize];
+                _previewRects = Counted(new FPBuildingRect[
+                    Grow(_previewRects == null ? 0 : _previewRects.Length, minSize)]);
+#if DEBUG
+            FP64 poison = FP64.FromRaw(POISON_LONG);
+            Array.Fill(_previewRects, new FPBuildingRect(poison, poison, poison, poison, poison));
+#endif
             return _previewRects;
         }
 
         internal FPBuildingPlacement[] PreviewPlacements(int minSize)
         {
+            if (!_reuse)
+                return Counted(new FPBuildingPlacement[minSize]);
             if (_previewPlacements == null || _previewPlacements.Length < minSize)
-                _previewPlacements = new FPBuildingPlacement[minSize];
+                _previewPlacements = Counted(new FPBuildingPlacement[
+                    Grow(_previewPlacements == null ? 0 : _previewPlacements.Length, minSize)]);
+#if DEBUG
+            // ShapeId is poisoned too, not just the coordinates: a stale entry that reaches
+            // BuildPlacementPolygons then throws at ResolveEntryOrThrow instead of quietly
+            // resolving to whatever shape the previous preview had there.
+            FP64 poison = FP64.FromRaw(POISON_LONG);
+            Array.Fill(_previewPlacements, new FPBuildingPlacement(
+                POISON_INT, POISON_INT, poison, poison, poison));
+#endif
             return _previewPlacements;
         }
 
@@ -275,6 +363,17 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         /// <summary>New indices of the triangles this rebake added, ascending.</summary>
         internal int[] PatchAdded(int minSize) { return RentInts(ref _patchAdded, minSize); }
+
+        /// <summary>
+        /// The triangulation the patch is building against, copied because the patch now spans
+        /// frames and a <c>ReadOnlySpan</c> cannot be a field.
+        ///
+        /// <para>Pooled rather than <c>ToArray()</c>d, which is not a micro-optimisation: the
+        /// first version of the resumable patch allocated the copy and the steady-state allocation
+        /// gate went from 2,280 B to 270,696 B per rebake. Renting makes the copy a memcpy into
+        /// storage the room already owns.</para>
+        /// </summary>
+        internal int[] PatchIndices(int minSize) { return RentInts(ref _patchIndices, minSize); }
 
         /// <summary>
         /// (grid cell, new triangle index) pairs for the added triangles, one packed long each.

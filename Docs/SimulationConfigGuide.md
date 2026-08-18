@@ -170,6 +170,8 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
 - **`InterpolationDelayTicks`**: add +1 (jitter absorption).
 - **`TickIntervalMs`**: bump up one tier vs. PC (e.g., PC 25 ms → Mobile 40 ms).
 - **Battery / heat**: lowering tick rate reduces both simulation cost and send/receive frequency, so it has a large impact.
+- **Runtime NavMesh rebake**: if your game has one, its slice budget is a per-device knob and is *not* a config field — see [4.4](#44-per-device-knobs-that-are-not-in-simulationconfig).
+- **These are room-wide, not per-client.** The values above describe the profile a mobile room runs; a PC and a phone in the SAME room share one config (see the cross-platform table in [4.4](#44-per-device-knobs-that-are-not-in-simulationconfig)). Mixed rosters take the weaker platform's profile.
 
 ### 4.2 Console (wired / stable)
 - PC recommendations work as-is. `TickIntervalMs` can be reduced to 16–17 (60 Hz) for fighting/action games.
@@ -177,6 +179,69 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
 ### 4.3 Global Matchmaking (cross-region RTT > 150 ms)
 - Recommend `SDInputLeadTicks` ≥ 8 (the server has no fixed tolerance window, so cross-region RTT is absorbed entirely by client lead).
 - Add +1–2 to the recommended `InterpolationDelayTicks`.
+
+### 4.4 Per-device knobs that are NOT in `SimulationConfig`
+
+One tunable is deliberately outside the config, and it belongs in this section because it is the knob
+that *should* differ between a PC build and a phone: the **rebake slice budget** —
+`FPNavMeshRebakeDriver(source, installer, rules, sliceBudgetUnits, slotCount)`, default **20000 work
+units per frame**. It only exists for games that rebuild the NavMesh during a match
+([Navigation.Rebake.md](./Navigation.Rebake.md)).
+
+**Why it is not a config field.** `SimulationConfig` is shared — under ServerDriven the server sends
+it to every client — so a field there cannot hold a per-device value, and anything in it reads as a
+determinism input. The slice budget is the opposite: peer-local by construction. A sliced rebake
+produces a byte-identical mesh at any budget, and `SteppedRebake_EqualsOneShot_AtRandomBudgets` proves
+it with a budget that changes on *every step*. Each peer may pick its own, and no peer needs to know
+what the others chose.
+
+**How to set it.** Constructor argument on the driver — a platform `#if`, a device-tier setting, or a
+per-stage value (the stage is already known where the rebake context is built). It cannot be changed
+after construction.
+
+**The lower bound, which is the one way this goes wrong.** Lowering the budget does not change the
+result; it moves the cost. If the slices do not finish before the placement's effective tick, the
+boundary tick finishes the remainder **synchronously, whole** — the spike slicing exists to remove.
+Keep:
+
+```text
+budget × frames between the command and its effective tick  ≥  that rebake's total work
+```
+
+Brawler's window is `BuildDelayTicks = 60` at 25 ms = 1.5 s, roughly 90 frames at 60 fps. Note the
+tension: mobile wants a **smaller** budget to protect the frame, and — if it also runs at a lower
+frame rate or a longer tick — has **fewer** frames of runway. When the two conflict, the knob to move
+is not the budget: it is the build delay (more runway) or the stage size. **Both of those are
+match-wide, not per-device** — see below before reaching for either.
+
+**Cross-platform rooms: which of these may differ per peer.** In a room holding a PC and a phone the
+line is not "performance knobs may differ" but "peer-local values may differ":
+
+| | Per peer? | Why |
+| --- | --- | --- |
+| `sliceBudgetUnits` | **Yes** | The mesh is byte-identical at any budget, so nothing downstream can tell. Give the phone a smaller one *because* the room is mixed |
+| `slotCount` | **Yes** | A mesh cache. Fewer slots means more rebakes on that peer and the same meshes — `slotCount: 1` is a real memory lever on mobile (the second slot costs a second work-buffer pool) |
+| Build delay (`BuildDelayTicks` or your equivalent) | **NO** | Each peer computes `EffectiveTick = frame.Tick + delay` itself. Two values means two ticks for the same building — the mesh diverges while every component still matches. Brawler folds this constant into `GetGameFingerprint` for exactly this reason |
+| Stage / base mesh | **NO** | The rebake carves from it; the nav fingerprint covers it |
+
+So on a mixed roster the delay is chosen **for the room**, sized to the device with the least runway,
+and the budget is what varies underneath it. Reversing that — per-device delay — is a desync that no
+state hash reports.
+
+The same rule governs this whole section: everything in §1 marked ✅ (`TickIntervalMs`,
+`InputDelayTicks`, `MaxRollbackTicks`) is a property of the MATCH. The per-platform advice in 4.1 is
+about which profile a room runs, not about what one client may set for itself — a mixed room takes one
+profile, usually the weaker platform's. Under ServerDriven that is enforced structurally (the server
+sends the config); under P2P it has to be agreed before the match starts.
+
+**Measure per platform, not per engine.** A work unit is a deterministic amount of work, not a
+duration; how many of them fit in a frame is exactly what differs between devices.
+`FPNavMeshRebakerPerfTests.P0F_SliceBudgetCalibration` is the fixture, and the table in
+[Navigation.Rebake.md §8](./Navigation.Rebake.md#slicing-it-across-frames) is one stage on one machine
+— treat it as the shape of the curve, not as your value.
+
+**The signal that it is too small** is `driver.BoundaryFinishes` rising against `driver.TaskInstalls`.
+Neither is logged by the engine, so a game that tunes per device should put both in its own telemetry.
 
 ---
 
@@ -190,7 +255,8 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
 3. **On desync**: temporarily lower `SyncCheckInterval` (e.g., 10 → 5) for faster detection. Keep `DiagnosticHistoryTicks > 0` (default 60) so the engine localizes the divergence to a component type / system participant and auto-probes the peer for a verdict — see [DesyncDiagnostics.md](./DesyncDiagnostics.md). Under P2P this buys a per-tick hash; set `0` only if that steady cost is unaffordable (localization then degrades to check-tick granularity).
 4. **Interpolation jitter**: raise `InterpolationDelayTicks` one step at a time and enable `EnableErrorCorrection`.
 5. **Reactive escalation ceiling**: `SimulationConfig.Validate()` enforces `ReactiveMax ≤ MaxRollbackTicks / 2`. If you lower `MaxRollbackTicks` (e.g. fighting at 8), `ReactiveMax` is clamped to that half (≤4) with a warning — raise `MaxRollbackTicks` first if you need a wider reactive window.
-6. **On `OnMatchAborted(ChainStallTimeout)` false positives**: verify `SessionConfig.ReconnectTimeoutMs` against the recovery floor. Effective threshold = `max(ReconnectTimeoutMs / TickIntervalMs + 100, SessionConfig.MinStallAbortTicks)`. If `ReconnectTimeoutMs < 30s`, `MinStallAbortTicks` (default 600 = 30s @ 50ms) acts as the floor — raise both for high-latency/long-recovery scenarios.
+6. **Frame spike when a building lands**: read `driver.BoundaryFinishes`. A rising count means the slices did not finish inside the delay window and the boundary tick paid for the whole rebake — raise the budget, the build delay, or lower the stage size ([4.4](#44-per-device-knobs-that-are-not-in-simulationconfig)).
+7. **On `OnMatchAborted(ChainStallTimeout)` false positives**: verify `SessionConfig.ReconnectTimeoutMs` against the recovery floor. Effective threshold = `max(ReconnectTimeoutMs / TickIntervalMs + 100, SessionConfig.MinStallAbortTicks)`. If `ReconnectTimeoutMs < 30s`, `MinStallAbortTicks` (default 600 = 30s @ 50ms) acts as the floor — raise both for high-latency/long-recovery scenarios.
 
 > **Field placement** — `MinStallAbortTicks`, `LateJoinDelaySafety`, `RttSanityMaxMs` live in `SessionConfig` alongside the other LateJoin/Reconnect/ChainStall service-side knobs. The engine-internal knobs — `CatchupMaxTicksPerFrame`, `ResyncMaxRetries`, `DesyncThresholdForResync`, `CorrectiveResetCooldownMs`, `CorrectiveResetMaxAttempts`, `AutoAbortOnRecoveryExhausted`, `ServerSnapshotRetentionTicks`, `QuorumMissDropTicks`, Reactive Dynamic InputDelay 7 (`ReactiveWindowTicks`, `ReactiveEscalateThreshold`, `ReactiveStep`, `ReactiveMax`, `ServerPushGraceTicks`, `ReactiveEscalateCooldownTicks`, `ReactiveDeEscalateStableTicks`), and Rollback Burst 2 (`RollbackBurstCount`, `RollbackWindowTicks`) — live in `SimulationConfig`.
 
@@ -225,3 +291,4 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
 - Real-world SD example: [`Samples/Brawler/Server/simulationconfig.json`](../Samples/Brawler/Server/simulationconfig.json)
 - Per-mode message flow: [`Specification.md §9`](./Specification.md)
 - Brawler sample bootstrap: [`Samples/Brawler.E.Bootstrap.md`](./Samples/Brawler.E.Bootstrap.md)
+- Runtime NavMesh rebake, incl. the slice budget: [`Navigation.Rebake.md`](./Navigation.Rebake.md)

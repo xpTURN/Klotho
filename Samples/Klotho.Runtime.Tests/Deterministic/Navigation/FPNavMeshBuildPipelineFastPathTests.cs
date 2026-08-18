@@ -242,6 +242,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
     /// tParam ties, the negative quadrant (arithmetic-shift floor bucketing), the small-input
     /// linear fallback, and the diagonal-long-edge query-count bound.
     /// </summary>
+#if DEBUG
+    // DEBUG-only because the knob is. TJunctionIndexModeForTests selects the build path, so it
+    // is compiled out of release rather than shipped as a process-global switch a multi-room
+    // server could have flipped under it — which leaves no way to force either mode here.
+    //
+    // The equivalence this fixture gates is algorithmic (a composite sort making collection
+    // order irrelevant), not configuration-dependent, so a Debug run proves it for both builds.
     [TestFixture]
     public class FPNavMeshTJunctionIndexTests
     {
@@ -337,7 +344,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             AssertModesIdentical(verts, indices, "tParam tie");
         }
 
-#if DEBUG
         [Test]
         public void AutoMode_SmallInput_FallsBackToLinear()
         {
@@ -374,6 +380,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
             AssertModesIdentical(verts.ToArray(), indices, "diagonal long edge");
         }
-#endif
     }
+#endif
 }

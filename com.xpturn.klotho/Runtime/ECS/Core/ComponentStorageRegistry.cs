@@ -294,6 +294,46 @@ namespace xpTURN.Klotho.ECS
 
         // === Layout computation + freeze transition ===
 
+        /// <summary>
+        /// Whether these layout inputs disagree with a layout that is already frozen — the same
+        /// comparison <see cref="EnsureLayoutComputed"/> makes on entry, without the side effects.
+        ///
+        /// <para>Exists so a host that creates sessions one at a time can ASK before it commits.
+        /// The registry's own answer to a conflict is to recompute (editor/test) or throw
+        /// (release), and neither is survivable for a process that already has live rooms: the
+        /// recompute pulls <c>_layouts</c> and the type-id cache out from under workers mid-tick,
+        /// and the throw unwinds through whatever called it — in the dedicated server that is the
+        /// receive stage of the main loop, which has no handler between there and
+        /// <c>ServerLoop.Run</c>, so one mismatched room takes every healthy one with it. Asking
+        /// first turns that into a refused room.</para>
+        ///
+        /// <para>Not frozen yet → no conflict: the first caller defines the layout.</para>
+        /// </summary>
+        /// <param name="conflict">Human-readable reason, or null when there is none.</param>
+        internal static bool LayoutInputsConflict(
+            int maxEntities, IReadOnlyDictionary<int, int> maxCountOverrides,
+            IReadOnlyCollection<int> prunedComponentTypeIds, out string conflict)
+        {
+            conflict = null;
+            if (!_frozen)
+                return false;
+
+            // Compare the EFFECTIVE prune-set (denylist − core), not the raw list: BuildEffectivePrunedSet
+            // is non-injective (null / empty / core-only all collapse to null), so two rooms passing
+            // different-but-equivalent raw lists must not spuriously conflict. _coreTypeIds is already
+            // populated (first call scanned), so the incoming set is computable here.
+            if (_computedMaxEntities == maxEntities && OverridesEqual(_maxCountOverrides, maxCountOverrides)
+                && PrunedSetEqual(_prunedSet, BuildEffectivePrunedSet(prunedComponentTypeIds)))
+                return false;
+
+            conflict =
+                $"ComponentStorageRegistry frozen at maxEntities={_computedMaxEntities}, " +
+                $"attempted EnsureLayoutComputed({maxEntities}) with a different maxEntities, " +
+                $"maxCount-override map, or prune-set. Layout cannot be recomputed within a session " +
+                $"(these must be process-uniform).";
+            return true;
+        }
+
         // No-override entry point (Frame ctor, GetHeapSize): re-affirms the currently-set overrides AND
         // prune-set so a post-freeze Frame construction stays idempotent (never clobbers them to null).
         public static void EnsureLayoutComputed(int maxEntities)
@@ -310,12 +350,8 @@ namespace xpTURN.Klotho.ECS
         {
             if (_frozen)
             {
-                // Compare the EFFECTIVE prune-set (denylist − core), not the raw list: BuildEffectivePrunedSet
-                // is non-injective (null / empty / core-only all collapse to null), so two rooms passing
-                // different-but-equivalent raw lists must not spuriously conflict. _coreTypeIds is already
-                // populated (first call scanned), so the incoming set is computable here.
-                if (_computedMaxEntities == maxEntities && OverridesEqual(_maxCountOverrides, maxCountOverrides)
-                    && PrunedSetEqual(_prunedSet, BuildEffectivePrunedSet(prunedComponentTypeIds)))
+                if (!LayoutInputsConflict(maxEntities, maxCountOverrides, prunedComponentTypeIds,
+                        out string conflict))
                     return;   // idempotent
                 // Automatically relax cross-fixture freeze conflicts, so unit tests can construct
                 // Frames with different maxEntities per fixture without every one of them having
@@ -329,11 +365,7 @@ namespace xpTURN.Klotho.ECS
                 else
                 {
                     throw new InvalidOperationException(
-                        $"ComponentStorageRegistry frozen at maxEntities={_computedMaxEntities}, " +
-                        $"attempted EnsureLayoutComputed({maxEntities}) with a different maxEntities, " +
-                        $"maxCount-override map, or prune-set. Layout cannot be recomputed within a session " +
-                        $"(these must be process-uniform). " +
-                        $"Call ResetForTesting() (test code only) if session reset is required.");
+                        conflict + " Call ResetForTesting() (test code only) if session reset is required.");
                 }
             }
 

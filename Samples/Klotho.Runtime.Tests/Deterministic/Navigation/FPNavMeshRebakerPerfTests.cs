@@ -201,12 +201,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Report("pipeline (Build, fast path)", mFast);
         }
 
-        [Test]
-        public void CdtPhaseSplit_SnapshotCacheGate()
+        // Field's CDT input (snapped coordinates + boundary-ring constraints), shared by the two
+        // phase-split gates so the two measurements cannot drift apart.
+        private static (FPNavMesh mesh, long[] xs, long[] zs, int[] constraints) LoadFieldCdtInput()
         {
-            // The snapshot cache saves only vertex insertion (a) and constraint insertion (b);
-            // Extract (d) runs on every rebake regardless. So the cache is worth having only if
-            // (a)+(b) dominate. Internal Cdt access via InternalsVisibleTo; warmup 32 for the JIT.
             string root = RepoRoot();
             string path = Path.Combine(root, "Samples/Brawler/Assets/NavMesh/Data/Field.NavMeshData.bytes");
             if (!File.Exists(path))
@@ -237,7 +235,17 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                     cons.Add(map[(FPGeoPredicates.Snap(ringVerts[j].x), FPGeoPredicates.Snap(ringVerts[j].y))]);
                 }
             }
-            int[] consArr = cons.ToArray();
+            return (mesh, xs, zs, cons.ToArray());
+        }
+
+        [Test]
+        public void CdtPhaseSplit_SnapshotCacheGate()
+        {
+            // The snapshot cache saves only vertex insertion (a) and constraint insertion (b);
+            // Extract (d) runs on every rebake regardless. So the cache is worth having only if
+            // (a)+(b) dominate. Internal Cdt access via InternalsVisibleTo; warmup 32 for the JIT.
+            var (mesh, xs, zs, consArr) = LoadFieldCdtInput();
+            int n = mesh.Vertices.Length;
             TestContext.Out.WriteLine($"=== CDT phase split, Field ({mesh.Triangles.Length} tris, {n} verts, {consArr.Length / 2} constraints) ===");
 
             var mVerts = Measure(() =>
@@ -266,6 +274,73 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             TestContext.Out.WriteLine(
                 $"gate: (a)+(b) = {mCons.minMs:F1} ms of {mAll.minMs:F1} ms total " +
                 $"({mCons.minMs / mAll.minMs * 100:F0}%) — (d) Extract residual = {mAll.minMs - mCons.minMs:F1} ms");
+        }
+
+        [Test]
+        public void ExtractPhaseSplit_RadixGate()
+        {
+            // Gate for radix-sorting Extract's canonicalize: it pays only
+            // if Array.Sort is >= 1.0 ms of Extract. Below that the 0-1 BFS parity dominates and
+            // radix is the wrong tool. The sort is inside Extract, so the split is measured by
+            // difference across the stage boundaries (ExtractKeepMask / ExtractTriples / sort /
+            // ExtractEmit) — a test cannot repeat those loops in place because they read private
+            // state. The Cdt is built once and the stages re-run against it: they rewrite their
+            // own buffers and never mutate _tris, so repetition is sound. ExtractTriples refills
+            // in creation order every call, so the sort never sees an already-sorted input.
+            var (mesh, xs, zs, consArr) = LoadFieldCdtInput();
+
+            var cdt = new FPConstrainedDelaunay.Cdt(xs, zs, null);
+            cdt.InsertAllVertices();
+            cdt.InsertConstraints(consArr, consArr.Length);
+
+            cdt.Extract(true, out int outCount);
+            TestContext.Out.WriteLine(
+                $"=== Extract phase split, Field ({mesh.Triangles.Length} base tris, " +
+                $"{cdt.TriCountForDiagnostics} CDT tris, {outCount / 3} kept) ===");
+
+            var mKeep = Measure(() => cdt.ExtractKeepMask(true));
+            Report("(1) keep mask (0-1 BFS parity)", mKeep);
+
+            var mTriples = Measure(() =>
+            {
+                bool[] keep = cdt.ExtractKeepMask(true);
+                cdt.ExtractTriples(keep, out _);
+            });
+            Report("(1)+(2) + canonical rotation", mTriples);
+
+            var mRadix = Measure(() =>
+            {
+                bool[] keep = cdt.ExtractKeepMask(true);
+                int kept = cdt.ExtractTriples(keep, out var triples);
+                cdt.SortTriples(triples, kept);
+            });
+            Report("(1)+(2)+(3) + radix sort", mRadix);
+
+            // The replaced comparison sort, kept as the measurement baseline (production no longer
+            // calls it; FPCdtExtractRadixTests pins the two against each other).
+            var mComparison = Measure(() =>
+            {
+                bool[] keep = cdt.ExtractKeepMask(true);
+                int kept = cdt.ExtractTriples(keep, out var triples);
+                Array.Sort(triples, 0, kept);
+            });
+            Report("(1)+(2)+(3') + Array.Sort [baseline]", mComparison);
+
+            var mFull = Measure(() => cdt.Extract(true, out _));
+            Report("(1)+(2)+(3)+(4) = Extract", mFull);
+
+            double bfs = mKeep.minMs;
+            double rotate = mTriples.minMs - mKeep.minMs;
+            double radix = mRadix.minMs - mTriples.minMs;
+            double comparison = mComparison.minMs - mTriples.minMs;
+            double emit = mFull.minMs - mRadix.minMs;
+            TestContext.Out.WriteLine(
+                $"split: BFS {bfs:F3} ms | rotate {rotate:F3} ms | sort {radix:F3} ms | emit {emit:F3} ms " +
+                $"(Extract {mFull.minMs:F3} ms)");
+            TestContext.Out.WriteLine(
+                $"sort: radix {radix:F3} ms vs Array.Sort {comparison:F3} ms " +
+                $"({(comparison > 0 ? comparison / System.Math.Max(radix, 1e-6) : 0):F1}x) — " +
+                $"Phase 2 gate was 'Array.Sort >= 1.0 ms of Extract'");
         }
 
         [Test]
@@ -526,6 +601,240 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 ? "VERDICT: no gen2 collection across the burst — trigger (a) NOT met on this map size."
                 : $"VERDICT: {d2} gen2 collection(s) — weigh against v2 risk before starting.");
         }
+
+        #region P0 — large-map gate
+
+        /// <summary>Square grid stage: (2*half+1)^2 vertices, unit cells, agent radius 0.5.</summary>
+        private static FPNavMesh BuildGridStage(int half)
+        {
+            int side = half * 2 + 1;
+            var vertices = new FPVector3[side * side];
+            var xs = new long[side * side];
+            var zs = new long[side * side];
+            int n = 0;
+            for (int x = -half; x <= half; x++)
+                for (int z = -half; z <= half; z++)
+                {
+                    vertices[n] = new FPVector3(FP64.FromInt(x), FP64.Zero, FP64.FromInt(z));
+                    xs[n] = FPGeoPredicates.Snap(vertices[n].x);
+                    zs[n] = FPGeoPredicates.Snap(vertices[n].z);
+                    n++;
+                }
+            int[] tris = FPConstrainedDelaunay.Triangulate(xs, zs, null, eraseOuterAndHoles: false);
+            return FPNavMeshBuildPipeline.Build(
+                vertices, tris, new int[tris.Length / 3], 1.0, null, bakeAgentRadius: 0.5);
+        }
+
+        /// <summary>
+        /// <paramref name="count"/> separated 1x1 footprints on a lattice inside the stage, one
+        /// cell clear of the border. Returns null when the lattice would not separate them —
+        /// touching footprints are a rejection, not a rebake, and would measure the wrong thing.
+        /// </summary>
+        private static FPBuildingRect[] LatticePlacements(int count, int half)
+        {
+            if (count == 0)
+                return null;
+            int perSide = (int)System.Math.Ceiling(System.Math.Sqrt(count));
+            int span = (half - 2) * 2;
+            int step = span / System.Math.Max(1, perSide);
+            if (step < 3)
+                return null;
+
+            var result = new FPBuildingRect[count];
+            for (int i = 0; i < count; i++)
+            {
+                FP64 x = FP64.FromInt(-(half - 2) + (i % perSide) * step);
+                FP64 z = FP64.FromInt(-(half - 2) + (i / perSide) * step);
+                result[i] = new FPBuildingRect(x, z, x + FP64.One, z + FP64.One, FP64.Zero);
+            }
+            return result;
+        }
+
+        [Test]
+        public void P0_ScaleSweep_RebakeCost()
+        {
+            // Gate (1): does a synchronous rebake break the tick budget at the target
+            // scale, AFTER the Extract sort went radix? Measured on the real game path
+            // (context + CommitSwap) so the patch chain stays live, which is what an in-match
+            // placement actually does. Warmups shrink with size — the big stages cost seconds.
+            TestContext.Out.WriteLine("=== P0 (1)+(4): rebake cost and patch rate vs map size ===");
+            TestContext.Out.WriteLine($"{"tris",9} {"bldgs",6} {"rebake ms",10} {"alloc KB",10} {"patched",8} {"fallback",9}");
+
+            foreach (int half in new[] { 40, 80, 120, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                int tris = baseMesh.Triangles.Length;
+                int warm = tris > 200_000 ? 2 : tris > 60_000 ? 4 : 8;
+                int iters = tris > 200_000 ? 3 : 5;
+
+                foreach (int count in new[] { 0, 1, 64, 256, 512 })
+                {
+                    FPBuildingRect[] buildings = LatticePlacements(count, half);
+                    if (count > 0 && buildings == null)
+                        continue;
+
+                    var ctx = FPNavMeshRebaker.CreateContext(baseMesh, null, prewarm: false);
+
+                    // Reject early rather than reporting a rejection as if it were a rebake.
+                    if (!FPNavMeshRebaker.TryRebake(ctx, buildings, out FPNavMesh probe, out var rejection))
+                    {
+                        TestContext.Out.WriteLine($"{tris,9} {count,6}   rejected: {rejection.Reason}");
+                        continue;
+                    }
+                    ctx.CommitSwap(probe);
+
+                    void Cycle()
+                    {
+                        FPNavMesh m = FPNavMeshRebaker.Rebake(ctx, buildings);
+                        ctx.CommitSwap(m);
+                    }
+
+                    // IncrementalOutcome is a CLASS held by the context, so a "before" copy of the
+                    // reference tracks the same counters — snapshot the values, not the object.
+                    var oc = ctx.PatchOutcome;
+                    int inc0 = oc.Incremental;
+                    int fb0 = oc.FallbackVertexShift + oc.FallbackGridGeometry
+                            + oc.FallbackEmpty + oc.FallbackDuplicateBoundaryEdge;
+
+                    var time = Measure(Cycle, warmup: warm, iterations: iters);
+                    long alloc = MeasureAlloc(Cycle, warmup: 1, iterations: 3);
+
+                    int patched = oc.Incremental - inc0;
+                    int fell = oc.FallbackVertexShift + oc.FallbackGridGeometry
+                             + oc.FallbackEmpty + oc.FallbackDuplicateBoundaryEdge - fb0;
+                    TestContext.Out.WriteLine(
+                        $"{tris,9} {count,6} {time.minMs,10:F2} {alloc / 1024.0,10:F0} {patched,8} {fell,9}");
+                }
+            }
+        }
+
+        [Test]
+        public void P0_ScaleSweep_PhaseSplit()
+        {
+            // Gate (2): how the Extract-vs-Build split moves with size. The 22k
+            // observation (Extract + Build = 82% of the rebake) is what makes splitting BOTH a
+            // requirement rather than a nicety. Measured the way ResidualTimeBreakdown does it —
+            // through the snapshot, which is the path a rebake actually takes; rebuilding the
+            // stages from a fresh Triangulate measures a different (larger) triangulation.
+            TestContext.Out.WriteLine("=== P0 (2): stage split vs map size, no buildings ===");
+            TestContext.Out.WriteLine(
+                $"{"tris",9} {"total ms",9} {"cdt ms",8} {"clone",7} {"extract",8} {"build ms",9} {"resid",7} {"E+B %",6}");
+
+            var noXs = Array.Empty<long>();
+            var noZs = Array.Empty<long>();
+            var noCons = Array.Empty<int>();
+
+            foreach (int half in new[] { 40, 80, 120, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                int tris = baseMesh.Triangles.Length;
+                int warm = tris > 200_000 ? 2 : tris > 60_000 ? 4 : 8;
+                int iters = tris > 200_000 ? 3 : 5;
+
+                FPNavMeshRebakeSnapshot snapshot = FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false);
+                var ctx = new FPNavMeshRebakeContext(snapshot);
+
+                var fullCtx = FPNavMeshRebaker.CreateContext(baseMesh, null, prewarm: false);
+                FPNavMeshRebaker.Rebake(fullCtx, null);   // never committed -> always the full path
+                var mTotal = Measure(() => FPNavMeshRebaker.Rebake(fullCtx, null), warm, iters);
+
+                var mCdt = Measure(() => FPConstrainedDelaunay.TriangulateFromSnapshot(
+                    snapshot.Cdt, noXs, noZs, 0, noCons, 0, out _, true, null, ctx.Pool), warm, iters);
+                var mClone = Measure(() => new FPConstrainedDelaunay.Cdt(snapshot.Cdt, noXs, noZs, 0, null), warm, iters);
+
+                int[] tri = FPConstrainedDelaunay.TriangulateFromSnapshot(
+                    snapshot.Cdt, noXs, noZs, 0, noCons, 0, out int triCount, true, null);
+                var vertices = new FPVector3[snapshot.BaseXs.Length];
+                for (int i = 0; i < vertices.Length; i++)
+                    vertices[i] = new FPVector3(
+                        FPGeoPredicates.Unsnap(snapshot.BaseXs[i]), snapshot.BaseYs[i],
+                        FPGeoPredicates.Unsnap(snapshot.BaseZs[i]));
+                var areas = new int[triCount / 3];
+                var mBuild = Measure(() => FPNavMeshBuildPipeline.BuildFromConformingTriangulation(
+                    vertices, new ReadOnlySpan<int>(tri, 0, triCount), areas, baseMesh.GridCellSize, null,
+                    baseMesh.BakeAgentRadius, baseMesh.BakeMaxSlopeDeg, baseMesh.BakeAgentHeight,
+                    baseMesh.BakeAgentClimb, ctx.Pool), warm, iters);
+
+                double extract = mCdt.minMs - mClone.minMs;
+                double residual = mTotal.minMs - mCdt.minMs - mBuild.minMs;
+                double eb = (extract + mBuild.minMs) / mTotal.minMs * 100.0;
+                TestContext.Out.WriteLine(
+                    $"{tris,9} {mTotal.minMs,9:F2} {mCdt.minMs,8:F2} {mClone.minMs,7:F2} {extract,8:F2} " +
+                    $"{mBuild.minMs,9:F2} {residual,7:F2} {eb,5:F0}%");
+            }
+        }
+
+        [Test]
+        public unsafe void P0_DerivedRebuildAndMemory()
+        {
+            // Two measurements. D: what rebuilding the derived set costs — the number that decides
+            // whether a rollback round-trip across the swap boundary can afford to rebuild instead
+            // of holding two copies (D6-(3)). E: resident bytes per copy, for the memory budget
+            // budget, plus whether Extract's deque outgrows its pool slot — the pool's alloc
+            // gate cannot see that growth because IntDeque.Grow allocates outside it.
+            TestContext.Out.WriteLine("=== P0 (D): derived rebuild cost vs map size ===");
+            TestContext.Out.WriteLine(
+                $"{"tris",9} {"query ms",9} {"trio ms",8} {"rebind ms",10} {"trio KB",9} {"mesh KB",9}");
+
+            foreach (int half in new[] { 40, 80, 120, 160 })
+            {
+                FPNavMesh mesh = BuildGridStage(half);
+                int tris = mesh.Triangles.Length;
+                int warm = tris > 200_000 ? 2 : tris > 60_000 ? 4 : 8;
+                int iters = tris > 200_000 ? 3 : 5;
+
+                var mQuery = Measure(() => new FPNavMeshQuery(mesh, null), warm, iters);
+                var mTrio = Measure(() =>
+                {
+                    var q = new FPNavMeshQuery(mesh, null);
+                    new FPNavMeshPathfinder(mesh, q, null);
+                    new FPNavMeshFunnel(mesh, q, null);
+                }, warm, iters);
+                long trioAlloc = MeasureAlloc(() =>
+                {
+                    var q = new FPNavMeshQuery(mesh, null);
+                    new FPNavMeshPathfinder(mesh, q, null);
+                    new FPNavMeshFunnel(mesh, q, null);
+                }, warmup: 2, iterations: 3);
+
+                // SwapNavMesh(mesh) is the rebind a swap performs: it re-extracts the ORCA
+                // obstacles, which is the part D6-(3) says must not run on every rollback bounce.
+                var q0 = new FPNavMeshQuery(mesh, null);
+                var system = new FPNavAgentSystem(
+                    mesh, q0, new FPNavMeshPathfinder(mesh, q0, null),
+                    new FPNavMeshFunnel(mesh, q0, null), null);
+                system.SetAvoidance(new FPNavAvoidance());
+                system.LoadNavMeshObstacles();
+                var mRebind = Measure(() => system.SwapNavMesh(mesh), warm, iters);
+
+                long meshBytes = (long)mesh.VertexCount * sizeof(FPVector3)
+                               + (long)mesh.TriangleCount * sizeof(FPNavMeshTriangle);
+                TestContext.Out.WriteLine(
+                    $"{tris,9} {mQuery.minMs,9:F2} {mTrio.minMs,8:F2} {mRebind.minMs,10:F2} " +
+                    $"{trioAlloc / 1024.0,9:F0} {meshBytes / 1024.0,9:F0}");
+            }
+
+            TestContext.Out.WriteLine("=== P0 (E): Extract allocation — pooled steady state ===");
+            TestContext.Out.WriteLine($"{"tris",9} {"cdt tris",9} {"extract B",10}");
+            foreach (int half in new[] { 40, 80, 120, 160 })
+            {
+                FPNavMesh mesh = BuildGridStage(half);
+                var snapshot = FPNavMeshRebaker.CreateSnapshot(mesh, null, prewarm: false);
+                var ctx = new FPNavMeshRebakeContext(snapshot);
+                var noXs = Array.Empty<long>();
+                var noZs = Array.Empty<long>();
+                var noCons = Array.Empty<int>();
+
+                // Steady state on one pool: every work buffer is already rented at full size, so
+                // anything still allocating is growth the pool does not account for.
+                long bytes = MeasureAlloc(() => FPConstrainedDelaunay.TriangulateFromSnapshot(
+                    snapshot.Cdt, noXs, noZs, 0, noCons, 0, out _, true, null, ctx.Pool),
+                    warmup: 6, iterations: 3);
+                TestContext.Out.WriteLine($"{mesh.Triangles.Length,9} {"-",9} {bytes,10}");
+            }
+        }
+
+        #endregion
 
         [Test]
         public void TriggerGate_SizeScaling_AC0()
@@ -1305,7 +1614,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             // pathfinder and funnel are each sized from the triangle count, and SwapNavMesh
             // re-extracts the ORCA obstacles through LoadNavMeshObstacles.
             //
-            // This exists because Navigation.Rebake.md §7 quotes it. §7 used to carry the rebake
+            // This exists because the published rebake documentation quotes it. That text used to
+            // carry the rebake
             // figure alone under the heading "The cost of placing a building", which reads as
             // "a placement is not a garbage-collection event" — true of the rebake and false of
             // the placement it was standing for. The gate at the bottom is what keeps the
@@ -1419,10 +1729,367 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.Less(fieldSwap, 1024,
                 "installing a rebaked mesh must allocate nothing. Something in the swap path " +
                 "started allocating again — check that the extractor still reads its scratch " +
-                "through the counts rather than through Length, and rewrite §7 if this is intended.");
+                "through the counts rather than through Length, and rewrite the published numbers if "
+                + "this is intended.");
             Assert.Less(fieldSwap * 4, fieldSwapOld,
                 "the rebind should remove most of the swap cost, not shave it — if the gap has " +
                 "narrowed this far, something started allocating per swap again");
+        }
+
+        [Test, Explicit]
+        public void P0F_SliceBudgetCalibration()
+        {
+            // The shipped SliceBudgetUnits starts as a guess; this is what replaces it with a
+            // number. Two things decide it, and only one of them is a choice:
+            //
+            //  - the FLOOR. Some units are indivisible, so no budget makes a step cheaper than the
+            //    largest of them. If that floor already exceeds a frame, slicing cannot deliver on
+            //    this stage at ANY setting, and the honest answer is to say so rather than tune;
+            //  - the CEILING. Whatever is left has to fit in the frames the delay window buys.
+            //
+            // Repeated, minimum reported. A single run of this is worthless — the same
+            // configuration was measured at 3.3 ms and at 18.2 ms minutes apart on an otherwise
+            // idle machine. Minimum rather than mean because interference only ever adds.
+            const int Reps = 5;
+            TestContext.Out.WriteLine("=== P0 F: slice budget calibration (min of " + Reps + ") ===");
+            TestContext.Out.WriteLine(
+                $"{"tris",9} {"budget",9} {"steps",7} {"worst ms",9} {"total ms",9}");
+
+            foreach (int half in new[] { 40, 80, 120, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                int tris = baseMesh.Triangles.Length;
+                FPBuildingRect[] buildings = LatticePlacements(64, half);
+                if (buildings == null)
+                    continue;
+
+                foreach (int budget in new[] { 1000, 5000, 20000, 100000, int.MaxValue })
+                {
+                    double bestWorst = double.MaxValue, bestTotal = double.MaxValue;
+                    int steps = 0;
+
+                    for (int rep = 0; rep < Reps; rep++)
+                    {
+                        // A context per run: the task holds its pool, and a fresh chain keeps the
+                        // measurement about the rebake rather than about how well it patched.
+                        var ctx = FPNavMeshRebaker.CreateContext(baseMesh, null, prewarm: true);
+                        if (!FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var warm, out _))
+                            break;
+                        while (!warm.Step(int.MaxValue)) { }
+                        warm.Install();
+                        ctx.CommitSwap(warm.Result);
+
+                        if (!FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var task, out _))
+                            break;
+
+                        var sw = new System.Diagnostics.Stopwatch();
+                        double worst = 0, total = 0;
+                        int n = 0;
+                        bool done = false;
+                        while (!done)
+                        {
+                            sw.Restart();
+                            done = task.Step(budget);
+                            sw.Stop();
+                            double ms = sw.Elapsed.TotalMilliseconds;
+                            if (ms > worst) worst = ms;
+                            total += ms;
+                            n++;
+                        }
+                        task.Install();
+                        ctx.CommitSwap(task.Result);
+
+                        if (worst < bestWorst) bestWorst = worst;
+                        if (total < bestTotal) bestTotal = total;
+                        steps = n;
+                    }
+
+                    if (steps == 0)
+                        continue;
+                    string b = budget == int.MaxValue ? "whole" : budget.ToString();
+                    TestContext.Out.WriteLine(
+                        $"{tris,9} {b,9} {steps,7} {bestWorst,9:F2} {bestTotal,9:F2}");
+                }
+            }
+
+            TestContext.Out.WriteLine(
+                "worst = the single longest Step, which is what a frame actually feels. A worst "
+                + "that does not fall as the budget falls is an indivisible unit, and no budget "
+                + "reaches it.");
+        }
+
+        [Test]
+        public unsafe void P0G_TwoContextResidentMemory()
+        {
+            // The gate for the boundary cache, which holds two meshes at once
+            // by holding two contexts over ONE snapshot — the snapshot is the expensive half and it
+            // is shared, so the second context costs a pool plus the mesh it keeps live. That is
+            // negligible on Brawler's stage and is NOT obviously negligible on a big one, which is
+            // why this is a gate rather than an assumption.
+            //
+            // Measured after each context has produced and committed once: a pool fills lazily, so
+            // measuring a fresh one would report the cost of a cache that has not started working.
+            TestContext.Out.WriteLine("=== P0 G: second context resident cost (shared snapshot) ===");
+            TestContext.Out.WriteLine(
+                $"{"tris",9} {"1 ctx KB",10} {"2 ctx KB",10} {"delta KB",10} {"mesh KB",9} {"delta/mesh",11}");
+
+            foreach (int half in new[] { 40, 80, 120, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                int tris = baseMesh.Triangles.Length;
+                FPBuildingRect[] buildings = LatticePlacements(64, half);
+                if (buildings == null)
+                    continue;
+
+                var snapshot = FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false);
+
+                var ctxA = new FPNavMeshRebakeContext(snapshot);
+                RunOnce(ctxA, buildings);
+                long oneCtx = GC.GetTotalMemory(true);
+
+                var ctxB = new FPNavMeshRebakeContext(snapshot);
+                RunOnce(ctxB, buildings);
+                long twoCtx = GC.GetTotalMemory(true);
+
+                long meshBytes = (long)baseMesh.VertexCount * sizeof(FPVector3)
+                               + (long)baseMesh.TriangleCount * sizeof(FPNavMeshTriangle);
+                long delta = twoCtx - oneCtx;
+                TestContext.Out.WriteLine(
+                    $"{tris,9} {oneCtx / 1024.0,10:F0} {twoCtx / 1024.0,10:F0} {delta / 1024.0,10:F0} " +
+                    $"{meshBytes / 1024.0,9:F0} {(double)delta / meshBytes,11:F2}");
+
+                GC.KeepAlive(ctxA);
+                GC.KeepAlive(ctxB);
+            }
+
+            TestContext.Out.WriteLine(
+                "delta is the whole price of the second cached mesh: that context's pool plus the "
+                + "one mesh it keeps live. Compare it against mesh KB — anything near 1.0 means the "
+                + "pool is riding along for free and the cost IS the extra mesh.");
+
+            static void RunOnce(FPNavMeshRebakeContext ctx, FPBuildingRect[] buildings)
+            {
+                if (!FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var task, out _))
+                    return;
+                while (!task.Step(int.MaxValue)) { }
+                task.Install();
+                ctx.CommitSwap(task.Result);
+            }
+        }
+
+        [Test, Explicit]
+        public void Step0_PatchPassBreakdown()
+        {
+            // Inside the patch. Its total is known (9.84 ms at 205k after the degeneracy
+            // scan moved to DEBUG); this is the distribution inside it, which decides between
+            // DIVIDING the patch (A) and making it copy less (B).
+            TestContext.Out.WriteLine("=== inside the incremental patch (min of 5) ===");
+
+            var names = System.Enum.GetNames(typeof(FPNavMeshBuildPipeline.PatchPass));
+            int passCount = (int)FPNavMeshBuildPipeline.PatchPass.Count;
+
+            foreach (int half in new[] { 80, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                FPBuildingRect[] buildings = LatticePlacements(64, half);
+                if (buildings == null)
+                    continue;
+
+                var best = new double[passCount];
+                for (int i = 0; i < passCount; i++) best[i] = double.MaxValue;
+
+                for (int rep = 0; rep < 5; rep++)
+                {
+                    var ctx = FPNavMeshRebaker.CreateContext(baseMesh, null, prewarm: true);
+                    ctx.CommitSwap(FPNavMeshRebaker.Rebake(ctx, buildings));   // a chain to patch
+
+                    System.Array.Clear(FPNavMeshBuildPipeline.PatchPassTicks, 0, passCount);
+                    FPNavMeshBuildPipeline.ProfilePatchPasses = true;
+                    FPNavMesh m = FPNavMeshRebaker.Rebake(ctx, buildings);
+                    FPNavMeshBuildPipeline.ProfilePatchPasses = false;
+                    ctx.CommitSwap(m);
+
+                    for (int i = 0; i < passCount; i++)
+                    {
+                        double ms = FPNavMeshBuildPipeline.PatchPassTicks[i]
+                                  * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                        if (ms < best[i]) best[i] = ms;
+                    }
+                }
+
+                double sum = 0;
+                for (int i = 0; i < passCount; i++) sum += best[i];
+                TestContext.Out.WriteLine($"-- tris={baseMesh.Triangles.Length}, measured total {sum:F2} ms");
+                for (int i = 0; i < passCount; i++)
+                    TestContext.Out.WriteLine(
+                        $"   {names[i],-18} {best[i],7:F3} ms  {100.0 * best[i] / sum,5:F1}%");
+            }
+        }
+
+        [Test, Explicit]
+        public void P0F_IsTheFloorTheIncrementalPatch()
+        {
+            // Attribution done at budget 1, which is the only granularity where the tag is
+            // trustworthy: every phase decrements the budget to zero, so no two phases can chain
+            // inside one Step. At budget 1000 the Extract tail, Vertices and Build all run in a
+            // single call and the whole cost lands under whichever phase happened to be current on
+            // entry — which is how an earlier version of this measurement reported a 12.85 ms
+            // "Extract" step that was really the patch.
+            //
+            // The Build phase entry runs, in order: VerifyConformingContract (DEBUG only — absent
+            // here, PRESENT in the Unity editor), CountDegenerate (unconditional, O(triangles)),
+            // then either the incremental patch or the BuildTask constructor. Comparing a patchable
+            // chain against a cold one therefore isolates the patch.
+            TestContext.Out.WriteLine("=== P0 F: what the indivisible Build step is made of (budget 1, min of 2) ===");
+            TestContext.Out.WriteLine($"{"tris",9} {"chain",10} {"Build ms",9} {"patched",8}");
+
+            foreach (int half in new[] { 80, 120, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                FPBuildingRect[] buildings = LatticePlacements(64, half);
+                if (buildings == null)
+                    continue;
+
+                double coldBuild = 0, warmBuild = 0;
+                foreach (bool warmChain in new[] { true, false })
+                {
+                    double best = double.MaxValue;
+                    int patched = 0;
+                    for (int rep = 0; rep < 2; rep++)
+                    {
+                        var ctx = FPNavMeshRebaker.CreateContext(baseMesh, null, prewarm: true);
+                        if (warmChain)
+                        {
+                            if (!FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var warm, out _))
+                                break;
+                            while (!warm.Step(int.MaxValue)) { }
+                            warm.Install();
+                            ctx.CommitSwap(warm.Result);
+                        }
+
+                        var oc = ctx.PatchOutcome;
+                        int inc0 = oc.Incremental;
+                        if (!FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var task, out _))
+                            break;
+
+                        var sw = new System.Diagnostics.Stopwatch();
+                        double build = 0;
+                        bool done = false;
+                        while (!done)
+                        {
+                            bool isBuildEntry = task.PhaseName == "Build";
+                            sw.Restart();
+                            done = task.Step(1);
+                            sw.Stop();
+                            if (isBuildEntry)
+                                build = sw.Elapsed.TotalMilliseconds;
+                        }
+                        task.Install();
+                        ctx.CommitSwap(task.Result);
+                        if (build < best) best = build;
+                        patched = oc.Incremental - inc0;
+                    }
+
+                    if (best == double.MaxValue)
+                        continue;
+                    if (warmChain) warmBuild = best; else coldBuild = best;
+                    TestContext.Out.WriteLine(
+                        $"{baseMesh.Triangles.Length,9} {(warmChain ? "patchable" : "cold"),10} "
+                        + $"{best,9:F2} {patched,8}");
+                }
+
+                if (coldBuild > 0 && warmBuild > 0)
+                    TestContext.Out.WriteLine(
+                        $"{baseMesh.Triangles.Length,9} {"=>",10} CountDegenerate+ctor = {coldBuild:F2} ms, "
+                        + $"patch = {warmBuild - coldBuild:F2} ms of the {warmBuild:F2} ms step");
+            }
+            TestContext.Out.WriteLine(
+                "In the Unity editor VerifyConformingContract and VerifyPatchMatchesFullBuild also "
+                + "run in this phase (both DEBUG-only), the latter rebuilding the entire mesh to "
+                + "compare — editor numbers do not describe a shipped build.");
+        }
+
+        [Test, Explicit]
+        public void P0F_WhichStepIsTheFloor()
+        {
+            // The sweep says the worst step does not shrink with the budget. This says WHICH step
+            // that is, by position: run at budget 1 so every indivisible unit is its own step, then
+            // report the slowest few and where they sit in the sequence. Extract steps come first
+            // and are many; Vertices and BeginBuild are one step each, near the end.
+            TestContext.Out.WriteLine("=== P0 F: where the floor lives ===");
+
+            foreach (int half in new[] { 80, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                FPBuildingRect[] buildings = LatticePlacements(64, half);
+                if (buildings == null)
+                    continue;
+
+                var ctx = FPNavMeshRebaker.CreateContext(baseMesh, null, prewarm: true);
+                if (!FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var warm, out _))
+                    continue;
+                while (!warm.Step(int.MaxValue)) { }
+                warm.Install();
+                ctx.CommitSwap(warm.Result);
+
+                if (!FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var task, out _))
+                    continue;
+
+                var times = new System.Collections.Generic.List<double>();
+                var phases = new System.Collections.Generic.List<string>();
+                var sw = new System.Diagnostics.Stopwatch();
+                bool done = false;
+                while (!done)
+                {
+                    string phase = task.PhaseName;   // what THIS step is about to run
+                    sw.Restart();
+                    done = task.Step(1);
+                    sw.Stop();
+                    times.Add(sw.Elapsed.TotalMilliseconds);
+                    phases.Add(phase);
+                }
+                task.Install();
+                ctx.CommitSwap(task.Result);
+
+                // Second pass over the same shape, keeping the per-step MINIMUM. One pass at this
+                // granularity is a million stopwatch reads competing with whatever else the machine
+                // is doing; the minimum of two is enough to tell a real 13 ms unit from a hiccup.
+                if (FPNavMeshRebaker.TryBeginRebake(ctx, buildings, out var again, out _))
+                {
+                    int j = 0;
+                    bool d2 = false;
+                    while (!d2)
+                    {
+                        sw.Restart();
+                        d2 = again.Step(1);
+                        sw.Stop();
+                        double ms = sw.Elapsed.TotalMilliseconds;
+                        if (j < times.Count && ms < times[j]) times[j] = ms;
+                        j++;
+                    }
+                    again.Install();
+                    ctx.CommitSwap(again.Result);
+                }
+
+                int n = times.Count;
+                double sum = 0;
+                for (int i = 0; i < n; i++) sum += times[i];
+
+                var idx = new int[n];
+                for (int i = 0; i < n; i++) idx[i] = i;
+                System.Array.Sort(idx, (a, b) => times[b].CompareTo(times[a]));
+
+                TestContext.Out.WriteLine(
+                    $"tris={baseMesh.Triangles.Length} steps={n} total={sum:F2}ms");
+                for (int k = 0; k < 5 && k < n; k++)
+                {
+                    int at = idx[k];
+                    string where = at == n - 1 ? " (last)" : at >= n - 3 ? " (near end)" : "";
+                    TestContext.Out.WriteLine(
+                        $"   #{k + 1}: step {at} of {n} = {times[at]:F2} ms"
+                        + $" [{100.0 * times[at] / sum:F1}% of total] entering {phases[at]}{where}");
+                }
+            }
         }
     }
 }

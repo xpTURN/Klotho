@@ -60,7 +60,8 @@ namespace xpTURN.Klotho.Network
             return this;
         }
 
-        /// <summary>Creates a fresh SimulationConfig per room via the supplied factory.</summary>
+        /// <summary>Creates a fresh SimulationConfig per room via the supplied factory.
+        /// <para><inheritdoc cref="WithSimulationConfig(Func{MatchConfigContext, SimulationConfig})" path="/summary/para[1]"/></para></summary>
         public RoomManagerConfigBuilder WithSimulationConfig(Func<SimulationConfig> perRoom)
         {
             _config.SimulationConfigFactory = perRoom ?? throw new ArgumentNullException(nameof(perRoom));
@@ -68,7 +69,20 @@ namespace xpTURN.Klotho.Network
         }
 
         /// <summary>Creates a fresh SimulationConfig per room from the resolved match context
-        /// (stage-specific). Takes precedence over the plain factory when set.</summary>
+        /// (stage-specific). Takes precedence over the plain factory when set.
+        ///
+        /// <para><b>Three fields must be identical in every config this returns:</b>
+        /// <c>MaxEntities</c>, <c>ComponentMaxCountOverrides</c> and the reservation-prune set.
+        /// They are not per-room settings — they define the PROCESS-global component layout
+        /// (<see cref="ECS.ComponentStorageRegistry.EnsureLayoutComputed(int, System.Collections.Generic.IReadOnlyDictionary{int, int}, System.Collections.Generic.IReadOnlyCollection{int})"/>),
+        /// which is frozen by the first room and cannot change while other rooms are live. Vary
+        /// anything else freely — stage id, match payload, tick interval, bot count.</para>
+        ///
+        /// <para>A room whose config disagrees is REFUSED at creation (the peer gets
+        /// RoomNotFound) rather than allowed to reach the registry, because the registry's own
+        /// answers — recompute in editor/test builds, throw in release — are both fatal to a
+        /// process that already has rooms ticking. So the failure mode is a stage that never
+        /// starts, which is quiet: source these three once at bootstrap.</para></summary>
         public RoomManagerConfigBuilder WithSimulationConfig(Func<MatchConfigContext, SimulationConfig> perMatch)
         {
             _config.SimulationConfigFactoryForMatch = perMatch ?? throw new ArgumentNullException(nameof(perMatch));

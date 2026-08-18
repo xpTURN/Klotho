@@ -50,6 +50,9 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             Test16_MT1_NoDoubleDispose();
             Test17_MT2_FastRoomNotMarked();
             Test18_MT3_StragglerGuards();
+            Test19_MismatchedLayoutRefusesRoom();
+            Test20_BudgetCollapseNotAttributed();
+            Test21_StragglerWindowRecovers();
 
             Console.WriteLine($"\n=== Results: {_passed} passed, {_failed} failed ===");
             _loggerFactory.Dispose();
@@ -340,8 +343,10 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             Assert("#16a No ObjectDisposedException over 10 cycles", ok);
             var r0 = env.RoomManager.GetRoom(0);
             var r1 = env.RoomManager.GetRoom(1);
+            // Assert the property, not a number below the threshold — the threshold is a private
+            // constant that has already moved once (10 cumulative → 32 of the last 64).
             Assert("#16b Rooms not force-closed",
-                (r0 == null || r0.StragglerCount < 10) && (r1 == null || r1.StragglerCount < 10));
+                (r0 == null || r0.State != RoomState.Disposing) && (r1 == null || r1.State != RoomState.Disposing));
 
             env.Dispose();
         }
@@ -436,11 +441,175 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             }
         }
 
+        // ── #19: a room whose layout inputs disagree is refused, not admitted ──
+
+        static void Test19_MismatchedLayoutRefusesRoom()
+        {
+            // MaxEntities (with the maxCount overrides and the prune-set) defines the
+            // PROCESS-global component layout, frozen by the first room. The per-room config
+            // factory can nevertheless return a different one, and if that reaches the registry
+            // there is no good outcome: editor/test builds recompute — pulling the layout and the
+            // type-id cache out from under rooms already ticking on workers — and release throws
+            // on a stack whose nearest handler is outside ServerLoop.Run, so one bad room ends the
+            // process and every healthy room with it.
+            //
+            // So the room is refused before construction. Cheap to state, easy to regress: the
+            // guard sits in front of a `new` that looks unconditional.
+            int call = 0;
+            var env = CreateTestEnv(maxRooms: 2, maxPlayersPerRoom: 2, callbacksFactory: null,
+                maxEntitiesFactory: () => ++call == 1 ? 64 : 128);
+
+            var room0 = env.RoomManager.CreateRoom(0);
+            int activeAfterFirst = env.RoomManager.ActiveRoomCount;
+            var room1 = env.RoomManager.CreateRoom(1);
+
+            Assert("#19a First room created", room0 != null && room0.State == RoomState.Active);
+            Assert("#19b Mismatched room refused", room1 == null);
+            Assert("#19c First room untouched", room0.State == RoomState.Active);
+            Assert("#19d ActiveRoomCount unchanged", env.RoomManager.ActiveRoomCount == activeAfterFirst);
+
+            env.Dispose();
+        }
+
+        // ── #20: A-1 — a cycle whose stage-2 budget collapsed does not attribute the straggle ──
+
+        static void Test20_BudgetCollapseNotAttributed()
+        {
+            // (a) Stage 1 overruns → the barrier window collapses → both rooms are still MARKED
+            //     (their workers really are running, and the dispatch/teardown guards need that)
+            //     but neither is BLAMED, because the cycle gave no room a usable window.
+            {
+                var env = CreateTwoSlowRoomsEnv();
+                env.Transport.PollDelayMs = 20;   // 25 - 20 - 2 → budget 3ms: collapsed
+                new ServerLoop(env.Transport, env.RoomManager, 25, _logger).RunCyclesForTest(2, 0.025f);
+
+                var r0 = env.RoomManager.GetRoom(0);
+                var r1 = env.RoomManager.GetRoom(1);
+                Assert("#20a Both marked straggler", r0.IsStraggler && r1.IsStraggler);
+                Assert("#20b Neither attributed", r0.StragglerCount == 0 && r1.StragglerCount == 0);
+                env.Dispose();
+            }
+
+            // (b) Control. Same rooms, healthy budget → still counted. Without this, (a) would pass
+            //     just as well if A-1 had stopped counting altogether.
+            {
+                var env = CreateTwoSlowRoomsEnv();
+                env.Transport.PollDelayMs = 0;    // budget 23ms
+                new ServerLoop(env.Transport, env.RoomManager, 25, _logger).RunCyclesForTest(2, 0.025f);
+
+                Assert("#20c Healthy budget still attributes", env.RoomManager.GetRoom(0).StragglerCount == 1);
+                env.Dispose();
+            }
+
+            // (c) A known limit, asserted so nobody "fixes" it later. When the tick interval is so
+            //     short that the NOMINAL budget is already at the floor, A-1 degrades to a no-op and
+            //     force-close keeps working. Suppressing here instead — which a tick-cost-only
+            //     predicate would do, since 5-2=3ms is under any room's window — would disable
+            //     force-close for that configuration outright, at zero poll cost.
+            {
+                var env = CreateTwoSlowRoomsEnv();
+                env.Transport.PollDelayMs = 20;   // budget bottoms out at 1ms …
+                new ServerLoop(env.Transport, env.RoomManager, 5, _logger).RunCyclesForTest(2, 0.025f);
+
+                Assert("#20d Short tick interval still attributes", env.RoomManager.GetRoom(0).StragglerCount == 1);
+                env.Dispose();
+            }
+        }
+
+        // ── #21: C — the straggle window decays on a room's own clean cycles ──
+
+        static void Test21_StragglerWindowRecovers()
+        {
+            var env = CreateTestEnv(maxRooms: 2, maxPlayersPerRoom: 2);
+            var room = env.RoomManager.CreateRoom(0);
+
+            // A burst is remembered …
+            for (int i = 0; i < 20; i++) room.MarkStraggler(true);
+            Assert("#21a Burst counted", room.StragglerCount == 20);
+
+            // … and clean cycles do not forgive it on the spot, only once it leaves the window.
+            for (int i = 0; i < 20; i++) room.NoteCleanCycle();
+            Assert("#21b Still inside the window", room.StragglerCount == 20);
+            for (int i = 0; i < Room.StragglerWindowCycles - 20; i++) room.NoteCleanCycle();
+            Assert("#21c Shifted out of the window", room.StragglerCount == 0);
+
+            // A suppressed straggle is still a straggle — it just leaves no evidence behind.
+            room.MarkStraggler(false);
+            Assert("#21d Suppressed leaves the window untouched", room.StragglerCount == 0 && room.IsStraggler);
+
+            // Recovery must not have disarmed force-close: sustained missing still reaches it.
+            for (int i = 0; i < 32; i++) room.MarkStraggler(true);
+            Assert("#21e Sustained straggling still reaches the threshold", room.StragglerCount >= 32);
+
+            // What the threshold now means is a RATE. 50% reaches it, 25% settles well clear of it —
+            // this is the whole of what the older cumulative policy was traded for.
+            Assert("#21f 50% reaches the threshold", SteadyState(room, straggle: 1, clean: 1) >= 32);
+            Assert("#21g 25% stays clear", SteadyState(room, straggle: 1, clean: 3) < 32);
+
+            env.Dispose();
+
+            // End to end: ServerLoop really drives both halves, not just the marking one.
+            const int maxPlayers = 2;
+            SlowRoomCallbacks slow = null;
+            var env2 = CreateTestEnv(maxRooms: 1, maxPlayersPerRoom: maxPlayers,
+                log => slow = new SlowRoomCallbacks(
+                    new BrawlerServerCallbacks(log, _sharedStaticColliders, _sharedNavMesh, maxPlayers, 0), 50));
+            var r = env2.RoomManager.CreateRoom(0);
+            SimulatePeerJoin(env2, 230, 0); SimulatePeerJoin(env2, 231, 0);
+            r.Update(0.025f); r.Engine.Start();
+
+            var loop = new ServerLoop(env2.Transport, env2.RoomManager, 25, _logger);
+            loop.RunCyclesForTest(8, 0.025f);
+            int afterSlow = r.StragglerCount;
+
+            slow.Delay.DelayMs = 0;   // the room stops being slow; nothing else changes
+
+            // Wall time has to be given explicitly here. A cycle with no ready room costs nothing, so
+            // spinning ExecuteCycle does not let the last slow worker finish — and until it does, the
+            // room stays marked and is never dispatched again. That would freeze the test, not the loop.
+            for (int spin = 0; spin < 500 && !r.UpdateComplete; spin++) Thread.Sleep(1);
+            loop.RunCyclesForTest(Room.StragglerWindowCycles + 16, 0.025f);
+
+            Assert($"#21h Loop attributed the slow phase (count={afterSlow})", afterSlow >= 1);
+            Assert("#21i Loop recovered it once the room ran clean", r.StragglerCount == 0);
+
+            env2.Dispose();
+        }
+
+        /// <summary>Clears the window, then runs a straggle:clean pattern long enough to fill it.</summary>
+        static int SteadyState(Room room, int straggle, int clean)
+        {
+            for (int i = 0; i < Room.StragglerWindowCycles; i++) room.NoteCleanCycle();
+            for (int rep = 0; rep < Room.StragglerWindowCycles; rep++)
+            {
+                for (int s = 0; s < straggle; s++) room.MarkStraggler(true);
+                for (int c = 0; c < clean; c++) room.NoteCleanCycle();
+            }
+            return room.StragglerCount;
+        }
+
+        /// <summary>Two rooms, both slow enough (50ms) to overrun any stage-2 budget, both ticking.</summary>
+        static TestEnvironment CreateTwoSlowRoomsEnv()
+        {
+            const int maxPlayers = 2;
+            var env = CreateTestEnv(maxRooms: 2, maxPlayersPerRoom: maxPlayers,
+                log => new SlowRoomCallbacks(
+                    new BrawlerServerCallbacks(log, _sharedStaticColliders, _sharedNavMesh, maxPlayers, 0), 50));
+            var room0 = env.RoomManager.CreateRoom(0);
+            var room1 = env.RoomManager.CreateRoom(1);
+            SimulatePeerJoin(env, 220, 0); SimulatePeerJoin(env, 221, 0);
+            SimulatePeerJoin(env, 222, 1); SimulatePeerJoin(env, 223, 1);
+            room0.Update(0.025f); room0.Engine.Start();
+            room1.Update(0.025f); room1.Engine.Start();
+            return env;
+        }
+
         static TestEnvironment CreateTestEnv(int maxRooms, int maxPlayersPerRoom)
             => CreateTestEnv(maxRooms, maxPlayersPerRoom, null);
 
         static TestEnvironment CreateTestEnv(int maxRooms, int maxPlayersPerRoom,
-            Func<IKLogger, ISimulationCallbacks> callbacksFactory)
+            Func<IKLogger, ISimulationCallbacks> callbacksFactory,
+            Func<int> maxEntitiesFactory = null)
         {
             EnsureSharedTestData();
 
@@ -459,7 +628,10 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
                 {
                     Mode = NetworkMode.ServerDriven,
                     TickIntervalMs = tickIntervalMs,
-                    MaxEntities = 64,
+                    // Per ROOM by construction, process-global by contract — which is the whole
+                    // point of #19: a factory is free to vary this, and nothing but RoomManager's
+                    // refusal stands between that freedom and a recompute under live rooms.
+                    MaxEntities = maxEntitiesFactory?.Invoke() ?? 64,
                     MaxRollbackTicks = 1,
                     SyncCheckInterval = 1,
                     UsePrediction = false,
@@ -546,11 +718,13 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
     /// </summary>
     sealed class DelaySystem : xpTURN.Klotho.ECS.ISystem
     {
-        private readonly int _delayMs;
-        public DelaySystem(int delayMs) { _delayMs = delayMs; }
+        // Settable so a test can stop a room being slow mid-run — the only way to observe recovery,
+        // which by construction needs the same room to straggle and then complete cleanly.
+        public int DelayMs;
+        public DelaySystem(int delayMs) { DelayMs = delayMs; }
         public void Update(ref xpTURN.Klotho.ECS.Frame frame)
         {
-            if (_delayMs > 0) System.Threading.Thread.Sleep(_delayMs);
+            if (DelayMs > 0) System.Threading.Thread.Sleep(DelayMs);
         }
     }
 
@@ -562,11 +736,16 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
     {
         private readonly ISimulationCallbacks _inner;
         private readonly int _delayMs;
+
+        /// <summary>The system this wrapper registered, so a test can retune the delay afterwards.</summary>
+        public DelaySystem Delay { get; private set; }
+
         public SlowRoomCallbacks(ISimulationCallbacks inner, int delayMs) { _inner = inner; _delayMs = delayMs; }
         public void RegisterSystems(xpTURN.Klotho.ECS.EcsSimulation simulation)
         {
             _inner.RegisterSystems(simulation);
-            simulation.AddSystem(new DelaySystem(_delayMs), xpTURN.Klotho.ECS.SystemPhase.Update);
+            Delay = new DelaySystem(_delayMs);
+            simulation.AddSystem(Delay, xpTURN.Klotho.ECS.SystemPhase.Update);
         }
         public void OnInitializeWorld(IKlothoEngine engine) => _inner.OnInitializeWorld(engine);
         public void OnPollInput(int playerId, int tick, ICommandSender sender) => _inner.OnPollInput(playerId, tick, sender);
@@ -660,7 +839,14 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
 
         public IEnumerable<int> GetConnectedPeerIds() => System.Linq.Enumerable.Empty<int>();
 
-        public void PollEvents() { }
+        /// <summary>
+        /// Wall-time the main-thread receive stage burns. ServerLoop derives its stage-2 budget from
+        /// the MEASURED poll elapsed, so this is the only way a test can drive that budget down the
+        /// way a real stall does (room construction, GC pause, poll storm).
+        /// </summary>
+        public int PollDelayMs { get; set; }
+
+        public void PollEvents() { if (PollDelayMs > 0) Thread.Sleep(PollDelayMs); }
         public void FlushSendQueue() { }
         public bool Listen(string address, int port, int maxConnections) => true;
         public bool Connect(string address, int port) => true;

@@ -209,21 +209,36 @@ namespace Brawler
         }
 
         /// <summary>
-        /// Swaps the rebaked mesh into the agent system
-        /// and reseeds every current NavAgent. Entities are RE-COLLECTED from the frame here —
-        /// the cached _navEntities may be last tick's stale set (command phase runs before Update).
-        /// Runs in the command phase = before agent Update = the tick-boundary swap contract.
+        /// How many times agents have been reseeded. Peer-local and outside frame state.
         ///
-        /// <para>For the COMMAND path only (place / remove). Every peer executes that command on
-        /// the same tick, so every peer reseeds — the write to hashed NavAgent state is symmetric,
-        /// and it is necessary: the corridor holds triangle indices into the mesh being replaced.
-        /// The FullState path is the opposite on both counts — see <see cref="SwapForRestoredState"/>.</para>
+        /// <para>Counted HERE rather than at the caller, and that placement is the whole point: the
+        /// failure it exists for is reseeding twice for one swap, and a counter at the
+        /// caller increments once either way. It is also the failure no hash can see — every peer
+        /// doing it twice agrees perfectly, and is equally wrong.</para>
         /// </summary>
-        public void SwapAndReseed(ref Frame frame, FPNavMesh newMesh)
+        public int ReseedCount { get; private set; }
+
+        /// <summary>
+        /// Reseeds the agents against the mesh ALREADY installed, without swapping.
+        ///
+        /// <para>Separate from the swap because the two halves answer to different masters.
+        /// Installing a mesh is derived state — skippable when the right one is already in place.
+        /// Reseeding WRITES HASHED FRAME STATE, so it has to run every time the tick that owns it
+        /// executes, including every re-execution after a rollback.</para>
+        ///
+        /// <para>Fusing them made the write conditional on a peer-local comparison that does not
+        /// roll back, and a boundary tick re-executed after its mesh was already installed skipped
+        /// the reseed entirely. That is the divergence three live matches produced:
+        /// the server reseeded once and kept the result, the client re-executed the boundary and
+        /// the last pass left the agent with the triangle index it had before the swap. The core
+        /// helper now carries that split as two names, so it cannot be fused by accident.</para>
+        /// </summary>
+        public void ReseedOnly(ref Frame frame)
         {
-            int count = SwapCore(ref frame, newMesh);
-            _navSystem.ReseedAgents(ref frame, _navEntities, count);
-            frame.Logger?.KInformation($"[BotFSMSystem] navmesh swapped + reseeded {count} agents (tick={frame.Tick})");
+            ReseedCount++;
+            _navEntityCount = FPNavAgentInstaller.Reseed(ref frame, _navSystem, ref _navEntities);
+            frame.Logger?.KInformation(
+                $"[BotFSMSystem] boundary reseed: {_navEntityCount} agent(s) (tick={frame.Tick})");
         }
 
         /// <summary>
@@ -246,41 +261,17 @@ namespace Brawler
         /// index and corridor are valid on it. If the rebake did NOT reproduce it — a build or
         /// asset mismatch — reseeding would not repair anything either; it would just pick a
         /// different wrong answer, and the engine's nav fingerprint is what surfaces that.</para>
+        ///
+        /// <para>The re-collection inside the helper is load-bearing: Pass 3 and Pass 4 of
+        /// <see cref="Update"/> run on the post-swap set, and both paths have to agree on the
+        /// COUNT — a peer reseeding fewer agents than another is a desync, not a glitch.</para>
         /// </summary>
         public void SwapForRestoredState(ref Frame frame, FPNavMesh newMesh)
         {
-            int count = SwapCore(ref frame, newMesh);
+            _navEntityCount = FPNavAgentInstaller.Swap(
+                ref frame, _navSystem, newMesh, ref _navEntities);
             frame.Logger?.KInformation(
-                $"[BotFSMSystem] navmesh swapped for restored state, {count} agent(s) left as restored (tick={frame.Tick})");
-        }
-
-        /// <summary>Rebinds the mesh and re-collects the agent set. Returns the agent count.</summary>
-        private int SwapCore(ref Frame frame, FPNavMesh newMesh)
-        {
-            // Rebinds the query/pathfinder/funnel the agent system already holds instead of
-            // building new ones — on a Field-sized stage that is ~1.4 MB a placement. _query needs
-            // no reassignment either: the instance survives, so the reference SetQuery handed us
-            // at load stays valid for the life of the room.
-            _navSystem.SwapNavMesh(newMesh);
-
-            // Grow rather than truncate. The Update path grows through EnsureNavCapacity, so a
-            // `break` here made the two paths disagree about how many agents exist — and the
-            // agents past the cut would keep a CurrentTriangleIndex and corridor that index the
-            // OLD mesh, which is precisely what the command path's reseed exists to prevent.
-            //
-            // The asymmetry bites hardest on the post-fullstate swap: that peer may not have run
-            // a single Update yet, so the array is still at its initial size while the authority
-            // (which has been running Updates) already grew. Both fields live in the hashed frame
-            // state, so a peer reseeding fewer agents than another is a desync, not a glitch.
-            int count = 0;
-            var filter = frame.Filter<NavAgentComponent>();
-            while (filter.Next(out var entity))
-            {
-                EnsureNavCapacity(count + 1);
-                _navEntities[count++] = entity;
-            }
-            _navEntityCount = count;
-            return count;
+                $"[BotFSMSystem] navmesh installed, {_navEntityCount} agent(s) left as restored — no reseed here (tick={frame.Tick})");
         }
 
         // Brawler registers the agent system only through this wrapper, so the
@@ -310,7 +301,16 @@ namespace Brawler
         // match-config check at load is still the right instrument.
         long IGameFingerprintSource.GetGameFingerprint()
         {
-            return unchecked((long)BrawlerBuildingShapes.Catalog.Hash);
+            // The shape catalog and the build delay: two inputs that decide the navmesh (what is
+            // carved, and on which tick) while no state hash covers either. A build-to-build
+            // mismatch in either one produces peers that agree on every component and disagree on
+            // the mesh — so they are folded here, where a joiner's FullState surfaces it.
+            unchecked
+            {
+                long h = (long)BrawlerBuildingShapes.Catalog.Hash;
+                h = (h * 0x100000001B3L) ^ PlatformerCommandSystem.BuildDelayTicks;
+                return h;
+            }
         }
 
         void INavAgentSnapshotProvider.CollectSnapshots(NavAgentSnapshot[] buffer, out int count)
@@ -459,7 +459,7 @@ namespace Brawler
             //     BotComponent holders (Pass 2), so a non-zero count already means a bot exists,
             //     and the fallback's `else` branch could never be taken.
             //   - the rebake's swap landed mid-Update rather than before the agents move, which is
-            //     the tick-boundary contract SwapAndReseed documents for itself.
+            //     the tick-boundary contract the swap path documents for itself.
             // The swap re-collects _navEntities, so Pass 3 and Pass 4 below run on the post-swap
             // set instead of one that indexes the mesh that was just replaced.
             RunBuildingDemo(ref frame);
@@ -588,8 +588,9 @@ namespace Brawler
         {
             if (required <= _navEntities.Length) return;
             // Double UNTIL it fits, not once: the callers that grow by one at a time were fine
-            // with a single doubling, but a caller asking for a bulk count (SwapAndReseed) would
-            // silently get a still-too-small array and write past it.
+            // with a single doubling, but a caller asking for a bulk count would silently get a
+            // still-too-small array and write past it. FPNavAgentInstaller.Collect uses the same
+            // policy for the same reason — the two grow this array and must not disagree.
             int newSize = _navEntities.Length;
             while (newSize < required)
                 newSize *= 2;

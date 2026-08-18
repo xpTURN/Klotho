@@ -207,9 +207,16 @@ namespace Brawler
             simulation.Frame.Prototypes.Register(ItemPickupPrototype.Id, new ItemPickupPrototype());
 
             var events = new EventSystem();
+            // The seam, not a system: it answers the driver's callbacks (placement table, destroy,
+            // install, reseed) and owns the command path's validator over that same table. The
+            // DRIVER is what gets registered.
+            var navMeshPlacementSeam = new NavMeshEffectiveTickSystem();
+            navMeshPlacementSeam.SetContext(rebakeContext, botFSMSystem);
+
             var platformerCommandSystem = new PlatformerCommandSystem(events);
             // Building command context (null snapshot = placement unavailable on this stage).
-            platformerCommandSystem.SetRebakeContext(rebakeContext, botFSMSystem);
+            platformerCommandSystem.SetRebakeContext(
+                rebakeContext, botFSMSystem, navMeshPlacementSeam.Validator);
 
             if (botFSMSystem != null)
             {
@@ -217,10 +224,24 @@ namespace Brawler
                 botFSMSystem.SetShapeExpansion(rebakeContext?.ShapeExpansion);
             }
 
-            // PreUpdate — bots, then command processing.
+            // PreUpdate — navmesh invariant, then bots, then command processing.
             // PreviousPosition / PreviousRotation are captured by the engine built-in pass.
+            //
+            // Order within a phase IS registration order. The driver goes first because it is what
+            // makes the navmesh agree with the frame, and every system after it reads that mesh —
+            // running it later would mean this tick's bots and agents pathed on the previous set.
             if (botFSMSystem != null)
+            {
+                // Both or neither: the driver installs THROUGH BotFSMSystem, so without it there is
+                // nothing for it to install into and it would idle every tick.
+                //
+                // Registered by its own core type rather than behind a game wrapper — that is what
+                // lets the engine discover it (GetSystem<FPNavMeshRebakeDriver>), which is the seam
+                // through which the engine — rather than every game repeating it — can wire the
+                // frame heartbeat and the invariant corrections.
+                simulation.AddSystem(navMeshPlacementSeam.Driver, SystemPhase.PreUpdate);
                 simulation.AddSystem(botFSMSystem, SystemPhase.PreUpdate);
+            }
             simulation.AddSystem(platformerCommandSystem, SystemPhase.PreUpdate);
 
             // Update — simulation systems

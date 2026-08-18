@@ -368,6 +368,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.Greater(checkedSets, 20, "too few placeable sets to say anything");
         }
 
+#if DEBUG
+        // DEBUG-only because the counter is: DegenerateCompactions is a process-global with no
+        // interlock, so it is compiled out of release builds rather than shipped as a number
+        // nobody can trust. The assertion below is about geometry, not about the build
+        // configuration — it reaches the same verdict in either, so Debug coverage is the whole
+        // coverage.
         [Test]
         public void DegenerateCompactionNeverFiresHere_SoTheDiffNeverMeetsIt()
         {
@@ -417,6 +423,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 + "the incremental diff runs on the compacted array and that interaction is now "
                 + "reachable and untested");
         }
+#endif
 
         [Test]
         public void PatchRuns_AndAgreesWithTheFullPath_AsBuildingsComeAndGo()
@@ -496,6 +503,64 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
             Assert.AreEqual(viaNothing, viaEight, "0→32 and 0→8→32 must land on the same mesh");
             Assert.Greater(stepwise.PatchOutcome.Incremental, 0, "the stepwise run must have patched");
+        }
+
+        /// <summary>
+        /// The live-match shape of a rollback, compared ELEMENT-WISE.
+        ///
+        /// <para>A dedicated-server match produced a desync verdict on the tick after EVERY navmesh
+        /// swap — seven for seven — with both clients reporting identical hashes and the server
+        /// disagreeing. The only structural difference between them is this: the server never rolls
+        /// back, so its mesh is always the forward patch, while a client around a swap boundary
+        /// corrects backwards to the previous set and then forwards again, repeatedly (the match log
+        /// shows about ten such cycles per boundary).</para>
+        ///
+        /// <para><c>Rollback_PreviousMeshMayBeAFutureThatDidNotHappen</c> already walks that shape
+        /// but compares FINGERPRINTS, and the fingerprint deliberately does not cover neighbours,
+        /// portals or the grid — precisely the fields a patch can get wrong. So it would pass on a
+        /// mesh that steers agents differently. This repeats the walk and compares every element.</para>
+        /// </summary>
+        [Test]
+        public void RepeatedBackAndForthPatching_MatchesAFromScratchBuild_ElementByElement()
+        {
+            // Jittered, and that is not decoration: the match this reproduces placed HEX shapes,
+            // which never land on integer coordinates, and the boundary-gain edge source in the
+            // patch is documented to fire only at sub-unit offsets. An axis-aligned fixture passes
+            // this while saying nothing about the case that actually ran.
+            foreach (long jitter in new long[] { 0, 1, 7, 33, 129 })
+                RunBackAndForth(jitter);
+        }
+
+        private static void RunBackAndForth(long jitter)
+        {
+            FPNavMesh baseMesh = BuildBase();
+            FPBuildingRect[] none = null;
+            FPBuildingRect[] one = Buildings(1, jitter);
+
+            // The reference: what a peer that never patched holds.
+            FPNavMesh reference = FPNavMeshRebaker.Rebake(
+                FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false), one, null);
+
+            // The client: forward to the new set, back to the old, forward again — ten times, which
+            // is what the match log showed around one boundary.
+            var ctx = new FPNavMeshRebakeContext(FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false));
+            FPNavMesh mesh = FPNavMeshRebaker.Rebake(ctx, none);
+            ctx.CommitSwap(mesh);
+
+            for (int cycle = 0; cycle < 10; cycle++)
+            {
+                mesh = FPNavMeshRebaker.Rebake(ctx, one);
+                ctx.CommitSwap(mesh);
+                Assert.IsNull(FPNavMeshBuildPipeline.DescribeFirstDifference(mesh, reference),
+                    $"jitter {jitter}, cycle {cycle}: the mesh a rolled-back client arrives at "
+                    + "differs from the one a peer that never rolled back holds. The fingerprints "
+                    + "can still match — that is why this compares elements");
+
+                FPNavMesh back = FPNavMeshRebaker.Rebake(ctx, none);
+                ctx.CommitSwap(back);
+            }
+
+            Assert.Greater(ctx.PatchOutcome.Incremental, 0, "nothing patched — the fixture is not testing the patch");
         }
 
         [Test]

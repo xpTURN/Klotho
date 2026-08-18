@@ -37,10 +37,19 @@ namespace Brawler
         FPNavMeshRebakeContext _rebakeContext;
         BotFSMSystem _botFSM;
 
-        public void SetRebakeContext(FPNavMeshRebakeContext context, BotFSMSystem botFSM)
+        // The active-set derivation, the canonical order and the two audits that make that order
+        // safe now live in the core (FPNavMeshPlacementValidator) over the SAME table the driver
+        // reads. This system used to carry its own copy of all of it — and a copy of two audits
+        // whose whole reason for existing is that a game is expected to get the derivation wrong.
+        FPNavMeshPlacementValidator _validator;
+
+        public void SetRebakeContext(
+            FPNavMeshRebakeContext context, BotFSMSystem botFSM,
+            FPNavMeshPlacementValidator validator = null)
         {
             _rebakeContext = context;
             _botFSM = botFSM;
+            _validator = validator;
         }
 
         public PlatformerCommandSystem(EventSystem events)
@@ -444,24 +453,26 @@ namespace Brawler
         // every building that can exist in the frame and sizes off BuildingSlotCapacity instead.
         const int MaxBuildings = 32;
 
-        // Scratch for the collect-then-rebake path. Both are exactly MaxBuildings-sized and both
-        // are fully overwritten by CollectBuildings before anything reads them, so one instance per
-        // system serves every placement and removal. The +1 is the slot the new building is
-        // appended into before the cap check rejects an overflow.
-        //
-        // Worth doing in a SAMPLE specifically: the engine side of this went to some length to make
-        // a rebake allocation-free (FPNavMeshRebakeBufferPool, measured at 4,536 B for a rebake on
-        // Field), and an example that allocates right in front of it teaches the opposite habit.
-        // Two arrays rather than sharing the larger one, deliberately. CollectBuildings takes its
-        // truncation threshold from buffer.Length, so handing the removal path a MaxBuildings + 1
-        // buffer would silently give it a cap of 33 — a capacity arrived at by accident of sharing
-        // rather than derived from the rule, which is the exact confusion C-6 was about.
-        readonly FPBuildingPlacement[] _placeScratch = new FPBuildingPlacement[MaxBuildings + 1];
-        readonly FPBuildingPlacement[] _removeScratch = new FPBuildingPlacement[MaxBuildings];
-
-        // CollectBuildings sorts `buffer` by this, so it is per-call scratch of the same shape.
-        // Sized to the larger of the two so either caller can pass it.
-        readonly int[] _collectOrder = new int[MaxBuildings + 1];
+        /// <summary>
+        /// Ticks between a placement being accepted and the navmesh changing — the build time, as
+        /// a game-design number rather than a derived one.
+        ///
+        /// <para>Deriving it from the rebake's work would put a performance figure into the
+        /// determinism envelope: the swap tick is frame state, so every peer has to agree on it,
+        /// and a work estimate is not something the wire carries. A constant sidesteps that
+        /// entirely — pacing the slices is then a purely local matter.</para>
+        ///
+        /// <para><b>It must exceed MaxRollbackTicks</b> (50 by default), for two reasons that
+        /// happen to give the same bound. A client only learns of a placement when it re-executes
+        /// the verified tick, by which point its own head is already lead ticks ahead, so a delay
+        /// inside that window buys no slicing room at all. And with consecutive swap boundaries at
+        /// least K apart, no rollback window can contain two of them — which is what lets the
+        /// derived cache hold exactly two mesh states instead of a history.</para>
+        ///
+        /// <para>Folded into the game fingerprint (BotFSMSystem): no state hash covers it, so two
+        /// builds disagreeing here would swap on different ticks and diverge quietly.</para>
+        /// </summary>
+        public const int BuildDelayTicks = 60;
 
         /// <summary>
         /// Engine storage bound for <see cref="BuildingComponent"/>, read from the frozen layout
@@ -543,102 +554,6 @@ namespace Brawler
             _events.Enqueue(rejectEvt);
         }
 
-        /// <summary>
-        /// Collects all buildings in canonical order — the rebake input has to be a function of the
-        /// frame, not of entity iteration order. Public static: reused by the join-rebake hook.
-        ///
-        /// <para>Ordered by <see cref="BuildingComponent.Sequence"/>, i.e. by when each building
-        /// was placed. Sorting by centre would be just as deterministic and much slower in
-        /// practice — see the remarks on that field.</para>
-        /// </summary>
-        /// <param name="orderScratch">
-        /// Optional caller-owned scratch for the sort keys, at least <c>buffer.Length</c> long. The
-        /// command paths pass one so a placement allocates nothing here; callers that do not care
-        /// (tests, the join path) can omit it and get a fresh array.
-        /// </param>
-        public static int CollectBuildings(
-            ref Frame frame, FPBuildingPlacement[] buffer, EntityRef skip = default,
-            int[] orderScratch = null)
-        {
-            int[] order = orderScratch != null && orderScratch.Length >= buffer.Length
-                ? orderScratch
-                : new int[buffer.Length];
-            int count = 0;
-            int eligible = 0;
-            var filter = frame.Filter<BuildingComponent>();
-            while (filter.Next(out var entity))
-            {
-                // "skip this one" and "the buffer is full" used to share a `continue`, which made a
-                // truncation indistinguishable from an intentional skip and returned a count that
-                // looked complete. Separated so the overflow can be counted and reported.
-                if (entity == skip)
-                    continue;
-                eligible++;
-                if (count >= buffer.Length)
-                    continue;
-                ref readonly var b = ref frame.GetReadOnly<BuildingComponent>(entity);
-                order[count] = b.Sequence;
-                buffer[count++] = new FPBuildingPlacement(
-                    b.ShapeId, b.Orientation, b.Centre.x, b.Centre.z, b.Centre.y);
-            }
-
-            // Sizing the callers correctly is what actually prevents truncation; this is the audit
-            // on top, in the shape SwapAndReseed/ReseedAgents already established. It has to be
-            // loud because the damage is silent: the dropped buildings are missing from the rebake
-            // input, so this peer's navmesh disagrees with everyone else's while the STATE hash
-            // still matches — no existing check would ask why.
-            if (eligible > count)
-            {
-                frame.Logger?.KError(
-                    $"[Building] CollectBuildings truncated at tick={frame.Tick}: the frame holds {eligible} " +
-                    $"building(s) but the caller's buffer fits {buffer.Length}. The rest are missing from the " +
-                    $"rebake input — size the buffer from BuildingSlotCapacity (join path) or MaxBuildings " +
-                    $"(command paths), never a literal.");
-            }
-
-            // Array.Sort is introsort, which is NOT stable. That is fine here only because the
-            // keys are unique: NextBuildingSequence hands out max + 1, strictly above every live
-            // Sequence, so no two buildings in a frame can share one. Uniqueness is therefore
-            // load-bearing rather than incidental — with a tie, introsort's output depends on the
-            // pre-sort order, which here is entity iteration order, and the rebake input stops
-            // being a function of the frame.
-            System.Array.Sort(order, buffer, 0, count);
-
-            // Which is why this is loud rather than a comment. A game copying this sample is very
-            // likely to number buildings its own way — per owner, or reusing a freed slot's number
-            // — and a duplicate then desyncs instead of misbehaving: every peer sorts its own
-            // iteration order, the navmeshes diverge, and the STATE hash still matches because the
-            // components are identical. Nothing else would ask why. Sorted keys put duplicates
-            // next to each other, so finding them is one pass over at most a few dozen entries.
-            for (int i = 1; i < count; i++)
-            {
-                if (order[i] != order[i - 1])
-                    continue;
-                frame.Logger?.KError(
-                    $"[Building] CollectBuildings found duplicate Sequence {order[i]} at tick={frame.Tick}. " +
-                    $"The sort is unstable, so the rebake input now depends on entity iteration order and " +
-                    $"peers will carve different navmeshes from identical state. Sequence must be unique " +
-                    $"among live buildings — assign it as one past the highest, never reuse a freed number.");
-                break;
-            }
-            return count;
-        }
-
-        /// <summary>One past the highest sequence in the current set — a function of frame state,
-        /// so a rollback re-execution computes the same value.</summary>
-        static int NextBuildingSequence(ref Frame frame)
-        {
-            int max = -1;
-            var filter = frame.Filter<BuildingComponent>();
-            while (filter.Next(out var entity))
-            {
-                ref readonly var b = ref frame.GetReadOnly<BuildingComponent>(entity);
-                if (b.Sequence > max)
-                    max = b.Sequence;
-            }
-            return max + 1;
-        }
-
         void HandlePlaceBuilding(ref Frame frame, PlaceBuildingCommand cmd)
         {
             // Both indices arrive from the network, so both are untrusted. Checked here rather than
@@ -685,35 +600,38 @@ namespace Brawler
                 return;
             }
 
-            FPBuildingPlacement[] buffer = _placeScratch;
-            int count = CollectBuildings(ref frame, buffer, default, _collectOrder);
+            // Validated against the set as it will be WHEN THIS LANDS, not as it is now. Checking
+            // against the present set would let two buildings queued in the same window pass
+            // without seeing each other, and both would then land on a mesh that rejects the
+            // pair — a rejection with no command to refuse, arriving after the placement was
+            // already reported as accepted.
+            int effectiveTick = frame.Tick + BuildDelayTicks;
+
+            // The survey derives the set live at effectiveTick, orders it canonically and runs the
+            // two audits — one implementation, shared with the driver, so what this accepts is by
+            // construction what the driver will bake.
+            int count = _validator.Survey(ref frame, effectiveTick);
+
+            // The policy cap goes BETWEEN the survey and the trial rebake: refusing "you already
+            // have 32" must not pay for a rebake first. A separate concept from the engine STORAGE
+            // cap the survey's buffers are sized from.
             if (count >= MaxBuildings)
             {
                 RejectBuilding(ref frame, cmd, $"building cap reached ({MaxBuildings})");
                 return;
             }
-            // Appended, not re-sorted: CollectBuildings already returned the existing set in
-            // placement order and this one is the newest, so the end is where it belongs. Keeping
-            // it there is what lets the rebaker patch instead of rebuild — see
-            // BuildingComponent.Sequence.
-            buffer[count++] = new FPBuildingPlacement(
-                shapeId, orientation, centre.x, centre.z, centre.y);
 
-            // The scratch goes in as-is with its live count. Trimming to an exact-size copy first
-            // is what the array-length-is-the-count reading used to force, and it put one array per
-            // placement on the heap right in front of a rebaker built to allocate nothing.
-            //
             // A refused placement comes back as a VALUE — it is the normal outcome of a player
             // pointing somewhere they cannot build. A malformed request still throws, and that
             // catch stays: a stale shape id is this code's bug, and reporting it as "you cannot
             // build there" would show a developer error to the player on every peer at once.
-            FPNavMesh newMesh;
+            var candidate = new FPBuildingPlacement(
+                shapeId, orientation, centre.x, centre.z, centre.y);
             FPBuildingRejectionInfo rejection;
             try
             {
-                if (!FPNavMeshRebaker.TryRebakePlacements(
-                        _rebakeContext, buffer, out newMesh, out rejection,
-                        frame.Logger, PlacementRules, count))
+                if (!_validator.TryPreviewWith(
+                        _rebakeContext, candidate, out rejection, frame.Logger))
                 {
                     RejectBuilding(ref frame, cmd, Describe(rejection));
                     return;
@@ -729,14 +647,24 @@ namespace Brawler
             frame.Add(entity, new BuildingComponent
             {
                 Centre = centre, ShapeId = shapeId, Orientation = orientation,
-                OwnerSlot = cmd.PlayerId, Sequence = NextBuildingSequence(ref frame),
+                OwnerSlot = cmd.PlayerId, Sequence = _validator.NextSequence,
+                EffectiveTick = effectiveTick,
+                RemovalEffectiveTick = int.MaxValue,
             });
-            _botFSM.SwapAndReseed(ref frame, newMesh);
-            // The swap has happened — only now may the mesh it replaced be recycled.
-            _rebakeContext.CommitSwap(newMesh);
+            // The component IS the whole outcome. Nothing swaps here: this tick may be a client
+            // prediction that a rollback throws away, and the navmesh does not roll back with the
+            // frame — a swap performed here would survive the rewind and the re-executed ticks
+            // would run against a mesh their own frame does not describe.
+            //
+            // NavMeshEffectiveTickSystem installs the mesh on the tick the component says, deriving
+            // it from the frame, so a rollback across that tick reproduces the swap instead of
+            // needing it undone. The rebake above was the validation and nothing else, and
+            // TryPreviewPlacements is what makes that structural: it hands back no mesh and
+            // discards its own output, so the pump's rebake patches the live mesh rather than
+            // diffing against one that was never installed.
             frame.Logger?.KInformation(
                 $"[Building][Placed] tick={frame.Tick}, player={cmd.PlayerId}, entity={entity}, "
-                + $"shape={ShapeName(shapeId, orientation)}, total={count}");
+                + $"shape={ShapeName(shapeId, orientation)}, total={count + 1}");
         }
 
         void HandleRemoveBuilding(ref Frame frame, RemoveBuildingCommand cmd)
@@ -767,8 +695,33 @@ namespace Brawler
                 return;
             }
 
-            FPBuildingPlacement[] buffer = _removeScratch;
-            int count = CollectBuildings(ref frame, buffer, target, _collectOrder);
+            // Already scheduled: refuse rather than move the date. Two removes on one building
+            // would otherwise leave the second one's tick standing, and a player double-clicking
+            // is the ordinary way to send them.
+            if (frame.GetReadOnly<BuildingComponent>(target).RemovalEffectiveTick != int.MaxValue)
+            {
+                RejectBuilding(ref frame, cmd, $"building already being demolished: {cmd.TargetEntityId}");
+                return;
+            }
+
+            int removalTick = frame.Tick + BuildDelayTicks;
+
+            // Excluded by SEQUENCE, not by entity: at this moment the target is still inside its own
+            // tick window, so nothing else drops it. The survey refuses (-1) when two live buildings
+            // share that number — with a duplicate, "the one to exclude" is not a well-defined
+            // building, and removing whichever the comparison reached first would delete one that is
+            // still standing while its hole stayed carved in the mesh. Excluding by EntityRef used to
+            // be immune to that (it compares a version), so this is the one place the shared
+            // derivation is stricter rather than merely equivalent.
+            int targetSequence = frame.GetReadOnly<BuildingComponent>(target).Sequence;
+            int count = _validator.Survey(ref frame, removalTick, skipSequence: targetSequence);
+            if (count < 0)
+            {
+                RejectBuilding(ref frame, cmd,
+                    $"ambiguous demolition target: Sequence {targetSequence} is shared by more than "
+                    + $"one live building");
+                return;
+            }
 
             // Removal shrinks the set, so no GEOMETRY check can newly fail. The catalog lookup
             // and the grid check run BEFORE the geometry though, and those read stored state this
@@ -785,12 +738,10 @@ namespace Brawler
             //
             // Only the ArgumentException catch remains: a refused PLACEMENT now returns false,
             // and on a shrinking set no geometry check can produce one anyway.
-            FPNavMesh newMesh;
             try
             {
-                if (!FPNavMeshRebaker.TryRebakePlacements(
-                        _rebakeContext, buffer, out newMesh, out FPBuildingRejectionInfo rejection,
-                        frame.Logger, PlacementRules, count))
+                if (!_validator.TryPreview(
+                        _rebakeContext, out FPBuildingRejectionInfo rejection, frame.Logger))
                 {
                     RejectBuilding(ref frame, cmd, Describe(rejection));
                     return;
@@ -802,10 +753,15 @@ namespace Brawler
                 return;
             }
 
-            frame.DestroyEntity(target);
-            _botFSM.SwapAndReseed(ref frame, newMesh);
-            _rebakeContext.CommitSwap(newMesh);
-            frame.Logger?.KInformation($"[Building][Removed] tick={frame.Tick}, player={cmd.PlayerId}, entity={target}, total={count}");
+            // A tombstone, not a destroy. The building keeps its hole in the mesh until the tick it
+            // is due, and destroying it now would take the component that says so — leaving a peer
+            // that joins during the window unable to reproduce a hole nothing in the frame
+            // describes. NavMeshEffectiveTickSystem destroys it on that tick, having installed the
+            // mesh without it.
+            frame.Get<BuildingComponent>(target).RemovalEffectiveTick = removalTick;
+            frame.Logger?.KInformation(
+                $"[Building][Demolishing] tick={frame.Tick}, player={cmd.PlayerId}, entity={target}, "
+                + $"effective={removalTick}, remaining={count}");
         }
 
         // ────────────────────────────────────────────

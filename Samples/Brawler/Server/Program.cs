@@ -135,7 +135,40 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
         [2] = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Data", "Stage02.NavMeshData.bytes")),
     };
     List<FPStaticCollider> CollidersFor(int stageId) => stageColliders.TryGetValue(stageId, out var c) ? c : stageColliders[1];
-    byte[] NavBytesFor(int stageId) => stageNavBytes.TryGetValue(stageId, out var b) ? b : stageNavBytes[1];
+
+    // Per-stage nav, built ONCE here rather than per room. Rooms are created on the server loop's
+    // receive stage, so whatever a room construction costs is subtracted from every OTHER room's
+    // tick budget that cycle — see Docs/IMP/IMP96/Report-MultiRoomThreading.md §H-1. Deserialize and
+    // CreateSnapshot are exactly that kind of cost (a snapshot is a full base insertion, and the
+    // first one in the process also pays the JIT that prewarm absorbs), and both results are
+    // immutable, so they belong here and not in the room factory. This is also what the rebake API
+    // asks for: "rooms that share one stage snapshot should call CreateSnapshot once and construct
+    // an FPNavMeshRebakeContext per room instead."
+    int NavStageKey(int stageId) => stageNavBytes.ContainsKey(stageId) ? stageId : 1;
+    var stageNavMeshes = new Dictionary<int, FPNavMesh>();
+    var stageRebakeSnapshots = new Dictionary<int, FPNavMeshRebakeSnapshot>();
+    foreach (var stageNav in stageNavBytes)
+    {
+        var stageMesh = FPNavMeshSerializer.Deserialize(stageNav.Value);
+        stageNavMeshes[stageNav.Key] = stageMesh;
+        // A base the rebake refuses leaves this stage without a snapshot — its rooms still run,
+        // they just have no building placement. Same outcome as before, decided at boot instead of
+        // once per room.
+        try
+        {
+            stageRebakeSnapshots[stageNav.Key] = BrawlerBuildingShapes.CreateSnapshot(stageMesh, logger);
+        }
+        catch (Exception e)
+        {
+            logger.KWarning($"[BrawlerDedicatedServer] stage {stageNav.Key}: rebake snapshot unavailable — building placement disabled for this stage ({e.Message})");
+        }
+    }
+    FPNavMesh NavMeshFor(int stageId) => stageNavMeshes[NavStageKey(stageId)];
+    // Resolved through the SAME key as NavMeshFor: the snapshot has to be the one built from the
+    // mesh the room's nav systems query, or the rebake would carve a different base than the one
+    // being pathfound on.
+    FPNavMeshRebakeSnapshot RebakeSnapshotFor(int stageId) =>
+        stageRebakeSnapshots.TryGetValue(NavStageKey(stageId), out var s) ? s : null;
 
     var dataAssets = DataAssetReader.LoadMixedCollectionFromBytes(assetPath);
 
@@ -177,10 +210,11 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
     var router = new RoomRouter(transport, logger);
     var roomManagerConfig = new RoomManagerConfigBuilder((matchCtx, roomLogger) => new BrawlerServerCallbacks(roomLogger,
             CollidersFor(matchCtx.StageId),
-            FPNavMeshSerializer.Deserialize(NavBytesFor(matchCtx.StageId)),
+            NavMeshFor(matchCtx.StageId),
             maxPlayersPerRoom,
             BrawlerMatchConfig.Decode(matchCtx.MatchConfigData).BotCount,
-            stageId: matchCtx.StageId))
+            stageId: matchCtx.StageId,
+            rebakeSnapshot: RebakeSnapshotFor(matchCtx.StageId)))
         .WithRoomLimits(maxRooms, maxPlayersPerRoom, maxSpectatorsPerRoom)
         .WithSimulationConfig(simConfig)
         .WithSessionConfig(sessionConfig)
@@ -292,7 +326,40 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
         [2] = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Data", "Stage02.NavMeshData.bytes")),
     };
     List<FPStaticCollider> CollidersFor(int stageId) => stageColliders.TryGetValue(stageId, out var c) ? c : stageColliders[1];
-    byte[] NavBytesFor(int stageId) => stageNavBytes.TryGetValue(stageId, out var b) ? b : stageNavBytes[1];
+
+    // Per-stage nav, built ONCE here rather than per room. Rooms are created on the server loop's
+    // receive stage, so whatever a room construction costs is subtracted from every OTHER room's
+    // tick budget that cycle — see Docs/IMP/IMP96/Report-MultiRoomThreading.md §H-1. Deserialize and
+    // CreateSnapshot are exactly that kind of cost (a snapshot is a full base insertion, and the
+    // first one in the process also pays the JIT that prewarm absorbs), and both results are
+    // immutable, so they belong here and not in the room factory. This is also what the rebake API
+    // asks for: "rooms that share one stage snapshot should call CreateSnapshot once and construct
+    // an FPNavMeshRebakeContext per room instead."
+    int NavStageKey(int stageId) => stageNavBytes.ContainsKey(stageId) ? stageId : 1;
+    var stageNavMeshes = new Dictionary<int, FPNavMesh>();
+    var stageRebakeSnapshots = new Dictionary<int, FPNavMeshRebakeSnapshot>();
+    foreach (var stageNav in stageNavBytes)
+    {
+        var stageMesh = FPNavMeshSerializer.Deserialize(stageNav.Value);
+        stageNavMeshes[stageNav.Key] = stageMesh;
+        // A base the rebake refuses leaves this stage without a snapshot — its rooms still run,
+        // they just have no building placement. Same outcome as before, decided at boot instead of
+        // once per room.
+        try
+        {
+            stageRebakeSnapshots[stageNav.Key] = BrawlerBuildingShapes.CreateSnapshot(stageMesh, logger);
+        }
+        catch (Exception e)
+        {
+            logger.KWarning($"[BrawlerDedicatedServer] stage {stageNav.Key}: rebake snapshot unavailable — building placement disabled for this stage ({e.Message})");
+        }
+    }
+    FPNavMesh NavMeshFor(int stageId) => stageNavMeshes[NavStageKey(stageId)];
+    // Resolved through the SAME key as NavMeshFor: the snapshot has to be the one built from the
+    // mesh the room's nav systems query, or the rebake would carve a different base than the one
+    // being pathfound on.
+    FPNavMeshRebakeSnapshot RebakeSnapshotFor(int stageId) =>
+        stageRebakeSnapshots.TryGetValue(NavStageKey(stageId), out var s) ? s : null;
 
     var dataAssets = DataAssetReader.LoadMixedCollectionFromBytes(assetPath);
 
@@ -353,11 +420,12 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
     var router = new RoomRouter(transport, logger);
     var roomManagerConfig = new RoomManagerConfigBuilder((matchCtx, roomLogger) => new BrawlerServerCallbacks(roomLogger,
             CollidersFor(matchCtx.StageId),
-            FPNavMeshSerializer.Deserialize(NavBytesFor(matchCtx.StageId)),
+            NavMeshFor(matchCtx.StageId),
             maxPlayersPerRoom,
             BrawlerMatchConfig.Decode(matchCtx.MatchConfigData).BotCount,
             stageId: matchCtx.StageId,
-            devAbortAfterMs: devAbortMs))
+            devAbortAfterMs: devAbortMs,
+            rebakeSnapshot: RebakeSnapshotFor(matchCtx.StageId)))
         .WithRoomLimits(maxRooms, maxPlayersPerRoom, maxSpectatorsPerRoom)
         .WithSimulationConfig(simConfig)
         .WithSessionConfig(sessionConfig)

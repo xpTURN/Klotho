@@ -38,8 +38,20 @@ namespace xpTURN.Klotho.Network
 
         public ConcurrentQueue<InboundEntry> InboundQueue { get; } = new ConcurrentQueue<InboundEntry>();
 
-        // Straggler tracking
-        public int StragglerCount { get; set; }
+        // Straggler tracking. The history is a sliding window over the cycles this room was actually
+        // DISPATCHED — one bit per cycle, 1 = did not finish inside the stage-2 budget. Cycles that
+        // told us nothing about this room (the budget itself collapsed) push no bit at all, so the
+        // denominator stays "recent cycles that carried information", not "recent wall time".
+        //
+        // StragglerCount is that window's popcount, so the force-close threshold reads as "straggled
+        // this often lately" rather than "straggled this many times ever". The window
+        // length is structural — it is the width of the ulong — and the threshold that pairs with it
+        // lives in ServerLoop; the two together are what fixes the rate.
+        public const int StragglerWindowCycles = 64;
+
+        private ulong _stragglerHistory;
+
+        public int StragglerCount => PopCount(_stragglerHistory);
         public bool IsStraggler { get; set; }
 
         // Set by the ThreadPool worker at the end of Update(); read by the main thread (ServerLoop)
@@ -247,7 +259,7 @@ namespace xpTURN.Klotho.Network
                     StreamPool.ReturnBuffer(entry.Buffer);
             }
 
-            StragglerCount = 0;
+            _stragglerHistory = 0;   // slot reuse, unrelated to the sliding window's own decay
             IsStraggler = false;
             UpdateComplete = false;
             State = RoomState.Empty;
@@ -255,10 +267,52 @@ namespace xpTURN.Klotho.Network
             _logger?.KInformation($"[Room {RoomId}] → Empty (disposed)");
         }
 
-        public void MarkStraggler()
+        /// <summary>
+        /// Records that this room did not complete its Update within the stage-2 budget.
+        /// <para>
+        /// <paramref name="countTowardOverload"/> separates the two things this used to conflate:
+        /// <see cref="IsStraggler"/> is a fact ("this room's worker is still running", which the
+        /// dispatch and teardown guards depend on) while <see cref="StragglerCount"/> is a judgement
+        /// ("this room is bad"). When the cycle itself denied every room a usable window, the fact
+        /// still holds but the judgement is not about this room.
+        /// </para>
+        /// <para>
+        /// No default argument on purpose: the single call site is inside the loop that decides
+        /// attribution, and a default would let a new call site skip that decision silently.
+        /// </para>
+        /// </summary>
+        public void MarkStraggler(bool countTowardOverload)
         {
             IsStraggler = true;
-            StragglerCount++;
+            if (countTowardOverload)
+                _stragglerHistory = (_stragglerHistory << 1) | 1UL;
+            // else: no bit either way. Pushing a 0 would read as "this room was fine", which would
+            // forgive real history for a reason that has nothing to do with this room's health.
+        }
+
+        /// <summary>
+        /// Records that this room finished inside the stage-2 budget. This is the recovery half of
+        /// the window: enough clean cycles push old straggles out of it, so a burst is absorbed while
+        /// a room that keeps missing stays above the threshold.
+        /// <para>
+        /// Called for every completed room every cycle — including cycles whose budget collapsed.
+        /// Finishing inside a 1ms window is strong evidence of health, so it is not an exception to
+        /// the budget-collapse suppression, which only ever works in the opposite direction.
+        /// </para>
+        /// </summary>
+        public void NoteCleanCycle()
+        {
+            _stragglerHistory <<= 1;
+        }
+
+        // Local SWAR popcount: this assembly has no System.Numerics dependency, and
+        // BitOperations.PopCount is absent from the netstandard2.1 profile Unity compiles against.
+        private static int PopCount(ulong v)
+        {
+            v -= (v >> 1) & 0x5555555555555555UL;
+            v = (v & 0x3333333333333333UL) + ((v >> 2) & 0x3333333333333333UL);
+            v = (v + (v >> 4)) & 0x0F0F0F0F0F0F0F0FUL;
+            return (int)((v * 0x0101010101010101UL) >> 56);
         }
     }
 }

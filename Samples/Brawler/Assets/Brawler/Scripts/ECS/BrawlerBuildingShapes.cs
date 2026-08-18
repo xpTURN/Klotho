@@ -15,10 +15,16 @@ namespace Brawler
     /// <para><b>This table is inside the determinism envelope.</b> An orientation index is a
     /// REFERENCE into it, so two builds that disagree about the table would carve different
     /// navmeshes from identical commands, and nothing would fail loudly until the nav
-    /// fingerprint. The catalog exposes <see cref="FPBuildingShapeCatalog.Hash"/> for exactly this;
-    /// a real product should fold it into the match config or StaticFingerprint so the mismatch
-    /// surfaces at load. The sample does not, because it ships one build — a note rather than an
-    /// omission, but a note worth having when this gets copied.</para>
+    /// fingerprint. The catalog exposes <see cref="FPBuildingShapeCatalog.Hash"/> for exactly this,
+    /// and <c>BotFSMSystem.GetGameFingerprint</c> folds it into the static environment fingerprint —
+    /// so a mismatch surfaces wherever a FullState is exchanged.
+    ///
+    /// <para>Two limits on that, both worth knowing when this gets copied. It is not a LOAD-time
+    /// check: peers that start together and never resync never compare it — for those, folding the
+    /// hash into the match config is still the right instrument. And nothing requires the fold at
+    /// all: <c>IGameFingerprintSource</c> is optional and the engine folds 0 when no system
+    /// implements it, so a game that copies this wiring without that interface loses the net
+    /// silently.</para>
     ///
     /// <para>Non-square on purpose. With halfWidth == halfDepth a 90-degree turn reproduces the
     /// shape, so only M/4 of the orientations would look different and the wiring would appear to
@@ -85,15 +91,34 @@ namespace Brawler
         /// engine's "snapshot was built without a shape catalog" refusal fired exactly as designed;
         /// what was missing was a single place to pass it.</para>
         ///
-        /// <para>Worth knowing about the failure that is NOT covered here: two peers passing
-        /// DIFFERENT catalogs would carve different navmeshes without any refusal at all. The
-        /// expansion logs its <see cref="FPBuildingShapeCatalog.Hash"/> on every peer, so a
-        /// mismatch is at least visible by comparing logs; a product should fold that hash into the
-        /// match config or StaticFingerprint so it fails at load instead.</para>
+        /// <para>Worth knowing about the failure that is NOT refused here: two peers passing
+        /// DIFFERENT catalogs would carve different navmeshes, and this call would accept both. What
+        /// catches it is the fold in <c>BotFSMSystem.GetGameFingerprint</c> (see the class remarks),
+        /// plus the hash the expansion logs on every peer; neither is a load-time check.</para>
         /// </summary>
         public static FPNavMeshRebakeContext CreateContext(FPNavMesh baseMesh, IKLogger logger)
         {
             return FPNavMeshRebaker.CreateContext(baseMesh, logger, prewarm: true, shapeCatalog: Catalog);
+        }
+
+        /// <summary>
+        /// The snapshot half of <see cref="CreateContext"/>, for a host that serves several
+        /// simulations off one stage — build this ONCE at load and give each of them its own
+        /// <c>new FPNavMeshRebakeContext(snapshot)</c>. The snapshot is immutable and safe to share;
+        /// the context is not (it owns work buffers).
+        ///
+        /// <para>Why it matters where this runs: a snapshot costs a full base insertion, and the
+        /// first rebake in a process additionally pays the JIT (<c>prewarm: true</c> absorbs it
+        /// here). The dedicated server builds rooms on its main loop's receive stage, so doing this
+        /// per room puts that cost between the poll and the room dispatch — every OTHER room's tick
+        /// budget shrinks by exactly that much. See <c>Docs/IMP/IMP96/Report-MultiRoomThreading.md</c>
+        /// §H-1.</para>
+        ///
+        /// <para>Same catalog rule as <see cref="CreateContext"/>, for the same reason.</para>
+        /// </summary>
+        public static FPNavMeshRebakeSnapshot CreateSnapshot(FPNavMesh baseMesh, IKLogger logger)
+        {
+            return FPNavMeshRebaker.CreateSnapshot(baseMesh, logger, prewarm: true, shapeCatalog: Catalog);
         }
 
         /// <summary>

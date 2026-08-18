@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using NUnit.Framework;
 
+using xpTURN.Klotho.ECS;
 using xpTURN.Klotho.Deterministic.Math;
 
 namespace xpTURN.Klotho.Deterministic.Navigation.Tests
@@ -42,12 +43,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
         private static string RepoRoot()
         {
-            // Klotho.Tests.sln. There is no Klotho.sln, and naming one here does not fail —
-            // the walk just runs off the top of the filesystem and returns null, after which the
-            // byte gate silently measured a synthetic mesh while its own assertion message said
-            // "on Field". Hence LoadField below refusing to fall back.
+            // com.xpturn.klotho/package.json — tracked, and present only at the repo root.
+            // NOT Klotho.Tests.sln: that one is gitignored, so a fresh CI clone does not have it
+            // and naming a file that can be absent does not fail — the walk just runs off the top
+            // of the filesystem and returns null, after which the byte gate silently measured a
+            // synthetic mesh while its own assertion message said "on Field". Hence LoadField
+            // below refusing to fall back.
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Klotho.Tests.sln")))
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "com.xpturn.klotho", "package.json")))
                 dir = dir.Parent;
             return dir?.FullName;
         }
@@ -61,7 +64,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         private static FPNavMesh LoadField()
         {
             string root = RepoRoot();
-            Assert.NotNull(root, "could not locate the repo root (Klotho.Tests.sln) from "
+            Assert.NotNull(root, "could not locate the repo root (com.xpturn.klotho/package.json) from "
                 + AppContext.BaseDirectory);
             string path = Path.Combine(root, "Samples/Brawler/Assets/NavMesh/Data/Field.NavMeshData.bytes");
             Assert.IsTrue(File.Exists(path), $"the byte gate measures the real Field asset and it is missing: {path}");
@@ -266,6 +269,82 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 + "the interacting-carve path, and it costs ~7x what the same count of separated "
                 + "footprints does");
 #endif
+        }
+
+        // ─────────────────────────────────────────────── the per-tick driver
+
+        /// <summary>The table the driver's quiet tick is measured against. Deliberately allocation
+        /// free itself, so what the gate sees is the driver's.</summary>
+        private sealed class FixedSource : IFPNavMeshPlacementSource
+        {
+            private readonly FPNavMeshTimedPlacement[] _entries;
+            public FixedSource(FPNavMeshTimedPlacement[] entries) { _entries = entries; }
+
+            public int Capacity => 40;
+
+            public int Collect(ref Frame frame, FPNavMeshTimedPlacement[] buffer, out int eligible)
+            {
+                for (int i = 0; i < _entries.Length; i++)
+                    buffer[i] = _entries[i];
+                eligible = _entries.Length;
+                return _entries.Length;
+            }
+
+            public void DestroyDue(ref Frame frame, int tick) { }
+        }
+
+        private sealed class NoopInstaller : IFPNavMeshInstaller
+        {
+            public void Install(ref Frame frame, FPNavMesh mesh) { }
+            public void Reseed(ref Frame frame) { }
+        }
+
+        [Test]
+        public void ByteGate_TheDriversQuietTickAllocatesNothing()
+        {
+            // The driver runs EVERY tick, which is a different exposure from the rebake gates above:
+            // a rebake is an event, a survey is not. The quiet tick — nothing due, the right mesh
+            // already installed — is one walk of the game's table plus an integer compare, and it has
+            // to cost zero bytes or the seam is a per-tick GC source on every consumer.
+            //
+            // Anything that shows up here is almost certainly a closure, a boxed enumerator, or a
+            // params array that looked free at the call site.
+            var entries = new FPNavMeshTimedPlacement[8];
+            for (int i = 0; i < entries.Length; i++)
+                entries[i] = new FPNavMeshTimedPlacement
+                {
+                    Sequence = i + 1,
+                    Placement = new FPBuildingPlacement(
+                        0, FP64.FromInt(i * 2 - 8), FP64.FromInt(4), FP64.Zero),
+                    // Live from before the measured ticks and never removed, so every measured tick
+                    // is quiet: no boundary, no correction, no task.
+                    EffectiveTick = 0,
+                    RemovalEffectiveTick = int.MaxValue,
+                };
+
+            var driver = new FPNavMeshRebakeDriver(
+                new FixedSource(entries), new NoopInstaller(), slotCount: 2);
+            var frame = new Frame(64, null);
+
+            // Warm: the first tick installs, which allocates a mesh by design. Measure after that.
+            frame.Tick = 100;
+            driver.Update(ref frame);
+            frame.Tick = 101;
+            driver.Update(ref frame);
+
+            const int iterations = 64;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < iterations; i++)
+            {
+                frame.Tick = 102 + i;
+                driver.Update(ref frame);
+            }
+            long perTick = (GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
+
+            Assert.AreEqual(0, perTick,
+                $"the driver allocated {perTick} B on a quiet tick. It runs every tick on every peer, "
+                + "so this is a steady-state GC source rather than an event cost — find the closure "
+                + "or the boxed enumerator instead of raising the ceiling");
         }
     }
 }

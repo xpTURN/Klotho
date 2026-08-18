@@ -17,6 +17,9 @@ namespace Brawler
             engine.Logger?.KInformation($"[Brawler] Game started: playerId={engine.LocalPlayerId}, tick={engine.CurrentTick}");
 
             _sim.SetEngine(engine);
+            // The slice heartbeat used to be wired here — an SD client's only door, because the
+            // engine skips world init for it. The engine now paces slices itself from Update, which
+            // reaches this host without a door at all.
             if (!engine.IsReplayMode)
                 _sim.SendSpawnCommand(engine);   // During replay playback, use the recorded SpawnCharacterCommand — prevent duplicate send
         }

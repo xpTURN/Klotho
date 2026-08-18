@@ -13,10 +13,18 @@ namespace xpTURN.Klotho.Network
     /// </summary>
     public class ServerLoop
     {
-        private const int STRAGGLER_OVERLOAD_THRESHOLD = 10;
+        // Force-close threshold, read against Room's sliding window (Room.StragglerWindowCycles = 64),
+        // NOT a lifetime total. 32/64 sets the "persistently bad" line at a 50% straggle rate, and the
+        // two numbers only mean something together — changing the window without this, or this without
+        // the window, silently moves that rate.
+        private const int STRAGGLER_OVERLOAD_THRESHOLD = 32;
         private const int DRIFT_LOG_INTERVAL_TICKS = 1000;
         private const int BUDGET_MARGIN_MS = 2;
         private const int UNROUTED_CLEANUP_INTERVAL_MS = 1000;
+
+        // Budget-collapse detection. Both conditions must hold — see IsBudgetCollapsed.
+        private const int BUDGET_COLLAPSE_RATIO = 4;
+        private const int HEALTHY_ROOM_WINDOW_MS = 6;
 
         // Graceful Shutdown timeouts
         private const int SHUTDOWN_PHASE2_TIMEOUT_MS = 1000;
@@ -170,12 +178,13 @@ namespace xpTURN.Klotho.Network
                     }, room);
                 }
 
-                // Timeout barrier
+                // Timeout barrier. The return value is deliberately unused: attribution is per-room
+                // (Room.UpdateComplete), never per-cycle. Gating on "all completed" would make one
+                // room's outcome depend on every other room's.
                 int budgetMs = Math.Max(1, _tickIntervalMs - (int)pollElapsed - BUDGET_MARGIN_MS);
-                bool allCompleted = countdown.Wait(budgetMs);
+                countdown.Wait(budgetMs);
 
-                if (!allCompleted)
-                    HandleStragglers();
+                UpdateStragglerState(budgetMs);
 
                 // Single disposal path: always defer to RecoverStragglers (Wait(0)==true).
                 _pendingCountdowns.Add(countdown);
@@ -194,6 +203,12 @@ namespace xpTURN.Klotho.Network
         /// </summary>
         internal void RunCyclesForTest(int cycles, float elapsedSec)
         {
+            // Run() starts the stopwatch; this seam must too. Without it every ExecuteCycle reads
+            // pollElapsed == 0, so the stage-2 budget is always its nominal value and nothing that
+            // depends on a degraded budget (A-1) can be reached from a test at all.
+            if (!_stopwatch.IsRunning)
+                _stopwatch.Start();
+
             for (int i = 0; i < cycles; i++)
                 ExecuteCycle(elapsedSec);
         }
@@ -223,25 +238,78 @@ namespace xpTURN.Klotho.Network
         }
 
         /// <summary>
-        /// Marks rooms still running at the stage-2 timeout as stragglers. Uses per-room
-        /// UpdateComplete so rooms that finished within budget are not falsely marked (MT-2 fix).
+        /// Single per-cycle pass over the dispatched rooms. Marks the ones still running at the
+        /// stage-2 timeout as stragglers, attributing the straggle to the room only when the cycle
+        /// actually gave it a usable window. Uses per-room UpdateComplete so rooms that
+        /// finished within budget are not falsely marked.
+        /// <para>
+        /// No <c>!room.IsStraggler</c> guard: GetReadyRooms already filters on it, so every room here
+        /// has IsStraggler == false and this runs once per cycle. The old guard was always true.
+        /// </para>
         /// </summary>
-        private void HandleStragglers()
+        private void UpdateStragglerState(int budgetMs)
         {
+            bool countTowardOverload = !IsBudgetCollapsed(budgetMs);
+            int suppressed = 0;
+
             for (int i = 0; i < _readyRooms.Count; i++)
             {
                 var room = _readyRooms[i];
-                if (!room.UpdateComplete && !room.IsStraggler)
+                if (room.UpdateComplete)
                 {
-                    room.MarkStraggler();
-                    _logger?.KWarning(
-                        $"[ServerLoop] Room {room.RoomId} straggler (count={room.StragglerCount})");
+                    room.NoteCleanCycle();
+                    continue;
                 }
+
+                room.MarkStraggler(countTowardOverload);
+                if (countTowardOverload)
+                    _logger?.KWarning(
+                        $"[ServerLoop] Room {room.RoomId} straggler " +
+                        $"({room.StragglerCount}/{Room.StragglerWindowCycles} recent)");
+                else
+                    suppressed++;
             }
+
+            // One line per collapsed cycle rather than one per room: the cause belongs to the cycle,
+            // and a collapse marks every dispatched room at once.
+            if (suppressed > 0)
+                _logger?.KWarning(
+                    $"[ServerLoop] {suppressed} room(s) incomplete, not attributed — " +
+                    $"stage-2 budget collapsed to {budgetMs}ms (stage 1 overran)");
         }
 
         /// <summary>
-        /// Force-closes rooms whose cumulative straggler count exceeds the threshold.
+        /// Whether this cycle's barrier window was too degraded for an incomplete room to mean
+        /// anything about that room. Both conditions are required:
+        /// <list type="number">
+        /// <item>the window is far below what this tick interval nominally allows — something ate
+        /// stage 1 (room construction, GC pause, a poll storm);</item>
+        /// <item>the window is below what a healthy room needs to finish one Update.</item>
+        /// </list>
+        /// Either alone misfires. (1) alone still suppresses whenever the floor is simply normal for
+        /// a short tick interval; (2) alone suppresses permanently on any config whose *nominal*
+        /// budget is already under the floor (TickIntervalMs 5 → 3ms &lt; 6ms, with zero poll cost),
+        /// which would disable force-close outright. Together they degrade to a no-op on short tick
+        /// intervals — i.e. to the behaviour this replaced, never to something worse.
+        /// <para>
+        /// HEALTHY_ROOM_WINDOW_MS is a calibration, not a tuning knob: a measured Brawler
+        /// room at 0.60ms average / 1.94ms worst per tick with four rooms updating in parallel, and
+        /// 3 × that (MAX_TICKS_PER_UPDATE, the accumulator catch-up ceiling) is ~6ms. A game heavier
+        /// than Brawler under-suppresses, which is the safe direction. Re-measure it, don't guess it.
+        /// </para>
+        /// </summary>
+        private bool IsBudgetCollapsed(int budgetMs)
+        {
+            // Multiplicative on purpose: (_tickIntervalMs - BUDGET_MARGIN_MS) / RATIO truncates to 0
+            // below a 10ms tick interval, which hides the degeneration instead of showing it.
+            int nominalBudgetMs = _tickIntervalMs - BUDGET_MARGIN_MS;
+            return budgetMs * BUDGET_COLLAPSE_RATIO < nominalBudgetMs
+                && budgetMs < HEALTHY_ROOM_WINDOW_MS;
+        }
+
+        /// <summary>
+        /// Force-closes rooms that straggled too often over their recent window. Not a lifetime
+        /// total: a room that recovers is forgiven, a room that keeps missing is not.
         /// </summary>
         private void HandleOverloadedRooms()
         {
@@ -251,7 +319,8 @@ namespace xpTURN.Klotho.Network
                 if (room.StragglerCount >= STRAGGLER_OVERLOAD_THRESHOLD)
                 {
                     _logger?.KError(
-                        $"[ServerLoop] Room {room.RoomId} overloaded ({room.StragglerCount} cumulative straggles), force closing");
+                        $"[ServerLoop] Room {room.RoomId} overloaded ({room.StragglerCount} straggles " +
+                        $"in the last {Room.StragglerWindowCycles} dispatched cycles), force closing");
 
                     // Broadcast ServerShutdown (Reason=2: RoomOverloaded)
                     try

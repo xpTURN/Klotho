@@ -51,9 +51,27 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// These answer questions the source cannot: how many triangles a carve actually removes,
         /// whether the rented triangle array ever overflows into an Array.Resize, and how much of
         /// the per-carve allocation each collection accounts for.
+        ///
+        /// <para><b>One triangulating thread while enabled — never in a multi-room process.</b>
+        /// Every field here is a process-global written without an interlock, so two rooms carving
+        /// at once do not merely blur the numbers: <see cref="ChannelLens"/> is a lock-free
+        /// <see cref="List{T}"/>, and concurrent <c>Add</c> overwrites its backing array and throws
+        /// <see cref="IndexOutOfRangeException"/> out of code that has nothing to do with
+        /// diagnostics. It is also unbounded until <see cref="Reset"/> — a long-lived process that
+        /// leaves this on leaks.</para>
+        ///
+        /// <para>This is a runtime flag rather than a <c>#if DEBUG</c> block on purpose: the
+        /// allocation measurements it feeds are only meaningful in Release (DEBUG adds the CDT
+        /// SelfCheck and its own allocations), so the switch has to survive into the build being
+        /// measured. The cost of that choice is this paragraph — the guard is a convention, not a
+        /// compiler.</para>
         /// </summary>
         internal static class Diag
         {
+            /// <summary>
+            /// Off by default. Turn on around a measurement and turn it off in a <c>finally</c>;
+            /// see the type note for why "around" has to mean a single triangulating thread.
+            /// </summary>
             internal static bool Enabled;
 
             internal static int CarveCount;
@@ -164,6 +182,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             if (holeCount < 0 || holeCount > holeXs.Length || holeCount > holeZs.Length)
                 throw new ArgumentException("FPConstrainedDelaunay: holeCount outside holeXs/holeZs");
 
+            Cdt cdt = ResumeFromSnapshot(
+                snapshot, holeXs, holeZs, holeCount, holeConstraintPairs, holeConstraintCount,
+                logger, pool);
+            return cdt.Extract(eraseOuterAndHoles, out indexCount);
+        }
+
+        /// <summary>
+        /// Everything <see cref="TriangulateFromSnapshot"/> does EXCEPT the extract: clone the
+        /// frozen base, rebase the ghosts, insert the hole vertices and their constraints.
+        /// Returned so a caller that wants to slice the extract can hold the CDT across calls —
+        /// the insertion is not worth slicing (0.11 ms of a 2.5 ms extract on a 22k stage,
+        /// because the base insertion is already frozen into the snapshot).
+        /// </summary>
+        internal static Cdt ResumeFromSnapshot(
+            CdtSnapshot snapshot, long[] holeXs, long[] holeZs, int holeCount,
+            int[] holeConstraintPairs, int holeConstraintCount,
+            IKLogger logger, FPNavMeshRebakeBufferPool pool)
+        {
             var cdt = new Cdt(snapshot, holeXs, holeZs, holeCount, logger, pool);
             cdt.SelfCheck();
             cdt.InsertRange(snapshot.RealCount, snapshot.RealCount + holeCount);
@@ -174,7 +210,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 Diag.LastTrisCapacity = cdt.TrisCapacityForDiagnostics;
                 Diag.LastTriCount = cdt.TriCountForDiagnostics;
             }
-            return cdt.Extract(eraseOuterAndHoles, out indexCount);
+            return cdt;
         }
 
         /// <summary>
@@ -1417,74 +1453,368 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             /// </summary>
             internal int[] Extract(bool eraseOuterAndHoles, out int count)
             {
-                // Pooled work buffers — valid over [0, _triCount) only (count contract);
-                // keep[] is rented pre-cleared because Extract writes it for live triangles only.
-                bool[] keep = _pool.ExtractKeep(_triCount);
+                ExtractBegin(eraseOuterAndHoles);
+                while (!ExtractStep(int.MaxValue)) { }
+                return ExtractResult(out count);
+            }
 
+            // ── Resumable Extract. Same stages in the same order as the one-shot above; the
+            // caller decides how many work units run per call. A unit is the natural item of the
+            // phase — a triangle while labelling and while rotating, a deque pop while relaxing,
+            // a kept triangle while emitting. The sort is one unit: it is a radix pass set whose
+            // counters double as cursors, and at 0.2 ms on a 22k stage it is not the long pole.
+            private enum ExPhase { InitDepth, Seed, Relax, MarkKeep, Triples, Sort, Emit, Done }
+
+            private ExPhase _exPhase;
+            private bool _exErase;
+            private int _exCursor;
+            private bool[] _exKeep;
+            private int[] _exDepth;
+            private IntDeque _exDeque;
+            private Triple[] _exTriples, _exSorted;
+            private int _exKept;
+            private int[] _exResult;
+            private int _exCount;
+
+            /// <summary>Arms a resumable extract. Rents nothing until the first <see cref="ExtractStep"/>.</summary>
+            internal void ExtractBegin(bool eraseOuterAndHoles)
+            {
+                _exErase = eraseOuterAndHoles;
+                _exPhase = eraseOuterAndHoles ? ExPhase.InitDepth : ExPhase.MarkKeep;
+                _exCursor = 0;
+                _exKept = 0;
+                _exResult = null;
+                _exCount = 0;
+            }
+
+            /// <summary>Runs up to <paramref name="units"/> work units; true once the output is ready.</summary>
+            internal bool ExtractStep(int units)
+            {
+                while (units > 0 && _exPhase != ExPhase.Done)
+                {
+                    switch (_exPhase)
+                    {
+                        case ExPhase.InitDepth:
+                        {
+                            if (_exCursor == 0)
+                            {
+                                _exKeep = ExtractBeginKeep();
+                                _exDepth = ExtractBeginDepth();
+                            }
+                            // Clamp by remaining, not cursor + units: "finish it" is int.MaxValue
+                            // and cursor + that overflows negative.
+                            int end = units >= _triCount - _exCursor ? _triCount : _exCursor + units;
+                            ExtractInitDepth(_exDepth, _exCursor, end);
+                            units -= end - _exCursor;
+                            _exCursor = end;
+                            if (_exCursor >= _triCount)
+                            {
+                                _exCursor = 0;
+                                _exDeque = ExtractBeginDeque();
+                                _exPhase = ExPhase.Seed;
+                            }
+                            break;
+                        }
+
+                        case ExPhase.Seed:
+                        {
+                            int end = units >= _triCount - _exCursor ? _triCount : _exCursor + units;
+                            ExtractSeedGhosts(_exDepth, ref _exDeque, _exCursor, end);
+                            units -= end - _exCursor;
+                            _exCursor = end;
+                            if (_exCursor >= _triCount)
+                            {
+                                _exCursor = 0;
+                                _exPhase = ExPhase.Relax;
+                            }
+                            break;
+                        }
+
+                        case ExPhase.Relax:
+                        {
+                            // Pops are the unit. Interrupting is safe because the loop converges
+                            // to the unique shortest-distance labelling regardless of pop order.
+                            bool drained = ExtractRelax(_exDepth, ref _exDeque, units);
+                            units = 0;
+                            if (drained)
+                                _exPhase = ExPhase.MarkKeep;
+                            break;
+                        }
+
+                        case ExPhase.MarkKeep:
+                        {
+                            if (_exCursor == 0 && !_exErase)
+                                _exKeep = ExtractBeginKeep();
+                            int end = units >= _triCount - _exCursor ? _triCount : _exCursor + units;
+                            if (_exErase)
+                                ExtractMarkKeepParity(_exKeep, _exDepth, _exCursor, end);
+                            else
+                                ExtractMarkKeepReal(_exKeep, _exCursor, end);
+                            units -= end - _exCursor;
+                            _exCursor = end;
+                            if (_exCursor >= _triCount)
+                            {
+                                _exCursor = 0;
+                                _exPhase = ExPhase.Triples;
+                            }
+                            break;
+                        }
+
+                        case ExPhase.Triples:
+                        {
+                            if (_exCursor == 0)
+                            {
+                                _exTriples = _pool.ExtractTriples(_triCount);
+                                _exKept = 0;
+                            }
+                            int end = units >= _triCount - _exCursor ? _triCount : _exCursor + units;
+                            ExtractRotateRange(_exKeep, _exTriples, _exCursor, end, ref _exKept);
+                            units -= end - _exCursor;
+                            _exCursor = end;
+                            if (_exCursor >= _triCount)
+                            {
+                                _exCursor = 0;
+                                _exPhase = ExPhase.Sort;
+                            }
+                            break;
+                        }
+
+                        case ExPhase.Sort:
+                            _exSorted = SortTriples(_exTriples, _exKept);
+                            units--;
+                            _exPhase = ExPhase.Emit;
+                            break;
+
+                        case ExPhase.Emit:
+                        {
+                            if (_exCursor == 0)
+                            {
+                                _exCount = _exKept * 3;
+                                _exResult = _pool.ExtractOutput(_exCount);
+                            }
+                            int end = units >= _exKept - _exCursor ? _exKept : _exCursor + units;
+                            ExtractEmitRange(_exSorted, _exResult, _exCursor, end);
+                            units -= end - _exCursor;
+                            _exCursor = end;
+                            if (_exCursor >= _exKept)
+                            {
+                                _exCursor = 0;
+                                _exPhase = ExPhase.Done;
+                            }
+                            break;
+                        }
+                    }
+                }
+                return _exPhase == ExPhase.Done;
+            }
+
+            /// <summary>The extracted indices once <see cref="ExtractStep"/> has returned true.</summary>
+            internal int[] ExtractResult(out int count)
+            {
+                count = _exCount;
+                return _exResult;
+            }
+
+            /// <summary>
+            /// Stage 3 of <see cref="Extract"/> — LSD radix sort of the canonical triples,
+            /// ascending by (A, B, C). Replaces <see cref="Array.Sort{T}(T[],int,int)"/>, which
+            /// measured 61% of Extract (1.52 ms of 2.49 ms on Field).
+            ///
+            /// <para>The key is a three-digit number whose digits are vertex indices, so the radix
+            /// is the vertex count rather than a power of two and the sort is exactly three
+            /// passes: C, then B, then A. Three is odd, so the result lands in the scratch buffer
+            /// — it is returned rather than copied back.</para>
+            ///
+            /// <para><b>Scan direction must match counter direction</b> (forward scan with an
+            /// exclusive prefix sum and <c>count[digit]++</c>) or ties reverse. Here that is a
+            /// belt-and-braces property rather than the contract: equal keys are identical
+            /// <see cref="Triple"/> values, so order among them cannot reach the output — the
+            /// same reason <see cref="Array.Sort{T}(T[],int,int)"/>'s instability was safe. The
+            /// discipline is kept anyway because the sibling
+            /// <c>FPNavMeshBuildPipeline.RadixSortByKey</c> does depend on it, and a reader who
+            /// copies this one should copy the correct form.</para>
+            /// </summary>
+            internal Triple[] SortTriples(Triple[] triples, int kept)
+            {
+                int buckets = _realCount;
+                if (kept < 2 || buckets <= 0)
+                    return triples;
+
+                Triple[] scratch = _pool.ExtractTriplesScratch(kept);
+                int[] counts = _pool.ExtractTripleCounts(3 * buckets);
+                Array.Clear(counts, 0, 3 * buckets);
+
+                int offA = 0, offB = buckets, offC = 2 * buckets;
+                for (int i = 0; i < kept; i++)
+                {
+                    counts[offA + triples[i].A]++;
+                    counts[offB + triples[i].B]++;
+                    counts[offC + triples[i].C]++;
+                }
+                PrefixExclusive(counts, offA, buckets);
+                PrefixExclusive(counts, offB, buckets);
+                PrefixExclusive(counts, offC, buckets);
+
+                for (int i = 0; i < kept; i++)          // pass 1: C (low digit)
+                    scratch[counts[offC + triples[i].C]++] = triples[i];
+                for (int i = 0; i < kept; i++)          // pass 2: B
+                    triples[counts[offB + scratch[i].B]++] = scratch[i];
+                for (int i = 0; i < kept; i++)          // pass 3: A (high digit)
+                    scratch[counts[offA + triples[i].A]++] = triples[i];
+
+                return scratch;
+            }
+
+            private static void PrefixExclusive(int[] counts, int off, int buckets)
+            {
+                int sum = 0;
+                for (int b = 0; b < buckets; b++)
+                {
+                    int c = counts[off + b];
+                    counts[off + b] = sum;
+                    sum += c;
+                }
+            }
+
+            /// <summary>
+            /// Stage 1 of <see cref="Extract"/> — the parity keep mask. Split out because the
+            /// stage costs can only be measured by difference: the loops read private state, so a
+            /// test cannot repeat them in place. Calling the stages separately is a diagnostics
+            /// path; the returned array is the pool's keep buffer and carries the same
+            /// "valid until the next rebake" contract as <see cref="Extract"/>'s output.
+            /// </summary>
+            internal bool[] ExtractKeepMask(bool eraseOuterAndHoles)
+            {
+                bool[] keep = ExtractBeginKeep();
                 if (eraseOuterAndHoles)
                 {
-                    // 0-1 BFS: depth = min constraint crossings from the ghost region; keep odd.
-                    int[] depth = _pool.ExtractDepth(_triCount);
-                    for (int i = 0; i < _triCount; i++)
-                        depth[i] = int.MaxValue;
-
-                    var deque = new IntDeque(_pool.ExtractDeque(_triCount + 16));
-                    for (int i = 0; i < _triCount; i++)
-                    {
-                        if (!_tris[i].Alive)
-                            continue;
-                        ref Tri t = ref _tris[i];
-                        if (t.V0 >= _realCount || t.V1 >= _realCount || t.V2 >= _realCount)
-                        {
-                            depth[i] = 0;
-                            deque.AddLast(i);
-                        }
-                    }
-
-                    while (deque.Count > 0)
-                    {
-                        int cur = deque.RemoveFirst();
-                        ref Tri t = ref _tris[cur];
-                        for (int k = 0; k < 3; k++)
-                        {
-                            int n = Nk(in t, k);
-                            if (n < 0 || !_tris[n].Alive)
-                                continue;
-                            // CrossesParity, not the wall bit: an edge two rings share does not
-                            // change walkability, so it must cost 0 here AND go to the front of
-                            // the deque. Both uses have to move together or the 0-1 invariant
-                            // (weight 1 => back) breaks and this degrades to SPFA.
-                            bool crosses = CrossesParity(in t, k);
-                            int nd = depth[cur] + (crosses ? 1 : 0);
-                            if (nd < depth[n])
-                            {
-                                depth[n] = nd;
-                                if (crosses)
-                                    deque.AddLast(n);
-                                else
-                                    deque.AddFirst(n);
-                            }
-                        }
-                    }
-
-                    for (int i = 0; i < _triCount; i++)
-                        keep[i] = _tris[i].Alive && depth[i] != int.MaxValue && (depth[i] & 1) == 1;
+                    int[] depth = ExtractBeginDepth();
+                    ExtractInitDepth(depth, 0, _triCount);
+                    IntDeque deque = ExtractBeginDeque();
+                    ExtractSeedGhosts(depth, ref deque, 0, _triCount);
+                    ExtractRelax(depth, ref deque, int.MaxValue);
+                    ExtractMarkKeepParity(keep, depth, 0, _triCount);
                 }
                 else
                 {
-                    for (int i = 0; i < _triCount; i++)
+                    ExtractMarkKeepReal(keep, 0, _triCount);
+                }
+                return keep;
+            }
+
+            // ── Stage-1 pieces. Split so a caller can drive them a slice at a time; each takes an
+            // explicit range (or a pop budget) and touches nothing outside it. The 0-1 BFS is safe
+            // to interrupt for a reason worth stating: the relaxation runs to a FIXED POINT, and
+            // that fixed point is the unique shortest-distance labelling — it does not depend on
+            // pop order. Cutting it costs only the O(V+E) bound (it degrades toward SPFA), never
+            // the result. The deque is a STRUCT whose Grow() allocates outside the pool, so it is
+            // carried by value and never re-derived from the pool slot.
+
+            /// <summary>Rents the keep mask (pre-cleared — the tail must read "do not keep").</summary>
+            private bool[] ExtractBeginKeep() { return _pool.ExtractKeep(_triCount); }
+
+            /// <summary>Rents the depth buffer.</summary>
+            private int[] ExtractBeginDepth() { return _pool.ExtractDepth(_triCount); }
+
+            /// <summary>Rents the deque backing store; the caller owns the struct.</summary>
+            private IntDeque ExtractBeginDeque() { return new IntDeque(_pool.ExtractDeque(_triCount + 16)); }
+
+            private void ExtractInitDepth(int[] depth, int from, int to)
+            {
+                for (int i = from; i < to; i++)
+                    depth[i] = int.MaxValue;
+            }
+
+            /// <summary>Seeds the ghost-touching triangles at depth 0.</summary>
+            private void ExtractSeedGhosts(int[] depth, ref IntDeque deque, int from, int to)
+            {
+                for (int i = from; i < to; i++)
+                {
+                    if (!_tris[i].Alive)
+                        continue;
+                    ref Tri t = ref _tris[i];
+                    if (t.V0 >= _realCount || t.V1 >= _realCount || t.V2 >= _realCount)
                     {
-                        if (!_tris[i].Alive)
-                            continue;
-                        ref Tri t = ref _tris[i];
-                        keep[i] = t.V0 < _realCount && t.V1 < _realCount && t.V2 < _realCount;
+                        depth[i] = 0;
+                        deque.AddLast(i);
                     }
                 }
+            }
 
-                // Canonicalize: rotate min-vertex-first (winding preserved), then sort triples.
-                Triple[] triples = _pool.ExtractTriples(_triCount);
+            /// <summary>
+            /// Relaxes up to <paramref name="pops"/> deque entries. Returns true once the queue is
+            /// empty, i.e. the labelling has reached its fixed point.
+            /// </summary>
+            private bool ExtractRelax(int[] depth, ref IntDeque deque, int pops)
+            {
+                while (pops > 0 && deque.Count > 0)
+                {
+                    int cur = deque.RemoveFirst();
+                    ref Tri t = ref _tris[cur];
+                    for (int k = 0; k < 3; k++)
+                    {
+                        int n = Nk(in t, k);
+                        if (n < 0 || !_tris[n].Alive)
+                            continue;
+                        // CrossesParity, not the wall bit: an edge two rings share does not
+                        // change walkability, so it must cost 0 here AND go to the front of
+                        // the deque. Both uses have to move together or the 0-1 invariant
+                        // (weight 1 => back) breaks and this degrades to SPFA.
+                        bool crosses = CrossesParity(in t, k);
+                        int nd = depth[cur] + (crosses ? 1 : 0);
+                        if (nd < depth[n])
+                        {
+                            depth[n] = nd;
+                            if (crosses)
+                                deque.AddLast(n);
+                            else
+                                deque.AddFirst(n);
+                        }
+                    }
+                    pops--;
+                }
+                return deque.Count == 0;
+            }
+
+            private void ExtractMarkKeepParity(bool[] keep, int[] depth, int from, int to)
+            {
+                for (int i = from; i < to; i++)
+                    keep[i] = _tris[i].Alive && depth[i] != int.MaxValue && (depth[i] & 1) == 1;
+            }
+
+            private void ExtractMarkKeepReal(bool[] keep, int from, int to)
+            {
+                for (int i = from; i < to; i++)
+                {
+                    if (!_tris[i].Alive)
+                        continue;
+                    ref Tri t = ref _tris[i];
+                    keep[i] = t.V0 < _realCount && t.V1 < _realCount && t.V2 < _realCount;
+                }
+            }
+
+            /// <summary>
+            /// Stage 2 of <see cref="Extract"/> — canonical rotation into the triple buffer.
+            /// Returns the kept count; the buffer is UNSORTED on return, in triangle creation
+            /// order. See <see cref="ExtractKeepMask"/> for the buffer lifetime contract.
+            /// </summary>
+            internal int ExtractTriples(bool[] keep, out Triple[] triples)
+            {
+                // Canonicalize: rotate min-vertex-first (winding preserved); the caller sorts.
+                triples = _pool.ExtractTriples(_triCount);
                 int kept = 0;
-                for (int i = 0; i < _triCount; i++)
+                ExtractRotateRange(keep, triples, 0, _triCount, ref kept);
+                return kept;
+            }
+
+            /// <summary>
+            /// Rotation over <c>[from, to)</c>. <paramref name="kept"/> is the running write
+            /// position and must be carried across calls — it is the output cursor, not a count
+            /// that can be re-derived from the range.
+            /// </summary>
+            private void ExtractRotateRange(bool[] keep, Triple[] triples, int from, int to, ref int kept)
+            {
+                for (int i = from; i < to; i++)
                 {
                     if (!keep[i])
                         continue;
@@ -1496,20 +1826,32 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     }
                     triples[kept++] = new Triple(a, b, c);
                 }
-                Array.Sort(triples, 0, kept);
+            }
 
+            /// <summary>
+            /// Stage 4 of <see cref="Extract"/> — flatten the sorted triples into the output
+            /// buffer. See <see cref="ExtractKeepMask"/> for the buffer lifetime contract.
+            /// </summary>
+            internal int[] ExtractEmit(Triple[] triples, int kept, out int count)
+            {
                 // Rented, not allocated: the triangle count now travels
                 // as an explicit out parameter instead of being read off the array's Length, so
                 // the buffer may be larger than the content.
                 count = kept * 3;
                 int[] result = _pool.ExtractOutput(count);
-                for (int i = 0; i < kept; i++)
+                ExtractEmitRange(triples, result, 0, kept);
+                return result;
+            }
+
+            /// <summary>Flattens sorted triples <c>[from, to)</c> into the output buffer.</summary>
+            private void ExtractEmitRange(Triple[] triples, int[] result, int from, int to)
+            {
+                for (int i = from; i < to; i++)
                 {
                     result[i * 3] = triples[i].A;
                     result[i * 3 + 1] = triples[i].B;
                     result[i * 3 + 2] = triples[i].C;
                 }
-                return result;
             }
 
             #endregion

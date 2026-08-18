@@ -29,7 +29,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         private static string RepoRoot()
         {
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Klotho.Tests.sln")))
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "com.xpturn.klotho", "package.json")))
                 dir = dir.Parent;
             return dir?.FullName;
         }

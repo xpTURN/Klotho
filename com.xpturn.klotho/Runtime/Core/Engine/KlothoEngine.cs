@@ -152,6 +152,108 @@ namespace xpTURN.Klotho.Core
 
         private ISimulation _simulation;
         private bool _worldInitInProgress;
+
+        /// <summary>
+        /// The registered sliced-rebake driver, or null when the game does not use one.
+        ///
+        /// <para><b>Resolved in <c>Initialize</c>.</b> Systems are registered by the session or the
+        /// room manager BEFORE the engine is initialized on every path, so the lookup always finds
+        /// one. A game that registers the driver AFTER Initialize is simply not self-wired, and that
+        /// precondition is pinned by a test rather than defended at runtime.</para>
+        ///
+        /// <para><b>Initialize can run more than once.</b> <c>Stop</c> clears the re-entry guard and
+        /// the reconnect path uses that — so this re-resolves each time rather than assuming a single
+        /// call. Re-resolving is also what keeps it correct if a different simulation is ever handed
+        /// in. What must NOT repeat is the claim: see <see cref="ResolveNavRebakeDriver"/>.</para>
+        ///
+        /// <para><b>Opt-in is the registration itself.</b> Register the driver and the engine paces
+        /// its slices; do not, and every one of these points is a null check. There is no opt-out —
+        /// a game that wants to pace slices itself no longer can.</para>
+        /// </summary>
+        private xpTURN.Klotho.Deterministic.Navigation.FPNavMeshRebakeDriver _navRebakeDriver;
+
+        /// <summary>
+        /// Finds the driver and takes the heartbeat claim. Called from both <c>Initialize</c> bodies.
+        ///
+        /// <para><b>The claim's return value is deliberately ignored.</b> The engine advances either
+        /// way (see <c>Update</c>). Claiming still matters for two reasons: a game asking for it is
+        /// refused, which is how a legacy manual wiring declines to subscribe; and the driver's
+        /// <c>HeartbeatClaimAttempts</c>/<c>SliceHeartbeatWired</c> counters stay meaningful — with
+        /// nobody claiming they would read 0/false and a live match would lose the only signal that
+        /// says whether pacing is wired at all.</para>
+        ///
+        /// <para>Claiming HERE is also what makes double-advance structurally impossible: Initialize
+        /// runs before <c>OnInitializeWorld</c>, so the engine holds the claim before any game door
+        /// can ask for it.</para>
+        /// </summary>
+        private void ResolveNavRebakeDriver()
+        {
+            var resolved = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)
+                ?.GetSystem<xpTURN.Klotho.Deterministic.Navigation.FPNavMeshRebakeDriver>();
+
+            // Same driver as before — a reconnect (Stop then Initialize) lands here. Claiming again
+            // would be harmless to behaviour and wrong for READING one: the claim counter is how a
+            // live match tells "the engine owns pacing" (1) from "a game is still wiring it by hand"
+            // (2), and a reconnect bumping it turns a healthy peer into a false positive.
+            if (ReferenceEquals(resolved, _navRebakeDriver))
+                return;
+
+            _navRebakeDriver = resolved;
+            if (_navRebakeDriver == null)
+                return;
+
+            _navRebakeDriver.TryClaimSliceHeartbeat();
+            _logger?.KInformation(
+                $"[KlothoEngine] nav rebake driver self-wired: frame pacing and derivative " +
+                $"corrections are the engine's from here");
+            WarnOnUnfoldedRebakeInputs();
+        }
+
+        /// <summary>
+        /// Reports the fingerprint sources a rebaking game is missing, once, where the driver is
+        /// resolved.
+        ///
+        /// <para><b>Why the engine says this at all.</b> Registering the driver is now the whole
+        /// wiring, so the one remaining thing a game can forget leaves no trace: the state hash
+        /// covers components, and neither the mesh a rebake installed nor the table it was carved
+        /// from is a component. Both hooks are OPTIONAL and the static fingerprint folds 0 for a
+        /// missing one — so an omission looks exactly like a game that has nothing to fold, and the
+        /// peer it disagrees with never says so either.</para>
+        ///
+        /// <para><b>Only for a game that rebakes.</b> A static navmesh cannot drift from a shape
+        /// table it never reads, and a warning that a reader cannot act on is a warning they learn to
+        /// scroll past — which would cost the ones below their meaning.</para>
+        ///
+        /// <para><b>A warning, not an error.</b> Nothing has diverged here; what is missing is the
+        /// net that would report it if it did. Live-match judgement treats a driver <c>KError</c> as
+        /// a stop condition, and promoting this would make every game that folds these inputs
+        /// somewhere else unjudgeable.</para>
+        /// </summary>
+        private void WarnOnUnfoldedRebakeInputs()
+        {
+            var ecs = _simulation as xpTURN.Klotho.ECS.EcsSimulation;
+            if (ecs == null)
+                return;
+
+            if (ecs.GetSystem<xpTURN.Klotho.Deterministic.Navigation.INavFingerprintSource>() == null)
+                _logger?.KWarning(
+                    $"[KlothoEngine] a nav rebake driver is registered but no INavFingerprintSource " +
+                    $"is — the installed mesh is then absent from the static environment " +
+                    $"fingerprint, so a rebake that ran on one peer and not the other stays " +
+                    $"invisible (the state hash covers components, not the mesh). " +
+                    $"FPNavAgentSystem implements it; registering the agent system is usually all " +
+                    $"this takes");
+
+            if (ecs.GetSystem<xpTURN.Klotho.ECS.IGameFingerprintSource>() == null)
+                _logger?.KWarning(
+                    $"[KlothoEngine] a nav rebake driver is registered but no IGameFingerprintSource " +
+                    $"is — the inputs that DECIDE the mesh (the shape catalog a placement indexes " +
+                    $"into, the delay that picks its tick) are outside every hash, so two builds " +
+                    $"that disagree about them carve different meshes from identical commands. Fold " +
+                    $"them into GetGameFingerprint. If you check them at load through the match " +
+                    $"config instead, this line is a known false positive");
+        }
+
         public ISimulation Simulation => _simulation;
         public IKLogger Logger => _logger;
 
@@ -641,6 +743,7 @@ namespace xpTURN.Klotho.Core
             _simulation = simulation;
             _networkService = networkService;
             _logger = logger;
+            ResolveNavRebakeDriver();
             _dispatcher = new EventDispatcher(logger, _simConfig.EventDispatchWarnMs);
 
             if (_simConfig.Mode == NetworkMode.ServerDriven && _simConfig.InputDelayTicks < 2)
@@ -797,6 +900,7 @@ namespace xpTURN.Klotho.Core
 
             _simulation = simulation;
             _logger = logger;
+            ResolveNavRebakeDriver();
             (_inputBuffer as InputBuffer)?.SetLogger(logger);
 
             _simulation.Initialize();
@@ -924,6 +1028,30 @@ namespace xpTURN.Klotho.Core
                 try { _simulationCallbacks?.OnInitializeWorld(this); }
                 finally { _worldInitInProgress = false; }
 
+                // Establish the navmesh invariant BEFORE anything samples a derivative of it, and
+                // note the position: after world init, so the driver sees the buildings a map may
+                // have pre-placed, and before both the static fingerprint below and the initial
+                // FullState broadcast that follows.
+                //
+                // The driver guarantees installed == Bake(f(frame)) from the start of every EXECUTED
+                // tick. World init is the one window that guarantee has never covered: the initial
+                // FullState — and the fingerprint it carries — goes out after this point and before
+                // tick 0 ever runs. Without this the peer's derivative there is still the LOADED
+                // mesh, which is the same walkable region as Bake({}) but not the same triangulation
+                // (measured in the field: 0x21D6… vs 0xDF40…), so a client that applies that state
+                // and corrects itself gets blamed for a static-environment mismatch for being right.
+                //
+                // Net cost is zero: this MOVES the match-start rebake that tick 0 already paid for,
+                // and tick 0 then sees the tag match and skips.
+                //
+                // SD clients skip this whole block (!isSdClient above) and do not need it — their
+                // window is closed by the same correction on the full-state apply path.
+                if (_navRebakeDriver != null && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsInit)
+                {
+                    var initFrame = ecsInit.Frame;
+                    _navRebakeDriver.CorrectNow(ref initFrame);
+                }
+
                 // One-time static geometry fingerprint. Gated to non-SD-client peers: the SD client
                 // has no static loaded yet here (it arrives via Initial FullState), so logging it now
                 // would record a misleading count=0. Server/P2P log a server-vs-client comparable line.
@@ -981,6 +1109,28 @@ namespace xpTURN.Klotho.Core
             _logger?.KInformation($"[KlothoEngine][SD] Bootstrap timeout resync: peerId={peerId}, tick={_cachedFullStateTick}, size={_cachedFullState.Length}");
         }
 
+        /// <summary>
+        /// Fires once per <see cref="Update"/>, before any per-mode branch — the one place a host
+        /// can advance FRAME-paced work and know it runs exactly once per frame in every mode.
+        ///
+        /// <para><b>Why an event rather than a callback interface.</b> The dedicated server never
+        /// receives an <c>IViewCallbacks</c>, and most test harnesses construct the engine through
+        /// the three-argument <c>Initialize</c> and so have no <c>ISimulationCallbacks</c> either.
+        /// A hook on either of those would silently do nothing in exactly the paths that need
+        /// covering. Subscribers reach this through the engine they already hold — the server via
+        /// <c>RoomManagerConfig.OnRoomCreated</c>, a client via its session, a test directly.</para>
+        ///
+        /// <para><b>Contract: do not touch simulation state.</b> A frame is not a tick. The tick
+        /// loop may execute the same tick many times (rollback re-execution) and may execute none
+        /// at all, so anything written here would not be re-executed with the frame and would
+        /// diverge. This is for peer-local derived work — advancing a sliced rebake, warming a
+        /// cache — and the sliced rebake is why it exists: its progress cursor is derived state
+        /// precisely so that it can be paced by frames instead of ticks.</para>
+        ///
+        /// <para>Exceptions are caught and logged, not propagated.</para>
+        /// </summary>
+        public event Action<float> OnFrameBoundary;
+
         public void Update(float deltaTime)
         {
             // PuP snapshot capture. Run exactly once immediately on Update entry, before any simulation logic.
@@ -989,6 +1139,36 @@ namespace xpTURN.Klotho.Core
 
             // Advance the Verified render timeline by wall-clock. Run once before per-mode early returns.
             AdvanceVerifiedRenderTime(deltaTime);
+
+            // Frame-paced host work. Same placement rule as the two calls above — once per Update,
+            // ahead of every per-mode early return — because that is what makes it once per FRAME
+            // in every mode. A throwing subscriber is contained: this point is on every mode's
+            // path, so letting it escape would take the session down with it.
+            if (OnFrameBoundary != null)
+            {
+                try
+                {
+                    OnFrameBoundary(deltaTime);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.KError($"[KlothoEngine] OnFrameBoundary subscriber threw — ignored: {ex.Message}\n{ex.StackTrace}");
+                }
+            }
+
+            // Frame pacing for a sliced navmesh rebake. Same placement rule as the event above — once
+            // per Update, ahead of every per-mode early return — because that is what makes it once
+            // per FRAME in every mode, including the server-driven client that never runs world init.
+            //
+            // Called directly rather than through the event: the driver lives in Deterministic/,
+            // which does not know this type, so it cannot subscribe itself, and leaving the
+            // subscription to the game is what let a whole host miss it for an entire release.
+            //
+            // Outside the try above, and that is not an oversight. The driver contains its own slice
+            // faults (it drops the task and reports on the next tick), so nothing should escape here
+            // — if something does it is a defect in that containment, and swallowing it a second time
+            // would hide the one path that is supposed to be exception-free.
+            _navRebakeDriver?.AdvanceSlice(deltaTime);
 
             // Spectator mode: skip ordinary tick processing and update only the spectator system.
             if (_isSpectatorMode)

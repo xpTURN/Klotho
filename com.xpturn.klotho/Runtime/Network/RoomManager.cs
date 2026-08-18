@@ -239,6 +239,25 @@ namespace xpTURN.Klotho.Network
             var sessionConfig = _config.SessionConfigFactoryForMatch != null
                 ? _config.SessionConfigFactoryForMatch(matchCtx)
                 : _config.SessionConfigFactory();
+
+            // maxEntities / maxCount overrides / prune-set are PROCESS-global layout inputs, not
+            // per-room ones — but the config that carries them is per-room (the match factory is
+            // free to return a different one per stage). Ask before constructing: handing a
+            // disagreeing set to the registry recomputes the layout in editor/test builds — pulling
+            // _layouts and the type-id cache out from under rooms already ticking on workers — and
+            // throws in release, where nothing between here and ServerLoop.Run catches it, so one
+            // mismatched room would take the whole process and every healthy room with it.
+            // Refusing here costs this room only: the peer gets RoomNotFound, the server lives.
+            if (ComponentStorageRegistry.LayoutInputsConflict(
+                    simConfig.MaxEntities, simConfig.ComponentMaxCountOverrides,
+                    simConfig.PrunedComponentTypeIds, out string layoutConflict))
+            {
+                _logger?.KError(
+                    $"[RoomManager] Room {roomId} refused — per-room simulation config disagrees with the " +
+                    $"process layout. {layoutConflict} Source these three from one place at bootstrap.");
+                return null;
+            }
+
             var sim = new EcsSimulation(
                 maxEntities: simConfig.MaxEntities,
                 maxRollbackTicks: _config.SimulationMaxRollbackTicks,
@@ -310,7 +329,12 @@ namespace xpTURN.Klotho.Network
         /// Clears IsStraggler for straggler rooms whose ThreadPool Update has completed
         /// (UpdateComplete set by the worker). Invoked every cycle on the main thread of ServerLoop,
         /// before the Draining/Disposing transitions so a just-completed straggler can be processed
-        /// in the same cycle. StragglerCount is intentionally preserved (cumulative; see D-1).
+        /// in the same cycle. Touches IsStraggler only — the straggle history decays on a room's own
+        /// CLEAN cycle (Room.NoteCleanCycle), never on recovery. That distinction is the whole design:
+        /// recovery follows every straggle, so decaying here would return the count to 0 regardless of
+        /// how often the room actually misses, and force-close would never fire. This replaced a
+        /// cumulative policy, which never forgot an old straggle and so drifted toward closing a
+        /// room that had long since recovered.
         /// </summary>
         public void RecoverCompletedStragglers()
         {

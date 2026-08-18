@@ -218,6 +218,54 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             AssertMeshIdentical(before, after, "snapshot immutability across pooled rebakes");
         }
 
+        [Test]
+        public void NonPoolingPreviewRents_HandBackAFreshArrayEveryTime()
+        {
+            // NonPooling is a process-global static, so a rent that returned an instance field
+            // from it would be one array shared by every room in the process — the exact thing
+            // the class note ("Never share one pool between rooms") forbids. The preview rents
+            // used to do that: they had no `if (!_reuse)` branch at all, so the reuse path ran
+            // on the non-reuse instance.
+            //
+            // Unreachable when it was written — the only callers take a required
+            // FPBuildingPreviewScratch, which always carries a reuse=true pool of its own — which
+            // is why nothing caught it. One optional-scratch overload would have been enough.
+            var pool = FPNavMeshRebakeBufferPool.NonPooling;
+
+            Assert.AreNotSame(pool.PreviewRects(8), pool.PreviewRects(8),
+                "NonPooling.PreviewRects handed back the same array twice — that array is now shared "
+                + "by every caller in the process");
+            Assert.AreNotSame(pool.PreviewPlacements(8), pool.PreviewPlacements(8),
+                "NonPooling.PreviewPlacements handed back the same array twice");
+        }
+
+        [Test]
+        public void PreviewRents_GoThroughTheAllocationCounter()
+        {
+            // AllocatedArrayCount is the counter gate's only input, and Counted's own note calls
+            // itself "the only way to produce an array here". The preview rents allocated around
+            // it, so the counter read zero no matter how often they grew — a preview alloc gate
+            // written against this number would have passed while measuring nothing.
+            var pool = new FPNavMeshRebakeBufferPool();
+
+            pool.PreviewRects(4);
+            pool.PreviewPlacements(4);
+
+            pool.ResetAllocatedArrayCount();
+            pool.PreviewRects(4096);
+            pool.PreviewPlacements(4096);
+            Assert.AreEqual(2, pool.AllocatedArrayCount,
+                "a preview rent that outgrows its slot must allocate THROUGH Counted, once each");
+
+            // The other half, so the assertion above cannot be satisfied by counting every call:
+            // at a size the pool already covers, nothing is allocated at all.
+            pool.ResetAllocatedArrayCount();
+            pool.PreviewRects(4096);
+            pool.PreviewPlacements(4096);
+            Assert.AreEqual(0, pool.AllocatedArrayCount,
+                "a repeat rent at a covered size must reuse the slot");
+        }
+
 #if DEBUG
         [Test]
         public void EveryRent_ClearsStaleData_NotJustTheOnesThatRememberedTo()
@@ -249,6 +297,28 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
             AssertEdgeRecordRentIsCleared(pool.PatchEdges, "PatchEdges");
             AssertEdgeRecordRentIsCleared(pool.PatchBoundaryEdges, "PatchBoundaryEdges");
+
+            // Two more of the same kind, found later: the preview rents. Their callers pass an
+            // explicit count so the tail is not read today, but that is the caller's discipline,
+            // not the buffer's — and this buffer is the one whose length the caller varies by one
+            // per frame, so a count that drifts finds a full tail of last frame's shapes.
+            FPBuildingRect[] rects = pool.PreviewRects(64);
+            for (int i = 0; i < rects.Length; i++)
+                rects[i] = Rect(1, 1, 2, 2);
+            FPBuildingRect[] rects2 = pool.PreviewRects(8);
+            Assert.AreSame(rects, rects2, "premise: PreviewRects must be reusing the same array");
+            for (int i = 0; i < rects2.Length; i++)
+                Assert.AreNotEqual(Rect(1, 1, 2, 2).MinX.RawValue, rects2[i].MinX.RawValue,
+                    $"PreviewRects[{i}] still holds stale data");
+
+            FPBuildingPlacement[] places = pool.PreviewPlacements(64);
+            for (int i = 0; i < places.Length; i++)
+                places[i] = new FPBuildingPlacement(0x5A5A, 0, FP64.Zero, FP64.Zero, FP64.Zero);
+            FPBuildingPlacement[] places2 = pool.PreviewPlacements(8);
+            Assert.AreSame(places, places2, "premise: PreviewPlacements must be reusing the same array");
+            for (int i = 0; i < places2.Length; i++)
+                Assert.AreNotEqual(0x5A5A, places2[i].ShapeId,
+                    $"PreviewPlacements[{i}] still holds a stale shape id");
 
             // Controls: two that always honoured it, so a change that broke the fill everywhere
             // could not pass this test by making the assertions vacuous.

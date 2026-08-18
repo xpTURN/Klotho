@@ -14,7 +14,12 @@ namespace Brawler
     /// source of truth), and the shape table becomes part of the determinism envelope — see
     /// <see cref="BrawlerBuildingShapes"/>.
     /// </summary>
-    [KlothoComponent(108, MaxCount = 32)]
+    // MaxCount is STORAGE, not policy: the policy cap (PlatformerCommandSystem.MaxBuildings)
+    // still admits 32 standing buildings, but a demolition now leaves a tombstone occupying a slot
+    // until its RemovalEffectiveTick, so storage has to hold more than the policy allows to stand.
+    // Raising it moves LayoutFingerprint, so every peer must ship the same value — it is caught at
+    // join rather than silently.
+    [KlothoComponent(108, MaxCount = 40)]
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public partial struct BuildingComponent : IComponent
     {
@@ -55,5 +60,26 @@ namespace Brawler
         /// <summary>Which turn of it. 0 for a shape that does not turn, such as the hexagon.</summary>
         public int Orientation;
         public int OwnerSlot;
+        /// <summary>
+        /// The tick this building becomes part of the navmesh — the placement tick plus the build
+        /// delay K. Frame state, so every peer swaps on the same tick and a joiner can reproduce
+        /// the mesh that is installed right now rather than the one the component set implies.
+        ///
+        /// <para>Until this tick the building is a LOGICAL occupant: placement validation counts
+        /// it (so nothing else may be built there) while the mesh does not. That gap is the point
+        /// of the delay, not an artefact of it.</para>
+        /// </summary>
+        public int EffectiveTick;
+        /// <summary>
+        /// The tick this building leaves the navmesh, or <see cref="int.MaxValue"/> while it is
+        /// not scheduled for removal. The entity is destroyed on the same tick.
+        ///
+        /// <para>Demolition cannot destroy the entity immediately: the mesh keeps the hole until
+        /// this tick, and a joiner arriving in between has no way to reproduce that hole from a
+        /// component that no longer exists. The state hash would agree while the navmeshes
+        /// diverged — the failure with no detector. So the component stays as a tombstone and the
+        /// active set is <c>EffectiveTick &lt;= tick &lt; RemovalEffectiveTick</c>.</para>
+        /// </summary>
+        public int RemovalEffectiveTick;
     }
 }
