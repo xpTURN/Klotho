@@ -1,0 +1,123 @@
+name: Check
+
+# Verifies pushed source: builds and runs the .NET test suites, and checks that the
+# committed dist/ addon and the version manifests are in sync with the source.
+# Unity EditMode suites (see Tools/run-all-tests.sh) are not run here — they need a
+# licensed editor.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'Docs/**'
+      - '*.png'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  build-test:
+    name: Build & test (.NET)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # KlothoGenerator.Tests targets net10.0; everything else targets net8.0.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      # Klotho.Tests.sln is gitignored, so the projects are listed explicitly.
+      # Keep this list in sync with DOTNET_TEST_PROJECTS in Tools/run-all-tests.sh.
+      - name: Build & test
+        run: |
+          set -uo pipefail
+          projects=(
+            "Tools/KlothoGenerator.Tests/KlothoGenerator.Tests.csproj"
+            "Samples/Klotho.Runtime.Tests/Klotho.Runtime.Tests.csproj"
+            "Samples/DevLobbyServer.Tests/DevLobbyServer.Tests.csproj"
+          )
+          results="${GITHUB_WORKSPACE}/Logs/test-results"
+          mkdir -p "${results}"
+          overall=0
+          for proj in "${projects[@]}"; do
+            name="$(basename "$(dirname "${proj}")")"
+            echo "::group::${name}"
+            dotnet test "${proj}" \
+              -c Release \
+              --results-directory "${results}" \
+              --logger "trx;LogFileName=dotnet-${name}.trx" || overall=1
+            echo "::endgroup::"
+          done
+          exit ${overall}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: Logs/test-results/*.trx
+          if-no-files-found: warn
+
+  pack-verify:
+    name: dist/ addon is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      # release.yml zips the committed dist/addons/ as-is, so a stale dist/ would ship.
+      - name: Regenerate the addon and diff it against dist/
+        run: .github/scripts/check-dist-sync.sh
+
+  version-check:
+    name: Version manifests agree
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check versions
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            .github/scripts/check-versions.sh --tag "${GITHUB_REF_NAME}"
+          else
+            .github/scripts/check-versions.sh
+          fi
