@@ -76,6 +76,12 @@ jobs:
           done
           exit ${overall}
 
+      # Job logs need repo admin rights to download, so surface the failed test
+      # names as annotations + job summary instead.
+      - name: Summarize test results
+        if: always()
+        run: .github/scripts/summarize-trx.py Logs/test-results
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
