@@ -12,9 +12,11 @@ namespace xpTURN.Klotho.Deterministic.Math
     /// used by the dotnet test projects. Reference implementation: dotnet/runtime Int128 (MIT).
     ///
     /// Minimal surface on purpose: exact signed 64x64->128
-    /// multiply, addition, subtraction/negation, and sign. Overflow past 128 bits wraps
-    /// (two's complement); predicate inputs are domain-guarded so accumulations stay
-    /// far below 2^127.
+    /// multiply, addition, subtraction/negation, sign, and one truncated 128/64 division
+    /// (<see cref="DivRem"/> — added for the clip stage's X' cell location, the single
+    /// place the rebaker needs a quotient; everything else stays division-free). Overflow
+    /// past 128 bits wraps (two's complement); predicate inputs are domain-guarded so
+    /// accumulations stay far below 2^127.
     /// </summary>
     public readonly struct FPInt128 : IEquatable<FPInt128>
     {
@@ -95,6 +97,53 @@ namespace xpTURN.Klotho.Deterministic.Math
             if (Hi > 0 || Lo != 0UL)
                 return 1;
             return 0;
+        }
+
+        /// <summary>
+        /// Truncated (toward-zero, C# semantics) division of a 128-bit dividend by a nonzero
+        /// 64-bit divisor. The quotient must fit in a signed 64-bit value — the clip stage's
+        /// inputs guarantee it (|numerator| ≤ |t-den| · 2·MAX_SNAPPED, quotient ≤ 2·MAX_SNAPPED)
+        /// and a Debug assert guards the contract. Remainder carries the dividend's sign,
+        /// matching <c>long.DivRem</c>. Bit-serial long division: 128 iterations, exact,
+        /// branch-deterministic — this runs a handful of times per placement, never per tick.
+        /// </summary>
+        public static long DivRem(FPInt128 dividend, long divisor, out long remainder)
+        {
+            System.Diagnostics.Debug.Assert(divisor != 0, "FPInt128.DivRem: divisor is zero");
+            System.Diagnostics.Debug.Assert(divisor != long.MinValue,
+                "FPInt128.DivRem: long.MinValue divisor is outside the supported domain");
+
+            bool negDividend = dividend.Hi < 0;
+            FPInt128 mag = negDividend ? Negate(dividend) : dividend;
+            ulong dv = (ulong)(divisor < 0 ? -divisor : divisor);
+
+            ulong qHi = 0UL, qLo = 0UL, rem = 0UL;
+            for (int i = 127; i >= 0; i--)
+            {
+                // rem = (rem << 1) | bit_i(mag); rem never reaches 2^64 because rem < dv ≤ 2^63
+                // before the shift.
+                ulong bit = i >= 64
+                    ? ((ulong)mag.Hi >> (i - 64)) & 1UL
+                    : (mag.Lo >> i) & 1UL;
+                rem = (rem << 1) | bit;
+                if (rem >= dv)
+                {
+                    rem -= dv;
+                    if (i >= 64)
+                        qHi |= 1UL << (i - 64);
+                    else
+                        qLo |= 1UL << i;
+                }
+            }
+
+            bool negQuotient = negDividend ^ (divisor < 0);
+            System.Diagnostics.Debug.Assert(
+                qHi == 0UL && qLo <= (negQuotient ? (ulong)long.MaxValue + 1UL : (ulong)long.MaxValue),
+                "FPInt128.DivRem: quotient does not fit in a signed 64-bit value");
+
+            long q = negQuotient ? -(long)qLo : (long)qLo;
+            remainder = negDividend ? -(long)rem : (long)rem;
+            return q;
         }
 
         public bool Equals(FPInt128 other)

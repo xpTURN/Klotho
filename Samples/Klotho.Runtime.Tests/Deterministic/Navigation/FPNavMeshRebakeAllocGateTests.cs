@@ -29,12 +29,21 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
     /// would flag normal behaviour — buildings accumulate within a match, so growth is expected
     /// and is not a regression.
     ///
-    /// The byte gate measures THREE configurations, and the labels matter because they were once
+    /// The byte gate measures FOUR configurations, and the labels matter because they were once
     /// wrong: Field with no buildings (the mesh-independent residual), Field with four separated
-    /// footprints (the real asset, 22,321 triangles), and the synthetic grid with four clustered
+    /// footprints (the real asset, 22,321 triangles), the synthetic grid with four clustered
     /// ones (interacting carve channels, ~7x the cost of the same count separated — a path Field
-    /// cannot host at all). It requires the Field asset and FAILS without it; the fallback it used
-    /// to have is what let it report synthetic numbers under a message that said "on Field".
+    /// cannot host at all), and the same Field placements under
+    /// <see cref="FPBoundaryPlacementPolicy.ClipOverlap"/>. It requires the Field asset and FAILS
+    /// without it; the fallback it used to have is what let it report synthetic numbers under a
+    /// message that said "on Field".
+    ///
+    /// <para><b>Why a policy configuration exists at all.</b> Every gate here ran the DEFAULT rules
+    /// and nothing else, so the clip stage — which only the `ClipOverlap` policy enters — was
+    /// outside all of them. That was fine while no game used the policy; the Brawler sample now
+    /// ships it. The clipper's own note says a pooled rewrite is follow-up work, and the fourth
+    /// configuration is what turns the size of that debt from an argument into a number that moves
+    /// when someone pays it down.</para>
     /// </summary>
     [TestFixture]
     public class FPNavMeshRebakeAllocGateTests
@@ -43,14 +52,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
         private static string RepoRoot()
         {
-            // com.xpturn.klotho/package.json — tracked, and present only at the repo root.
-            // NOT Klotho.Tests.sln: that one is gitignored, so a fresh CI clone does not have it
-            // and naming a file that can be absent does not fail — the walk just runs off the top
-            // of the filesystem and returns null, after which the byte gate silently measured a
-            // synthetic mesh while its own assertion message said "on Field". Hence LoadField
-            // below refusing to fall back.
+            // Klotho.Tests.sln. There is no Klotho.sln, and naming one here does not fail —
+            // the walk just runs off the top of the filesystem and returns null, after which the
+            // byte gate silently measured a synthetic mesh while its own assertion message said
+            // "on Field". Hence LoadField below refusing to fall back.
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "com.xpturn.klotho", "package.json")))
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Klotho.Tests.sln")))
                 dir = dir.Parent;
             return dir?.FullName;
         }
@@ -64,7 +71,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         private static FPNavMesh LoadField()
         {
             string root = RepoRoot();
-            Assert.NotNull(root, "could not locate the repo root (com.xpturn.klotho/package.json) from "
+            Assert.NotNull(root, "could not locate the repo root (Klotho.Tests.sln) from "
                 + AppContext.BaseDirectory);
             string path = Path.Combine(root, "Samples/Brawler/Assets/NavMesh/Data/Field.NavMeshData.bytes");
             Assert.IsTrue(File.Exists(path), $"the byte gate measures the real Field asset and it is missing: {path}");
@@ -137,18 +144,20 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             return result;
         }
 
-        private static void RebakeAndInstall(FPNavMeshRebakeContext ctx, FPBuildingRect[] buildings)
+        private static void RebakeAndInstall(FPNavMeshRebakeContext ctx, FPBuildingRect[] buildings,
+            FPBuildingPlacementRules rules = default)
         {
-            FPNavMesh mesh = FPNavMeshRebaker.Rebake(ctx, buildings);
+            FPNavMesh mesh = FPNavMeshRebaker.Rebake(ctx, buildings, null, rules);
             ctx.CommitSwap(mesh);
         }
 
-        private static long MeasurePerRebake(FPNavMeshRebakeContext ctx, FPBuildingRect[] buildings)
+        private static long MeasurePerRebake(FPNavMeshRebakeContext ctx, FPBuildingRect[] buildings,
+            FPBuildingPlacementRules rules = default)
         {
             const int iterations = 8;
             long before = GC.GetAllocatedBytesForCurrentThread();
             for (int i = 0; i < iterations; i++)
-                RebakeAndInstall(ctx, buildings);
+                RebakeAndInstall(ctx, buildings, rules);
             return (GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
         }
 
@@ -268,7 +277,183 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 "byte gate: measured 31.8 KB at 4 clustered buildings on the synthetic grid — this is "
                 + "the interacting-carve path, and it costs ~7x what the same count of separated "
                 + "footprints does");
+
+            // Fourth configuration: the SAME buildings on the SAME asset, only the boundary policy
+            // differs. That is the whole design — the delta is the clip stage and nothing else.
+            //
+            // History, because the number moved twice and the ceiling had to move with it. This
+            // configuration was added measuring 255,272 B: the clip stage allocated per CALL and per
+            // RING rather than per building, and Field's boundary decomposes into 1,679 rings (one
+            // outer of 995 edges plus 1,678 holes averaging 8). Every call built an int[15,317]
+            // ring-of-edge map (~83 KB) and then a List<int>[1,679] with a List<int> for each ring
+            // (~148 KB) to group a handful of transitions. Moving the decomposition onto the
+            // snapshot removed the first; replacing the per-ring lists with one sorted run walk
+            // removed the second. Neither changed an answer.
+            //
+            // What is left is per-placement and small, so the ceiling is tight on purpose: it is no
+            // longer a debt being tracked, it is the working set. If it climbs back into the tens of
+            // KB something re-introduced a per-ring container.
+            var clipRules = new FPBuildingPlacementRules(
+                allowBuildingTouch: false, FPBoundaryPlacementPolicy.ClipOverlap);
+            var clipCtx = new FPNavMeshRebakeContext(FPNavMeshRebaker.CreateSnapshot(baseMesh));
+            for (int i = 0; i < Warmup; i++)
+                RebakeAndInstall(clipCtx, buildings, clipRules);
+            long clipBytes = MeasurePerRebake(clipCtx, buildings, clipRules);
+
+            TestContext.Out.WriteLine(
+                $"ClipOverlap on the same Field placements: {clipBytes} B "
+                + $"({clipBytes - withBuildings:+#;-#;0} B vs the default policy) — Field has "
+                + "1,679 boundary rings and nothing in the clip stage scales with that any more");
+
+            Assert.Greater(clipBytes, withBuildings,
+                "the clip stage allocates per call, so ClipOverlap cannot be cheaper than the default "
+                + "on an asset with 1,679 boundary rings. If these are equal the policy did not take "
+                + "effect and this configuration is measuring the default path twice");
+
+            Assert.Less(clipBytes, 24L * 1024,
+                "byte gate: measured 9,104 B for 4 separated buildings on Field under ClipOverlap, "
+                + "against 5,360 B for the same placements under the default — a 3,744 B delta on an "
+                + "asset with 1,679 boundary rings. It was 255,272 B before the ring decomposition "
+                + "moved to the snapshot and the per-ring lists became one sorted run walk, and "
+                + "9,504 B before Result stopped materialising five arrays (the preview needed that; "
+                + "the rebake got 400 B of it for free). Nothing here scales with the ring count any "
+                + "more, so a climb back into the tens of KB means a per-ring container came back. "
+                + "The rebake still allocates its clip buffers per call on purpose — pooling them is "
+                + "the preview's contract, and a once-per-placement caller must bring its own");
 #endif
+        }
+
+        /// <summary>
+        /// T-13. The per-frame ghost preview's allocation, for every policy and both API forms.
+        ///
+        /// <para><b>Why this exists before any pooling work.</b> The changes that reduce this
+        /// allocation are, several of them, invisible to every correctness test in the suite: a
+        /// capacity hint and a skipped all-zero array change no output at all, so nothing else can
+        /// tell whether they landed or later regressed. This gate is the only regression line for
+        /// them, which is why it is written first and why its numbers are recorded rather than
+        /// bounded loosely.</para>
+        ///
+        /// <para><b>`Reject` and `Touch` allocate nothing, and that is a contract.</b> It is what
+        /// <see cref="FPBuildingPreviewScratch"/> buys, and it holds however many buildings are
+        /// down. `ClipOverlap` breaks it because answering means building the clip rings.</para>
+        ///
+        /// <para><b>Both forms, because they measure the same bytes.</b> The snapshot form has no
+        /// accepted set and so no transition cache, yet it allocates byte for byte what the context
+        /// form does — the cache saves WORK, not memory. That equality is itself the snapshot form's
+        /// non-vacuity check: the context form's is `CachedTransitionStart[n] > 0`, which the
+        /// snapshot form has no way to assert.</para>
+        /// </summary>
+        [Test]
+        public void ByteGate_GhostPreviewAllocationPerPolicyAndForm()
+        {
+#if DEBUG
+            Assert.Ignore(
+                "Release-only for the same reason as the rebake byte gate: DEBUG allocations swamp "
+                + "the signal. Run: dotnet test -c Release --filter FullyQualifiedName~ByteGate");
+#else
+            FPNavMesh baseMesh = LoadField();
+            Assert.AreEqual(22321, baseMesh.TriangleCount,
+                "the numbers below were measured on this exact asset");
+
+            // Measured 360 / 528 / 1,056 / 1,944 B at N = 1 / 4 / 16 / 32 after stage 3 of
+            // IMP100/Plan-PreviewClipAlloc.md. The trail, at N = 32:
+            //   85,624 → 41,512 (stage 1: CSR order table, sized transition list, no Y channel)
+            //          → 10,464 (stage 2: the nine clip buffers pooled)
+            //          →  1,944 (stage 3: Result hands out the working lists instead of five arrays)
+            // What is left is the CSR pair (808), `uf` (160) and the pairing scratch (~976) — that
+            // is stage 4, whose target is zero. The decomposition is in that plan's §2.
+            //
+            // Ceilings are ~1.05x, not budgets. Allocation is deterministic for a given build after
+            // warmup, so a number that moves means something changed.
+            var clipCeiling = new[] { 400L, 600L, 1200L, 2200L };
+            var counts = new[] { 1, 4, 16, 32 };
+            TestContext.Out.WriteLine("ghost preview allocation per call:");
+
+            foreach (FPBoundaryPlacementPolicy policy in new[]
+                     {
+                         FPBoundaryPlacementPolicy.Reject,
+                         FPBoundaryPlacementPolicy.Touch,
+                         FPBoundaryPlacementPolicy.ClipOverlap,
+                     })
+            {
+                bool clipping = policy == FPBoundaryPlacementPolicy.ClipOverlap;
+                var spots = clipping ? FieldPlacementSpots.Clipping : FieldPlacementSpots.Strict;
+                var rules = new FPBuildingPlacementRules(allowBuildingTouch: false, policy);
+                FPBuildingRect ghost = FieldPlacementSpots.Ghost(spots);
+                FPNavMeshRebakeSnapshot shared = FPNavMeshRebaker.CreateSnapshot(baseMesh);
+
+                for (int k = 0; k < counts.Length; k++)
+                {
+                    int n = counts[k];
+                    FPBuildingRect[] existing = FieldPlacementSpots.Take(spots, n);
+
+                    var ctx = new FPNavMeshRebakeContext(FPNavMeshRebaker.CreateSnapshot(baseMesh));
+                    FPNavMeshRebaker.Rebake(ctx, existing, null, rules);
+                    // A scratch PER configuration, mirroring the fresh context above. The snapshot
+                    // form sizes its transition list from what the last call through this scratch
+                    // resolved, so a scratch carried across configurations arrives holding another
+                    // N's count and over-reserves — which is correct behaviour and a wrong
+                    // measurement. (Found by the equality assertion below on its first run.)
+                    var scratch = new FPBuildingPreviewScratch();
+
+                    // The preview has to be answering the question. A refusal short-circuits before
+                    // the boundary tests and would measure the separation loop instead.
+                    Assert.IsTrue(
+                        FPNavMeshRebaker.TryValidateOne(ctx, ghost, out FPBuildingRejectionInfo why, rules),
+                        $"the ghost was refused under {policy} at N = {n} ({why.Reason}) — this "
+                        + "configuration is measuring a rejection path, not the real work");
+                    // And the clipping rows have to be clipping, or the expensive label sits on the
+                    // cheap path. Only the context form can be asked; see the summary.
+                    if (clipping)
+                        Assert.Greater(ctx.Accepted.CachedTransitionStart[n], 0,
+                            $"no existing building crosses a wall at N = {n}, so this row is "
+                            + "measuring the identity carve rather than the clip stage");
+
+                    long contextBytes = MeasurePerPreview(
+                        () => FPNavMeshRebaker.TryValidateOne(ctx, ghost, out _, rules));
+                    long snapshotBytes = MeasurePerPreview(
+                        () => FPNavMeshRebaker.TryValidateOne(
+                            shared, existing, n, ghost, out _, scratch, rules));
+
+                    // Written as it goes, not collected: a failing assertion below has to arrive
+                    // with the rows that led to it, or the message names a number with no row.
+                    TestContext.Out.WriteLine(
+                        $"  {policy,-12} N={n,-3} context {contextBytes,7} B   snapshot {snapshotBytes,7} B");
+
+                    Assert.AreEqual(contextBytes, snapshotBytes,
+                        $"the two forms allocate the same bytes under {policy} at N = {n} — the "
+                        + "transition cache saves work, not memory. A difference means one form "
+                        + "gained (or lost) an allocation the other did not, and this gate's single "
+                        + "baseline table stops describing both");
+
+                    Assert.AreEqual(0, contextBytes,
+                        $"the {policy} preview at N = {n} allocated {contextBytes} B — it must "
+                        + "allocate NOTHING. The strict policies walk the base mesh's edges once and "
+                        + "touch nothing already built; ClipOverlap builds clip rings but does it in "
+                        + "buffers it reuses (FPClipScratch). It was "
+                        + $"{new[] { 5104, 12696, 41384, 85624 }[k]} B under ClipOverlap before "
+                        + "IMP100/Plan-PreviewClipAlloc.md. A per-frame API has no room for a "
+                        + "steady-state allocation, so this is zero and not a ceiling");
+                }
+            }
+
+#endif
+        }
+
+        /// <summary>
+        /// Steady-state allocation of one preview call. The warmup matters for the same reason it
+        /// does in the perf harness: tiered JIT and one-shot caches make the first calls allocate
+        /// differently from the hundredth, and a per-frame API's cost is the steady state.
+        /// </summary>
+        private static long MeasurePerPreview(System.Action preview)
+        {
+            for (int i = 0; i < Warmup; i++)
+                preview();
+            const int iterations = 20;
+            long before = System.GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < iterations; i++)
+                preview();
+            return (System.GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
         }
 
         // ─────────────────────────────────────────────── the per-tick driver

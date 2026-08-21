@@ -56,11 +56,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// is exactly zero, which is precisely "an agent cannot fit". So whether to allow it is a
     /// game rule — pack the base wall-to-wall, or don't — and this struct is where the game says.
     ///
-    /// There is deliberately NO flag for touching the walkable BOUNDARY. The CDT accepts that too,
-    /// but the result is wrong further down: a hole ring sharing an edge with the outer ring is no
-    /// hole at all, because even-odd erasure counts the coincident edge once and the notch keeps
-    /// odd depth. Measured — such a building is accepted and carves NOTHING. Silently ineffective
-    /// is worse than rejected, so it stays rejected.
+    /// Touching the walkable BOUNDARY is a policy too (<see cref="BoundaryPolicy"/>). It used to
+    /// be unconditionally rejected because a hole ring sharing an edge with the outer ring carved
+    /// NOTHING — even-odd erasure counted the coincident edge once and the notch kept odd depth.
+    /// The coincident-constraint parity fix (Constrained = OR, CrossParity = XOR) closed that:
+    /// a flush building now carves exactly its expanded footprint (measured — probes blocked,
+    /// carved area bit-exact). Docs/IMP/IMP96/Plan-BoundaryTouchSeal.md is the record.
     ///
     /// DETERMINISM: every peer must use the same value, and so must a replay played back later.
     /// A peer that rejects a placement another accepted ends up with a different BuildingComponent
@@ -79,10 +80,53 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         public readonly bool AllowBuildingTouch;
 
+        /// <summary>
+        /// What a building may do at the WALKABLE BOUNDARY. Default (<see
+        /// cref="FPBoundaryPlacementPolicy.Reject"/>) is the historical behaviour.
+        /// A separate axis from <see cref="AllowBuildingTouch"/> on purpose: "buildings may pack"
+        /// and "buildings may sit flush against walls" are choices a game can want independently.
+        /// </summary>
+        public readonly FPBoundaryPlacementPolicy BoundaryPolicy;
+
         public FPBuildingPlacementRules(bool allowBuildingTouch)
+            : this(allowBuildingTouch, FPBoundaryPlacementPolicy.Reject)
+        {
+        }
+
+        public FPBuildingPlacementRules(
+            bool allowBuildingTouch, FPBoundaryPlacementPolicy boundaryPolicy)
         {
             AllowBuildingTouch = allowBuildingTouch;
+            BoundaryPolicy = boundaryPolicy;
         }
+    }
+
+    /// <summary>
+    /// Boundary-contact policy for placements. Values are APPEND-ONLY and carry no ordering
+    /// semantics — never compare with &lt;/&gt;; a future mode need not fit a linear scale.
+    /// Inside the determinism envelope like the rest of <see cref="FPBuildingPlacementRules"/>.
+    /// </summary>
+    public enum FPBoundaryPlacementPolicy : byte
+    {
+        /// <summary>Any contact with a walkable-boundary ring rejects the placement. Historical
+        /// default; <c>default(FPBuildingPlacementRules)</c> lands here.</summary>
+        Reject = 0,
+
+        /// <summary>Shared edges, shared corners, collinear overlap and T-contact with a boundary
+        /// ring are accepted and carve correctly (coincident-constraint parity); only a TRANSVERSAL
+        /// crossing rejects. This is what lets a corridor be sealed wall-to-wall.</summary>
+        Touch = 1,
+
+        /// <summary>Overhanging placements are CLIPPED to the walkable region and the clipped
+        /// ring is carved — a building may hang past any wall, at any angle, and a single
+        /// placement can seal a corridor whose walls have no lattice point to sit flush
+        /// against. Everything Touch accepts is accepted bit-identically (zero-transition
+        /// placements carve verbatim). New rejections are all deterministic and explainable:
+        /// clips-to-nothing, exact lattice contact while crossing, no X′ candidate (a &lt;4 mm
+        /// graze), a clip splitting into several regions. Docs/IMP/IMP96/Plan-BoundaryOverlapClip.md.
+        /// Both previews support it — the single-ghost <c>TryValidateOne</c> and the full-list
+        /// <c>TryPreviewPlacements</c>.</summary>
+        ClipOverlap = 2,
     }
 
     /// <summary>
@@ -128,11 +172,44 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <summary>
         /// The rebake left no walkable region.
         ///
-        /// <para>Defensive. No placement can reach it: every building is validated to sit strictly
-        /// inside the region and clear of its boundary, so a gap always survives and always
-        /// triangulates. A base mesh that is already degenerate is the remaining route.</para>
+        /// <para>Under the default (Reject) boundary policy no placement can reach it: every
+        /// building sits strictly inside the region, so a gap always survives. Under Touch and
+        /// ClipOverlap it IS reachable — a footprint flush on every side can cover the whole
+        /// walkable region (measured: a slab-sized flush placement lands here) — and this
+        /// rejection is what turns that from a crash into a refusal. A degenerate base mesh is
+        /// the other route.</para>
         /// </summary>
         EmptyWalkableRegion = 5,
+
+        /// <summary>
+        /// The walkable probe (the expanded polygon's centroid) lies exactly on a boundary ring
+        /// edge, so inside/outside parity is undefined — the placement is rejected rather than
+        /// answered. Reachable only when the boundary policy allows contact; for a rect it means
+        /// a boundary chord runs corner to corner (a diagonal). Move the building a snap.
+        /// </summary>
+        ProbeOnBoundaryRing = 6,
+
+        /// <summary>ClipOverlap only: a building corner lies exactly on a boundary ring edge
+        /// (or a ring vertex exactly on a building side) while the footprint also properly
+        /// crosses the boundary. Crossings AT lattice-coincident points produce no proper
+        /// crossing and would silently break the clip walk's alternation, so the mix is
+        /// rejected. Flush/tangent contact without crossings stays accepted. Move a snap.</summary>
+        ExactBoundaryContact = 7,
+
+        /// <summary>ClipOverlap only: no qualified lattice point exists within the X′ search
+        /// radius of an intersection — the walkable sliver at that crossing is thinner than
+        /// ~4 mm (measured residual rate 0.00–1.59%). The placement barely grazes; move it.</summary>
+        ClipCandidateMissing = 8,
+
+        /// <summary>ClipOverlap only: the clip would produce more than one region for one
+        /// group (a spur splits the footprint∩walkable, a pinched merge, or a chain enclosing
+        /// a whole boundary ring). V1 emits exactly one ring per group and rejects the rest.</summary>
+        ClipSplitsWalkableRegion = 9,
+
+        /// <summary>ClipOverlap only: wall-run transitions interleave in a way the walk cannot
+        /// represent (senses fail to alternate along a shared wall stretch). Degenerate
+        /// geometry; rejected rather than walked wrong.</summary>
+        ClipRunsInterleave = 10,
     }
 
     /// <summary>
@@ -189,6 +266,32 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         internal readonly List<(int a, int b)> RingEdges;
 
         /// <summary>
+        /// The ring decomposition of <see cref="RingEdges"/>, derived once here because it is a
+        /// function of the base mesh alone: <see cref="RingOfEdge"/> maps an edge to its ring,
+        /// <see cref="RingStart"/> gives each ring's half-open edge range (with a sentinel), and
+        /// <see cref="RingBounds"/> holds one AABB per ring as (minX, minZ, maxX, maxZ) at
+        /// <c>[r*4 + 0..3]</c>.
+        ///
+        /// <para><b>Why it lives here.</b> The clip stage used to rebuild the first two on every
+        /// call — on a 22k-triangle asset that is a 15,317-entry array allocated and filled per
+        /// placement, and the boundary decomposes into 1,679 rings there. Both the rebake and the
+        /// preview pay it, and neither can produce a different answer: the rings are the base
+        /// mesh's.</para>
+        ///
+        /// <para><b>What the AABBs are for.</b> Three of the clip stage's phases ask questions that
+        /// a ring's bounding box can answer NO to outright — does this footprint's box even reach
+        /// this ring, does this footprint contain the whole ring, does this ring's span cross the
+        /// probe's horizontal. Measured on that asset, the surviving edge count drops to 7-8% and a
+        /// clip validation goes from 0.143 ms to 0.030 ms. It is a pure filter: pinned
+        /// output-identical by <c>FPNavMeshClipperTests.ClipRings_RingPruning_IsPureFilter</c>.
+        /// </para>
+        /// </summary>
+        internal readonly int[] RingOfEdge;
+        internal readonly int[] RingStart;
+        internal readonly long[] RingBounds;
+        internal readonly int RingCount;
+
+        /// <summary>
         /// The stage's shape catalog already expanded by this base mesh's bake radius, or null
         /// when the game only places rectangles.
         ///
@@ -214,6 +317,43 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             CoordToIndex = coordToIndex;
             RingEdges = ringEdges;
             ShapeExpansion = shapeExpansion;
+
+            // Chained in ring walk order with rings stored contiguously; a ring closes when an
+            // edge's b returns to the chain's first a. Vertex NUMBERING within a chain is
+            // arbitrary, so "b == a + 1" is NOT the structure and must never be assumed.
+            RingOfEdge = new int[ringEdges.Count];
+            var starts = new List<int>(8) { 0 };
+            int chainStart = 0;
+            for (int e = 0; e < ringEdges.Count; e++)
+            {
+                RingOfEdge[e] = starts.Count - 1;
+                if (ringEdges[e].b == ringEdges[chainStart].a)
+                {
+                    starts.Add(e + 1);
+                    chainStart = e + 1;
+                }
+            }
+            System.Diagnostics.Debug.Assert(starts[starts.Count - 1] == ringEdges.Count,
+                "FPNavMeshRebakeSnapshot: ring edge list does not decompose into closed chains");
+            RingStart = starts.ToArray();
+            RingCount = RingStart.Length - 1;
+
+            RingBounds = new long[RingCount * 4];
+            for (int r = 0; r < RingCount; r++)
+            {
+                long minX = long.MaxValue, minZ = long.MaxValue;
+                long maxX = long.MinValue, maxZ = long.MinValue;
+                for (int e = RingStart[r]; e < RingStart[r + 1]; e++)
+                {
+                    int v = ringEdges[e].a;
+                    if (baseXs[v] < minX) minX = baseXs[v];
+                    if (baseXs[v] > maxX) maxX = baseXs[v];
+                    if (baseZs[v] < minZ) minZ = baseZs[v];
+                    if (baseZs[v] > maxZ) maxZ = baseZs[v];
+                }
+                RingBounds[r * 4] = minX; RingBounds[r * 4 + 1] = minZ;
+                RingBounds[r * 4 + 2] = maxX; RingBounds[r * 4 + 3] = maxZ;
+            }
         }
     }
 
@@ -231,6 +371,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     public sealed class FPBuildingPreviewScratch
     {
         internal readonly FPNavMeshRebakeBufferPool Buffers = new FPNavMeshRebakeBufferPool();
+
+        /// <summary>The clip stage's reused buffers for this caller — see
+        /// <see cref="FPClipScratch"/> for why the preview cannot borrow the rebake's.</summary>
+        internal readonly FPClipScratch Clip = new FPClipScratch();
     }
 
     /// <summary>
@@ -260,8 +404,18 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         internal long[] PolyZ = Array.Empty<long>();
         internal int[] PolyStart = new int[1];
 
-        /// <summary>The ghost's AABB, and only the ghost's — see ValidateOneAgainstBase.</summary>
-        internal readonly long[] GhostBounds = new long[4];
+        /// <summary>
+        /// One AABB per building, (minX, minZ, maxX, maxZ) at <c>[b*4 + 0..3]</c> — the ghost's goes
+        /// at <see cref="Count"/> while it is written.
+        ///
+        /// <para>This used to be the ghost's AABB and only the ghost's, on the argument that nobody
+        /// reads an already-placed building's. The clip stage does: its AABB prefilter is indexed by
+        /// building, so previewing under <see cref="FPBoundaryPlacementPolicy.ClipOverlap"/> needs
+        /// the whole set. Filled by <see cref="Capture"/> through the same
+        /// <c>FillPolyBounds</c> the writers use, so there is one definition of the bound rather
+        /// than a cached copy and a re-derivation that can drift.</para>
+        /// </summary>
+        internal long[] PolyBounds = new long[4];
 
         /// <summary>Buildings carved. The ghost, when one is written, is at this index.</summary>
         internal int Count;
@@ -277,6 +431,25 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         internal FPBuildingPlacementRules Rules;
 
         /// <summary>
+        /// Under <see cref="FPBoundaryPlacementPolicy.ClipOverlap"/>, the accepted buildings'
+        /// transitions as the carving rebake resolved them, so a preview does not recompute what
+        /// cannot have changed. Null under every other policy — those never enter the clip stage.
+        ///
+        /// <para>This is what makes the per-frame preview flat in the building count. Without it a
+        /// preview pays four per-building scans of the base rings for every building already down,
+        /// which measured 0.033 + 0.024·N ms — 0.80 ms at N = 32, and it keeps climbing.</para>
+        ///
+        /// <para>It is only sound because <see cref="Capture"/> is the single writer of both these
+        /// and the polygons: they are stamped from the same rebake in the same call, so there is no
+        /// window where the transitions describe footprints other than the ones stored here.
+        /// <see cref="CachedBuildingCount"/> is that stamp — a preview uses the cache only when it
+        /// covers exactly the buildings it is validating against.</para>
+        /// </summary>
+        internal FPNavMeshClipper.Transition[] CachedTransitions;
+        internal int[] CachedTransitionStart;
+        internal int CachedBuildingCount;
+
+        /// <summary>
         /// Takes the accepted polygons, reserving <paramref name="ghostHeadroom"/> vertices past
         /// them.
         ///
@@ -286,15 +459,21 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         internal void Capture(
             long[] polyX, long[] polyZ, int[] polyStart, int count, int vertCount,
-            int ghostHeadroom, FPBuildingPlacementRules rules)
+            int ghostHeadroom, FPBuildingPlacementRules rules,
+            FPNavMeshClipper.Transition[] clipTransitions = null, int[] clipTransitionStart = null)
         {
             EnsureCapacity(vertCount + ghostHeadroom, count + 2);
             Array.Copy(polyX, PolyX, vertCount);
             Array.Copy(polyZ, PolyZ, vertCount);
             Array.Copy(polyStart, PolyStart, count + 1);
+            for (int b = 0; b < count; b++)
+                FPNavMeshRebaker.FillPolyBounds(PolyX, PolyZ, PolyStart[b], PolyStart[b + 1], PolyBounds, b);
             Count = count;
             VertCount = vertCount;
             Rules = rules;
+            CachedTransitions = clipTransitions;
+            CachedTransitionStart = clipTransitionStart;
+            CachedBuildingCount = clipTransitionStart != null ? count : 0;
         }
 
         /// <summary>
@@ -320,6 +499,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 var grown = new int[starts];
                 Array.Copy(PolyStart, grown, PolyStart.Length);
                 PolyStart = grown;
+            }
+            if (PolyBounds.Length < starts * 4)
+            {
+                var grown = new long[starts * 4];
+                Array.Copy(PolyBounds, grown, PolyBounds.Length);
+                PolyBounds = grown;
             }
         }
     }
@@ -360,6 +545,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// admitting them as commands wants this anyway.</para>
         /// </summary>
         internal readonly FPBuildingAcceptedSet Accepted = new FPBuildingAcceptedSet();
+
+        /// <summary>
+        /// The clip stage's reused buffers for this context's previews. Separate from
+        /// <see cref="Pool"/> on purpose: that one is marked in use for the whole life of a rebake
+        /// task, and a sliced rebake holds it across the very frames a placement UI previews in.
+        /// </summary>
+        internal readonly FPClipScratch ClipScratch = new FPClipScratch();
 
         // Output recycling bookkeeping. Two invariants live here:
         //  - only a mesh THIS context produced can ever be recycled, so the base mesh — which the
@@ -860,9 +1052,36 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             polyX[vertCount] = maxX; polyZ[vertCount++] = minZ;
             polyX[vertCount] = maxX; polyZ[vertCount++] = maxZ;
             polyX[vertCount] = minX; polyZ[vertCount++] = maxZ;
-            polyBounds[boundsSlot * 4] = minX; polyBounds[boundsSlot * 4 + 1] = minZ;
-            polyBounds[boundsSlot * 4 + 2] = maxX; polyBounds[boundsSlot * 4 + 3] = maxZ;
+            FillPolyBounds(polyX, polyZ, polyStart[slot], vertCount, polyBounds, boundsSlot);
             if (polyYs != null) polyYs[slot] = rect.Y;
+        }
+
+        /// <summary>
+        /// The AABB of one written polygon, in snapped units, into <c>polyBounds[slot*4 + 0..3]</c>
+        /// as (minX, minZ, maxX, maxZ).
+        ///
+        /// <para><b>Why this is a function and not four lines at each site.</b> Both writers used to
+        /// compute it inline, and the placement preview now needs the same value for buildings whose
+        /// polygons it only has a COPY of — three producers of one number. The bound is a pure
+        /// function of the polygon, so a second formula could not disagree about a correct polygon;
+        /// what it could do is disagree about rounding or about which vertices count, and the failure
+        /// would surface as the clipper's AABB prefilter skipping an edge it should have tested (or
+        /// the reverse) — a silently wrong mesh rather than an error. One definition removes the
+        /// question instead of answering it.</para>
+        /// </summary>
+        internal static void FillPolyBounds(
+            long[] polyX, long[] polyZ, int start, int end, long[] polyBounds, int slot)
+        {
+            long minX = long.MaxValue, minZ = long.MaxValue, maxX = long.MinValue, maxZ = long.MinValue;
+            for (int v = start; v < end; v++)
+            {
+                if (polyX[v] < minX) minX = polyX[v];
+                if (polyX[v] > maxX) maxX = polyX[v];
+                if (polyZ[v] < minZ) minZ = polyZ[v];
+                if (polyZ[v] > maxZ) maxZ = polyZ[v];
+            }
+            polyBounds[slot * 4] = minX; polyBounds[slot * 4 + 1] = minZ;
+            polyBounds[slot * 4 + 2] = maxX; polyBounds[slot * 4 + 3] = maxZ;
         }
 
 
@@ -1041,7 +1260,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                         "FPNavMeshRebaker: building (expanded) touches or crosses the walkable boundary — reject placement");
                 case FPBuildingRejection.OutsideWalkableRegion:
                     return new InvalidOperationException(
-                        "FPNavMeshRebaker: building (expanded) lies outside the walkable region — reject placement");
+                        rules.BoundaryPolicy == FPBoundaryPlacementPolicy.ClipOverlap
+                            ? "FPNavMeshRebaker: building (expanded) clips to nothing against the walkable region — reject placement"
+                            : "FPNavMeshRebaker: building (expanded) lies outside the walkable region — reject placement");
                 case FPBuildingRejection.SwallowsBakedHole:
                     return new InvalidOperationException(string.Format(ci,
                         "FPNavMeshRebaker: building {0} (expanded) fully contains a baked hole ring at "
@@ -1050,6 +1271,26 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 case FPBuildingRejection.EmptyWalkableRegion:
                     return new InvalidOperationException(
                         "FPNavMeshRebaker: rebake produced an empty walkable region");
+                case FPBuildingRejection.ProbeOnBoundaryRing:
+                    return new InvalidOperationException(
+                        "FPNavMeshRebaker: placement probe lies on a boundary ring edge " +
+                        "(a boundary chord runs corner to corner) — reject placement");
+                case FPBuildingRejection.ExactBoundaryContact:
+                    return new InvalidOperationException(
+                        $"FPNavMeshRebaker: building {info.IndexA} (expanded) touches the walkable " +
+                        "boundary exactly at a vertex while also crossing it — reject placement (move a snap)");
+                case FPBuildingRejection.ClipCandidateMissing:
+                    return new InvalidOperationException(
+                        $"FPNavMeshRebaker: building {info.IndexA} (expanded) barely grazes the walkable " +
+                        "region — no lattice point qualifies near the crossing; reject placement");
+                case FPBuildingRejection.ClipSplitsWalkableRegion:
+                    return new InvalidOperationException(
+                        $"FPNavMeshRebaker: building {info.IndexA} (expanded) clips into more than one " +
+                        "region against the walkable boundary — reject placement");
+                case FPBuildingRejection.ClipRunsInterleave:
+                    return new InvalidOperationException(
+                        $"FPNavMeshRebaker: building {info.IndexA} (expanded) produces interleaved " +
+                        "wall runs the clip cannot represent — reject placement");
                 default:
                     return new InvalidOperationException(
                         $"FPNavMeshRebaker: rebake failed with no reason recorded ({info.Reason})");
@@ -1149,8 +1390,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             long m = FPGeoPredicates.MAX_SNAPPED_COORD;
             if (minX < -m || maxX > m || minZ < -m || maxZ > m)
                 throw new ArgumentException($"FPNavMeshRebaker: placement {slot} (expanded) outside the snapped domain");
-            polyBounds[boundsSlot * 4] = minX; polyBounds[boundsSlot * 4 + 1] = minZ;
-            polyBounds[boundsSlot * 4 + 2] = maxX; polyBounds[boundsSlot * 4 + 3] = maxZ;
+            FillPolyBounds(polyX, polyZ, polyStart[slot], vertCount, polyBounds, boundsSlot);
             if (polyYs != null) polyYs[slot] = p.Y;
         }
 
@@ -1254,13 +1494,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// among the others, every reason left involves the ghost. Pass a set that was never
         /// accepted and the answer can be wrong, which is the price of not re-checking it.</para>
         ///
-        /// <para><b>Same verdict, not an approximation.</b> Every reason a player can be refused
-        /// is decided before any triangle is cut, so this shares the rebake's validation rather
-        /// than reimplementing it — there is no second copy of the rules to keep in sync. The one
-        /// reason it cannot report is <see cref="FPBuildingRejection.EmptyWalkableRegion"/>, which
-        /// no placement can cause. The reported indices are those of the rebake that would carve
-        /// this list with <paramref name="ghost"/> appended: the ghost is
-        /// <paramref name="existingCount"/>.</para>
+        /// <para><b>Same verdict, not an approximation.</b> Almost every reason a player can be
+        /// refused is decided before any triangle is cut, so this shares the rebake's validation
+        /// rather than reimplementing it — there is no second copy of the rules to keep in sync.
+        /// The reported indices are those of the rebake that would carve this list with
+        /// <paramref name="ghost"/> appended: the ghost is <paramref name="existingCount"/>.</para>
+        ///
+        /// <para><b>One reason it cannot report, and under two policies that is reachable.</b>
+        /// <see cref="FPBuildingRejection.EmptyWalkableRegion"/> is only discovered DURING the
+        /// carve, so a preview cannot see it. This used to be harmless because no placement could
+        /// cause it — every building sat strictly inside the region, so a gap always survived. That
+        /// stopped being true when boundary contact became a policy: under
+        /// <see cref="FPBoundaryPlacementPolicy.Touch"/> and
+        /// <see cref="FPBoundaryPlacementPolicy.ClipOverlap"/> a footprint flush on every side can
+        /// cover the whole walkable region, and the rebake refuses it with that reason (pinned by
+        /// <c>FPBoundaryTouchSealTests.Touch_WholeRegionFlush_RejectedAsEmpty</c>). So under those
+        /// policies a green preview followed by a refused rebake is a REAL path, not a bug — one
+        /// case, at the far end of "a building that covers the map". Everything else still matches
+        /// exactly.</para>
         ///
         /// <para><b>Pass the same <paramref name="rules"/> the rebake gets.</b> The default forbids
         /// contact, so a game that allows touching but omits it here paints red over ground the
@@ -1274,8 +1525,19 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// rebake still validates from the command stream, which is the only place every peer
         /// agrees.</para>
         ///
-        /// <para>About 0.07 ms on a 22k-triangle stage, near enough regardless of how many
-        /// buildings are already down — the cost is one walk of the base mesh's edges.</para>
+        /// <para>About 0.085 ms on a 22k-triangle stage, and flat in the number of buildings
+        /// already down — the cost is one walk of the base mesh's edges, which they do not enter.
+        /// </para>
+        ///
+        /// <para><see cref="FPBoundaryPlacementPolicy.ClipOverlap"/> is the exception, because it
+        /// has to build the clip rings to answer: 0.231 ms with 4 buildings down and 0.622 ms with
+        /// 32 on the same stage. Still a frame-path cost, but the TIME does grow — the accepted set
+        /// caches what each existing building contributed and the ring checks are localised to the
+        /// ghost's own group, and what is left is the pair layer between that group and the
+        /// rest.</para>
+        ///
+        /// <para><b>No preview allocates</b>, under any policy, in steady state — the clip stage
+        /// reuses its working buffers. Calling this every frame costs the collector nothing.</para>
         ///
         /// <para>A game that holds an <see cref="FPNavMeshRebakeContext"/> should prefer the
         /// overload that takes one: it supplies the accepted set and the rules itself, so the two
@@ -1297,7 +1559,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             BuildRectPolygons(snapshot, all, count + 1, scratch.Buffers,
                 out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds);
             return ValidateGhostOnly(snapshot, polyX, polyZ, polyStart, polyBounds, count,
-                count, rules, out rejection);
+                count, rules, out rejection, clipScratch: scratch.Clip);
         }
 
         /// <summary>
@@ -1321,7 +1583,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             BuildPlacementPolygons(snapshot, all, count + 1, scratch.Buffers,
                 out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds);
             return ValidateGhostOnly(snapshot, polyX, polyZ, polyStart, polyBounds, count,
-                count, rules, out rejection);
+                count, rules, out rejection, clipScratch: scratch.Clip);
         }
 
         /// <summary>
@@ -1361,14 +1623,16 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             accepted.EnsureCapacity(accepted.VertCount + 4, ghostIndex + 2);
             int vertCount = accepted.VertCount;
-            WriteRectPolygon(context.Snapshot, ghost, ghostIndex, 0,
-                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.GhostBounds, null,
+            WriteRectPolygon(context.Snapshot, ghost, ghostIndex, ghostIndex,
+                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.PolyBounds, null,
                 ref vertCount);
             accepted.PolyStart[ghostIndex + 1] = vertCount;
 
             return ValidateGhostOnly(context.Snapshot,
-                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.GhostBounds, 0,
-                ghostIndex, rules ?? accepted.Rules, out rejection);
+                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.PolyBounds, ghostIndex,
+                ghostIndex, rules ?? accepted.Rules, out rejection,
+                accepted.CachedTransitions, accepted.CachedTransitionStart,
+                accepted.CachedBuildingCount, context.ClipScratch);
         }
 
         /// <summary>
@@ -1395,14 +1659,16 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             accepted.EnsureCapacity(
                 accepted.VertCount + expansion.Catalog.MaxVertexCount, ghostIndex + 2);
             int vertCount = accepted.VertCount;
-            WritePlacementPolygon(expansion, ghost, ghostIndex, 0,
-                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.GhostBounds, null,
+            WritePlacementPolygon(expansion, ghost, ghostIndex, ghostIndex,
+                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.PolyBounds, null,
                 ref vertCount);
             accepted.PolyStart[ghostIndex + 1] = vertCount;
 
             return ValidateGhostOnly(context.Snapshot,
-                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.GhostBounds, 0,
-                ghostIndex, rules ?? accepted.Rules, out rejection);
+                accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.PolyBounds, ghostIndex,
+                ghostIndex, rules ?? accepted.Rules, out rejection,
+                accepted.CachedTransitions, accepted.CachedTransitionStart,
+                accepted.CachedBuildingCount, context.ClipScratch);
         }
 
         /// <summary>
@@ -1413,11 +1679,19 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// then the base-mesh tests) so that when several reasons apply, both forms report the
         /// same one.</para>
         /// </summary>
+        /// <param name="cachedTransitions">
+        /// The accepted set's clip cache, when the caller has one — the context form does, the
+        /// list-taking forms cannot (their list is the caller's, and nothing stamps it). Ignored
+        /// unless it covers exactly the <paramref name="ghostIndex"/> buildings being validated
+        /// against.
+        /// </param>
         private static bool ValidateGhostOnly(
             FPNavMeshRebakeSnapshot snapshot,
             long[] polyX, long[] polyZ, int[] polyStart, long[] polyBounds, int boundsSlot,
             int ghostIndex, FPBuildingPlacementRules rules,
-            out FPBuildingRejectionInfo rejection)
+            out FPBuildingRejectionInfo rejection,
+            FPNavMeshClipper.Transition[] cachedTransitions = null, int[] cachedStart = null,
+            int cachedBuildingCount = 0, FPClipScratch clipScratch = null)
         {
             rejection = default;
 
@@ -1433,8 +1707,72 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 }
             }
 
+            if (rules.BoundaryPolicy == FPBoundaryPlacementPolicy.ClipOverlap)
+            {
+                // Same order the rebake uses, with the one localisation the ghost contract buys:
+                // the existing buildings' own base-mesh checks are NOT repeated.
+                //
+                // That is sound rather than convenient. Whether a building is transition-free is a
+                // function of that building's sides and the ring edges alone — no other building
+                // enters it — so the ghost cannot turn a neighbour from clipped to identity or back,
+                // and a neighbour's flush-semantics verdict was settled when it was accepted. What
+                // the ghost CAN change is which group a neighbour's run belongs to, and that lands
+                // in the ring checks below, which run over the whole emitted set.
+                // The cache is refused unless it covers exactly the buildings the ghost is being
+                // validated against. It cannot be off by construction — Capture stamps both from
+                // one rebake — so this is a guard against a future caller, not a live case, and it
+                // fails to the full scan rather than to a wrong answer.
+                bool useCache = cachedStart != null && cachedBuildingCount == ghostIndex;
+                if (!FPNavMeshClipper.TryBuildClipRings(
+                        snapshot, polyX, polyZ, polyStart, polyBounds, null,
+                        ghostIndex + 1, out rejection, out FPNavMeshClipper.Result clip,
+                        useCache ? cachedTransitions : null,
+                        useCache ? cachedStart : null,
+                        useCache ? cachedBuildingCount : 0,
+                        scratch: clipScratch))
+                    return false;
+                if (clipScratch != null)
+                    clipScratch.TransitionHint = clip.ExistingTransitionCount;
+                if (clip.IdentityBuilding[ghostIndex]
+                    && !ValidateOneAgainstBase(snapshot.BaseXs, snapshot.BaseZs, snapshot.RingEdges,
+                            polyX, polyZ, polyStart, polyBounds, boundsSlot, ghostIndex,
+                            boundaryTouchOk: true, out rejection))
+                    return false;
+                return FPNavMeshClipper.ValidateClipRings(
+                    snapshot, in clip, out rejection, ghostIndex);
+            }
+
             return ValidateOneAgainstBase(snapshot.BaseXs, snapshot.BaseZs, snapshot.RingEdges,
-                polyX, polyZ, polyStart, polyBounds, boundsSlot, ghostIndex, out rejection);
+                polyX, polyZ, polyStart, polyBounds, boundsSlot, ghostIndex,
+                BoundaryTouchAllowed(rules), out rejection);
+        }
+
+        /// <summary>
+        /// Resolves the boundary policy to "is contact allowed", throwing for the reserved value.
+        /// A switch rather than a comparison on purpose: the enum's values carry no ordering
+        /// semantics (append-only), so <c>policy &gt;= Touch</c> would silently misread a future
+        /// member.
+        /// </summary>
+        private static bool BoundaryTouchAllowed(in FPBuildingPlacementRules rules)
+        {
+            switch (rules.BoundaryPolicy)
+            {
+                case FPBoundaryPlacementPolicy.Reject: return false;
+                case FPBoundaryPlacementPolicy.Touch: return true;
+                case FPBoundaryPlacementPolicy.ClipOverlap:
+                    // Defensive, and it used to be the single-ghost preview's gap. Every caller now
+                    // routes ClipOverlap through the clip path BEFORE asking this question — the
+                    // rebake in ValidatePolygons, the preview in ValidateGhostOnly — so the question
+                    // itself is meaningless for that policy: contact is neither allowed nor
+                    // forbidden, it is CLIPPED. Reaching here means a new caller reads the boundary
+                    // rule directly, and that caller needs the clip branch rather than an answer.
+                    throw new ArgumentException(
+                        "FPNavMeshRebaker: FPBoundaryPlacementPolicy.ClipOverlap has no allow/forbid " +
+                        "answer for boundary contact — take the clip path (TryBuildClipRings) instead");
+                default:
+                    throw new ArgumentException(
+                        $"FPNavMeshRebaker: unknown FPBoundaryPlacementPolicy ({rules.BoundaryPolicy})");
+            }
         }
 
         /// <summary>
@@ -1453,12 +1791,37 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private static bool ValidateOneAgainstBase(
             long[] xs, long[] zs, List<(int a, int b)> ringEdges,
             long[] polyX, long[] polyZ, int[] polyStart, long[] polyBounds, int boundsSlot,
-            int b, out FPBuildingRejectionInfo rejection)
+            int b, bool boundaryTouchOk, out FPBuildingRejectionInfo rejection)
         {
             rejection = default;
             int vs = polyStart[b], ve = polyStart[b + 1];
             long minX = polyBounds[boundsSlot * 4], minZ = polyBounds[boundsSlot * 4 + 1];
             long maxX = polyBounds[boundsSlot * 4 + 2], maxZ = polyBounds[boundsSlot * 4 + 3];
+
+            // The walkable probe is the polygon's CENTROID, carried in n-scaled space so it stays
+            // an exact integer: pN = Σ vertices, probe = pN / n, never divided. The old probe was
+            // vertex 0 — an EXTREME point — which lands ON a ring edge for any flush placement
+            // (all four corners do, for a full corridor seal), and the parity predicate is
+            // undefined there. The centroid of a strictly convex polygon is strictly interior;
+            // strict convexity is enforced by FPConvexOffset.Validate at expansion time, and this
+            // probe stands on that invariant — if that check is ever removed as "redundant with
+            // the sampling test", this probe falls with it.
+            //
+            // Measured before the swap (Plan-BoundaryTouchSeal §4-⑷/VA): with boundary contact
+            // rejected, vertex-0 and centroid agree on EVERY placement — 24,513 placements,
+            // 16,230 probe evaluations, 0 disagreements — and provably so (∂P ∩ ∂W = ∅ puts P
+            // inside one component of the plane minus the rings, where every interior point has
+            // the same parity). The swap can therefore change verdicts only when the boundary
+            // policy allows contact.
+            int n = ve - vs;
+            long probeXn = 0, probeZn = 0;
+            for (int k = vs; k < ve; k++) { probeXn += polyX[k]; probeZn += polyZ[k]; }
+
+            // Whether a ring edge passes exactly through the centroid (possible only when contact
+            // is allowed: a chord entering and leaving through the polygon's own corners — for a
+            // rect that is a diagonal, which always contains the centroid). Parity is undefined on
+            // an edge, so such a placement is REJECTED with its own reason instead of answered.
+            bool probeOnRing = false;
 
             // First base ring vertex found strictly inside this building, if any (see below).
             // -1 = none. Recorded rather than thrown so that the crossing test keeps priority.
@@ -1474,10 +1837,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 // segment intersection against per building side — measured, that is 95% of
                 // the per-building rebake cost.
                 //
-                // The comparisons are STRICT on purpose. SegmentsIntersectOrTouch below
-                // rejects a ring edge that merely TOUCHES the building, so an edge lying
-                // exactly on a side must survive this filter — tightening `<` to `<=` here
-                // would skip it and silently turn a rejection into an acceptance.
+                // The comparisons are STRICT on purpose, and the reason has widened: an edge
+                // lying exactly on a side must survive this filter for the CONTACT rejection
+                // (Reject policy), for the SWALLOW test, and for the PROBE-ON-EDGE test below —
+                // under the Touch policy contact no longer rejects, but the other two still need
+                // to see coincident edges. Tightening `<` to `<=` here would skip them and turn
+                // rejections into silent acceptances.
                 //
                 // The swallow test further down is skipped along with the rest, and that is
                 // safe: a ring vertex strictly inside the AABB gives max(rax,rbx) >= rax >
@@ -1489,25 +1854,37 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 for (int e = vs; e < ve; e++)
                 {
                     int e2 = e + 1 < ve ? e + 1 : vs;
-                    // Touching the boundary stays rejected, and NOT because the CDT minds —
-                    // it triangulates the shape happily. The problem is downstream: a hole
-                    // ring that shares an edge with the outer ring is not a hole any more.
-                    // Even-odd erasure counts the coincident edge once, so entering the notch
-                    // costs a single crossing and its interior stays at odd depth = WALKABLE.
-                    //
-                    // Measured: a 1x1 building flush against the wall is accepted, adds two
-                    // vertices, and carves NOTHING — agents walk straight through it. That is
-                    // worse than a rejection, because the game believes it placed a building.
-                    // Allowing this needs the erase to distinguish coincident constraints, or
-                    // the hole ring to be inset off the boundary; both are out of scope here.
-                    if (SegmentsIntersectOrTouch(
-                            polyX[e], polyZ[e], polyX[e2], polyZ[e2], rax, raz, rbx, rbz))
+                    // Under the default (Reject) policy any contact rejects. That used to be
+                    // load-bearing correctness: before the coincident-constraint parity fix a
+                    // hole ring sharing an edge with the outer ring carved NOTHING (even-odd
+                    // counted the coincident edge once and the notch kept odd depth = WALKABLE).
+                    // The parity fix (Constrained = OR / CrossParity = XOR) closed that, and the
+                    // full rebaker path was re-measured: a flush 1x1 building now carves exactly
+                    // its expanded footprint (probes blocked, carved area bit-exact). So under
+                    // the Touch policy only a TRANSVERSAL crossing rejects — shared edges,
+                    // corners and T-contacts carve correctly. Plan-BoundaryTouchSeal §3-⓪.
+                    bool hit = boundaryTouchOk
+                        ? SegmentsProperlyCross(
+                            polyX[e], polyZ[e], polyX[e2], polyZ[e2], rax, raz, rbx, rbz)
+                        : SegmentsIntersectOrTouch(
+                            polyX[e], polyZ[e], polyX[e2], polyZ[e2], rax, raz, rbx, rbz);
+                    if (hit)
                     {
                         rejection = new FPBuildingRejectionInfo(
                             FPBuildingRejection.TouchesWalkableBoundary, b);
                         return false;
                     }
                 }
+
+                // Probe-on-edge detection, folded into this loop because the AABB prefilter can
+                // never skip an edge through the centroid: the centroid is inside the polygon,
+                // hence inside the polygon's AABB, so that edge's AABB meets it. In n-scaled
+                // space: cross(edge, probe − n·a) == 0 and the probe within the edge's scaled
+                // bounds. Overflow: |probeXn − n·rax| ≤ 2n·MAX_SNAPPED and the edge delta
+                // ≤ 2·MAX_SNAPPED ≈ 9.5e7, so each product ≤ n · 9.03e15 — Int64-safe up to
+                // n ≈ 1021 vertices; catalog shapes are ≤ ~16.
+                if (!probeOnRing && PointOnSegmentScaled(probeXn, probeZn, n, rax, raz, rbx, rbz))
+                    probeOnRing = true;
 
                 // A building that SWALLOWS a base hole ring (pillar, pond, pit) is accepted by
                 // every other check and produces a wrong navmesh: even-odd erasure counts one
@@ -1531,12 +1908,11 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // exactly one. Allowing building overlap would break that and require a check
             // over the whole set.
             //
-            // Thrown BEFORE the parity test: once the probe moves
-            // to an interior point, a swallowing placement probes inside the swallowed hole
-            // and parity would report "outside the walkable region" — a false diagnosis. The
-            // order is fixed now so that the probe can move later without dragging this with
-            // it. With vertex-0 probing the two orders agree on every case except a building
-            // containing the whole map, which reports "swallows" instead of "outside".
+            // Thrown BEFORE the parity test, and with the centroid probe the order now BITES:
+            // a swallowing placement's centroid can sit inside the swallowed hole, where parity
+            // would report "outside the walkable region" — a false diagnosis. This comment
+            // predicted exactly that back when the probe was vertex 0 ("so that the probe can
+            // move later without dragging this with it"); the probe has moved.
             if (swallowedVertex >= 0)
             {
                 rejection = new FPBuildingRejectionInfo(
@@ -1546,11 +1922,27 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 return false;
             }
 
-            // Probing one vertex is enough, and it is never ON a ring edge: the check above
-            // rejects any building side that touches a ring, so a vertex sitting on one would
-            // already have been refused. That is what keeps AllowBuildingTouch from reaching
-            // this test — it relaxes building pairs only, never the boundary.
-            if (!PointInRingsParity(polyX[vs], polyZ[vs], xs, zs, ringEdges))
+            // Parity is undefined for a point on a ring edge, so that case is REJECTED above
+            // parity rather than answered. Under the Reject policy this is provably unreachable
+            // (an edge through the centroid either touches/crosses the polygon — rejected in the
+            // loop — or lies inside it with strictly-interior endpoints — the swallow test).
+            // Under Touch it is reachable exactly once for a rect: a boundary chord running
+            // corner to corner is a diagonal, and every diagonal contains the centroid.
+            if (probeOnRing)
+            {
+                rejection = new FPBuildingRejectionInfo(
+                    FPBuildingRejection.ProbeOnBoundaryRing, b);
+                return false;
+            }
+
+            // One interior probe stands for the whole polygon. With contact allowed that is an
+            // approximation — the boundary may graze the polygon without crossing it — but the
+            // carve stays correct either way: whatever pokes outside is already unwalkable and
+            // erasure does not change it there. (For rects the "accepted while partly outside"
+            // configuration is unreachable: any boundary path through the interior with no
+            // strictly-interior vertex and no transversal crossing is a corner-to-corner chord,
+            // i.e. a diagonal — rejected above as probe-on-edge.)
+            if (!PointInRingsParity(probeXn, probeZn, n, xs, zs, ringEdges))
             {
                 rejection = new FPBuildingRejectionInfo(
                     FPBuildingRejection.OutsideWalkableRegion, b);
@@ -1580,6 +1972,20 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             int buildingCount, FPBuildingPlacementRules rules,
             out FPBuildingRejectionInfo rejection)
         {
+            // Preview path: verdicts only — the clip geometry is discarded (ys are emission
+            // data, irrelevant to accept/reject, so null is fine here).
+            return ValidatePolygons(snapshot, polyX, polyZ, polyStart, polyBounds, null,
+                buildingCount, rules, out rejection, out _);
+        }
+
+        internal static bool ValidatePolygons(
+            FPNavMeshRebakeSnapshot snapshot,
+            long[] polyX, long[] polyZ, int[] polyStart, long[] polyBounds, FP64[] polyYs,
+            int buildingCount, FPBuildingPlacementRules rules,
+            out FPBuildingRejectionInfo rejection, out FPNavMeshClipper.Result clip,
+            bool exportClipTransitions = false)
+        {
+            clip = default;
             // FIRST failure wins, and that is a contract rather than an accident. With throws it
             // came free — the first one out of the method was the one the caller saw. Reporting by
             // value has to reproduce it by RETURNING at each check instead of recording and
@@ -1619,12 +2025,39 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     }
                 }
             }
-            // Strictly inside walkable: no edge intersection/touch with any base ring edge,
-            // no swallowed ring, and vertex 0 strictly inside by ring-crossing parity.
+            if (rules.BoundaryPolicy == FPBoundaryPlacementPolicy.ClipOverlap)
+            {
+                // HG order: footprint pair layer above → ring-granular swallow + clip walk →
+                // flush-semantics validation for the transition-free buildings → checks on C.
+                if (!FPNavMeshClipper.TryBuildClipRings(
+                        snapshot, polyX, polyZ, polyStart, polyBounds, polyYs,
+                        buildingCount, out rejection, out clip,
+                        exportTransitions: exportClipTransitions))
+                    return false;
+                for (int b = 0; b < buildingCount; b++)
+                {
+                    // Transition-free buildings ARE the Touch case (flush, tangent, interior):
+                    // the proper-crossing check is a no-op on them by construction, the
+                    // per-vertex swallow is CORRECT for them (a ring dipping into a flush
+                    // footprint without crossings would flip), and the centroid probe answers
+                    // whole-in vs whole-out — "clips to nothing" is its outside verdict.
+                    if (clip.IdentityBuilding[b]
+                        && !ValidateOneAgainstBase(xs, zs, ringEdges,
+                            polyX, polyZ, polyStart, polyBounds, b, b,
+                            boundaryTouchOk: true, out rejection))
+                        return false;
+                }
+                return FPNavMeshClipper.ValidateClipRings(snapshot, in clip, out rejection);
+            }
+
+            // Strictly inside walkable: no transversal crossing of any base ring edge (contact
+            // too unless the boundary policy allows it), no swallowed ring, and the centroid
+            // strictly inside by ring-crossing parity.
+            bool boundaryTouchOk = BoundaryTouchAllowed(rules);
             for (int b = 0; b < buildingCount; b++)
             {
                 if (!ValidateOneAgainstBase(xs, zs, ringEdges,
-                        polyX, polyZ, polyStart, polyBounds, b, b, out rejection))
+                        polyX, polyZ, polyStart, polyBounds, b, b, boundaryTouchOk, out rejection))
                     return false;
             }
 
@@ -1690,9 +2123,36 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FPBuildingAcceptedSet accepted = null)
         {
             task = null;
-            if (!ValidatePolygons(snapshot, polyX, polyZ, polyStart, polyBounds,
-                    buildingCount, rules, out rejection))
+            bool clipMode = rules.BoundaryPolicy == FPBoundaryPlacementPolicy.ClipOverlap;
+            if (!ValidatePolygons(snapshot, polyX, polyZ, polyStart, polyBounds, polyYs,
+                    buildingCount, rules, out rejection, out FPNavMeshClipper.Result clip,
+                    exportClipTransitions: clipMode && accepted != null))
                 return false;
+
+            if (clipMode && clip.RingCount > 0 && previous != null)
+            {
+                // V1 conservatism, and the condition is the EMISSION rather than the policy.
+                //
+                // The reason first written here — "the patch derives its dirty region from
+                // footprints, and clip rings reach past the footprint AABB" — named a mechanism
+                // the patch does not have: FPNavMeshBuildPipeline's patch is a merge diff over two
+                // arrays of vertex-index triples and never reads a footprint. What it does have is
+                // three guards (grid geometry, vertex-prefix, duplicate-boundary-edge), and all
+                // three FALL BACK to the full build rather than patching something they cannot
+                // account for. So the disable is caution about a path not yet proven safe, not a
+                // fix for a known break — and it stays until that proof exists as a fixture.
+                //
+                // What it must NOT do is charge that caution to placements it cannot apply to.
+                // RingCount == 0 means no building had a transition, so every one is an
+                // IdentityBuilding and the emission below is the same loop over the same arrays in
+                // the same order as the non-clip branch — byte-identical to what the Touch policy
+                // emits, which has always patched. Gating on the policy cost the full-rebuild path
+                // on every non-overhanging placement (measured 1.6 -> 11.6 ms at 12.8k triangles),
+                // and the reason above did not even claim to apply there.
+                // Pinned by FPNavMeshIncrementalPatchTests.ClipOverlap_WithoutClipRings_
+                // PatchesExactlyLikeTouch; the removal net is ..._AcrossClipRingSteps_....
+                previous = null;
+            }
 
             long[] xs = snapshot.BaseXs;
             long[] zs = snapshot.BaseZs;
@@ -1713,11 +2173,11 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 // Length — these are pool buffers whose tail is the previous rebake's holes.
                 // Sized by the actual vertex total, not buildings * 4 — a polygon carries as many
                 // vertices as it has, and a rect is just the n = 4 case.
-                int holeCapacity = polyVertCount;
+                int holeCapacity = polyVertCount + (clipMode ? clip.Xs.Count : 0);
                 long[] holeXs = buffers.HoleXs(holeCapacity);
                 long[] holeZs = buffers.HoleZs(holeCapacity);
                 FP64[] holeYs = buffers.HoleYs(holeCapacity);
-                int[] holeConstraints = buffers.HoleConstraints(polyVertCount * 2);
+                int[] holeConstraints = buffers.HoleConstraints(holeCapacity * 2);
                 int holeCount = 0;
                 int holeConstraintCount = 0;
 
@@ -1742,21 +2202,57 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     return combined;
                 }
 
-                for (int b = 0; b < buildingCount; b++)
+                // The clip channels are lists, not arrays — Result hands out the working buffers
+                // rather than copying them (see its summary). Two loops rather than an interface:
+                // the array form is on the polygon path, which is not a clip result.
+                void EmitClipRing(List<long> rxs, List<long> rzs, List<FP64> rys, int vs, int ve)
                 {
-                    int vs = polyStart[b], ve = polyStart[b + 1];
-                    FP64 y = polyYs[b];
-                    int first = AddHoleVertex(polyX[vs], polyZ[vs], y);
+                    int first = AddHoleVertex(rxs[vs], rzs[vs], rys != null ? rys[vs] : FP64.Zero);
                     int prev = first;
                     for (int v = vs + 1; v < ve; v++)
                     {
-                        int cur = AddHoleVertex(polyX[v], polyZ[v], y);
+                        int cur = AddHoleVertex(rxs[v], rzs[v], rys != null ? rys[v] : FP64.Zero);
                         holeConstraints[holeConstraintCount++] = prev;
                         holeConstraints[holeConstraintCount++] = cur;
                         prev = cur;
                     }
                     holeConstraints[holeConstraintCount++] = prev;
                     holeConstraints[holeConstraintCount++] = first;
+                }
+
+                void EmitRing(long[] rxs, long[] rzs, FP64[] rys, FP64 fixedY, int vs, int ve)
+                {
+                    int first = AddHoleVertex(rxs[vs], rzs[vs], rys != null ? rys[vs] : fixedY);
+                    int prev = first;
+                    for (int v = vs + 1; v < ve; v++)
+                    {
+                        int cur = AddHoleVertex(rxs[v], rzs[v], rys != null ? rys[v] : fixedY);
+                        holeConstraints[holeConstraintCount++] = prev;
+                        holeConstraints[holeConstraintCount++] = cur;
+                        prev = cur;
+                    }
+                    holeConstraints[holeConstraintCount++] = prev;
+                    holeConstraints[holeConstraintCount++] = first;
+                }
+
+                if (clipMode)
+                {
+                    // Clip rings replace the footprints of transition buildings; transition-free
+                    // buildings carve their footprint verbatim (the identity path — bit-equal to
+                    // the Touch emission for the same placement, which is what pins "Touch is
+                    // ClipOverlap's degenerate case" to the parent's golden).
+                    for (int b = 0; b < buildingCount; b++)
+                    {
+                        if (clip.IdentityBuilding[b])
+                            EmitRing(polyX, polyZ, null, polyYs[b], polyStart[b], polyStart[b + 1]);
+                    }
+                    for (int r = 0; r < clip.RingCount; r++)
+                        EmitClipRing(clip.Xs, clip.Zs, clip.Ys, clip.Starts[r], clip.Starts[r + 1]);
+                }
+                else
+                {
+                    for (int b = 0; b < buildingCount; b++)
+                        EmitRing(polyX, polyZ, null, polyYs[b], polyStart[b], polyStart[b + 1]);
                 }
 
                 // CDT resume: clone + ghost rebase + incremental hole insertion. The extract that
@@ -1768,7 +2264,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 task = new FPNavMeshRebakeTask(
                     snapshot, cdt, buffers, holeXs, holeYs, holeZs, holeCount, baseCount,
                     logger, previous, outcome, accepted,
-                    polyX, polyZ, polyStart, buildingCount, polyVertCount, rules);
+                    polyX, polyZ, polyStart, buildingCount, polyVertCount, rules,
+                    clip.Transitions, clip.TransitionStart);
                 return true;
             }
             catch
@@ -2032,26 +2529,152 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         /// <summary>
         /// Crossing-parity point-in-walkable over all boundary rings (outer + holes combined:
-        /// odd = walkable). Caller guarantees the point is not on any ring edge.
+        /// odd = walkable), with the probe given in n-SCALED space: the caller passes
+        /// <c>pxN = n·px</c>, <c>pzN = n·pz</c> so a polygon centroid stays an exact integer
+        /// without a division. Ring coordinates are scaled inline — no scaled copy of the ring
+        /// arrays exists (the snapshot's arrays are shared read-only across rooms, and a copy
+        /// per rebake would trip the zero-allocation gates).
+        ///
+        /// <para>Caller guarantees the point is not on any ring edge — and unlike the old form,
+        /// that contract is now ENFORCED upstream (the probe-on-edge rejection), not assumed.</para>
+        ///
+        /// <para>Overflow: both factors of each product are bounded by 2n·MAX_SNAPPED_COORD and
+        /// 2·MAX_SNAPPED_COORD, so a product ≤ n · 9.03e15 — Int64-safe up to n ≈ 1021 polygon
+        /// vertices. (Plan-BoundaryTouchSeal/BE quoted n ≈ 96; that was an arithmetic slip — the
+        /// real bound is ~1024. Same direction, more slack.) Guarded below.</para>
         /// </summary>
         private static bool PointInRingsParity(
+            long pxN, long pzN, int n, long[] xs, long[] zs, List<(int a, int b)> ringEdges)
+        {
+            System.Diagnostics.Debug.Assert(n >= 3 && n <= 512,
+                "PointInRingsParity: polygon vertex count outside the audited Int64 headroom");
+            return PointInRingsParityCore(pxN, pzN, n, xs, zs, ringEdges);
+        }
+
+        /// <summary>
+        /// Raw-point form of the walkable parity test (n = 1 — the clip stage classifies
+        /// individual lattice points, not centroids). Split from the centroid wrapper because
+        /// that wrapper's vertex-count assert would fire on n = 1; the arithmetic core is
+        /// SHARED so the two cannot drift. Caller guarantees the point is not on a ring edge
+        /// (test with <see cref="PointOnSegment"/> first).
+        /// </summary>
+        internal static bool PointInRingsParityRaw(
             long px, long pz, long[] xs, long[] zs, List<(int a, int b)> ringEdges)
+        {
+            return PointInRingsParityCore(px, pz, 1, xs, zs, ringEdges);
+        }
+
+        /// <summary>
+        /// The same parity test, skipping rings whose bounding box cannot contribute a crossing.
+        /// Identical result, fewer edges touched — the clip stage runs this once per building and
+        /// on a 1,679-ring asset the full scan is 15,317 edges.
+        ///
+        /// <para>Two skips, and both are exact rather than conservative-by-luck. The per-edge test
+        /// only fires when the edge straddles <paramref name="pz"/> in the half-open sense
+        /// <c>(az &gt; pz) != (bz &gt; pz)</c>, so a ring whose every vertex is on one side of that
+        /// line contributes nothing — which is what <c>maxZ &lt;= pz</c> and <c>minZ &gt; pz</c>
+        /// detect. And the crossing counted is the one to the RIGHT of <paramref name="px"/>
+        /// (<c>px &lt; x-intersection</c>), so a ring lying entirely left of it contributes nothing
+        /// either. Getting that direction backwards would still be *a* parity, just not this one,
+        /// which is why the equivalence is pinned by a test rather than argued here.</para>
+        /// </summary>
+        internal static bool PointInRingsParityPruned(
+            long px, long pz, long[] xs, long[] zs, List<(int a, int b)> ringEdges,
+            int[] ringStart, long[] ringBounds, int ringCount)
+        {
+            bool inside = false;
+            for (int r = 0; r < ringCount; r++)
+            {
+                if (ringBounds[r * 4 + 3] <= pz || ringBounds[r * 4 + 1] > pz) continue;
+                if (ringBounds[r * 4 + 2] < px) continue;
+                for (int e = ringStart[r]; e < ringStart[r + 1]; e++)
+                {
+                    var (ia, ib) = ringEdges[e];
+                    long ax = xs[ia], az = zs[ia], bx = xs[ib], bz = zs[ib];
+                    if ((az > pz) != (bz > pz))
+                    {
+                        long lhs = (px - ax) * (bz - az);
+                        long rhs = (bx - ax) * (pz - az);
+                        if (bz - az > 0 ? lhs < rhs : lhs > rhs)
+                            inside = !inside;
+                    }
+                }
+            }
+            return inside;
+        }
+
+        private static bool PointInRingsParityCore(
+            long pxN, long pzN, int n, long[] xs, long[] zs, List<(int a, int b)> ringEdges)
         {
             bool inside = false;
             foreach (var (ia, ib) in ringEdges)
             {
                 long ax = xs[ia], az = zs[ia];
                 long bx = xs[ib], bz = zs[ib];
-                if ((az > pz) != (bz > pz))
+                if ((az * n > pzN) != (bz * n > pzN))
                 {
-                    // px < x-intersection of the edge with the horizontal through pz (exact).
-                    long lhs = (px - ax) * (bz - az);
-                    long rhs = (bx - ax) * (pz - az);
+                    // pxN < n·(x-intersection of the edge with the horizontal through pzN/n),
+                    // exact: both sides scaled by the same n.
+                    long lhs = (pxN - n * ax) * (bz - az);
+                    long rhs = (bx - ax) * (pzN - n * az);
                     if (bz - az > 0 ? lhs < rhs : lhs > rhs)
                         inside = !inside;
                 }
             }
             return inside;
+        }
+
+        /// <summary>
+        /// Exact incidence of an n-SCALED point (pN = n·p) on the closed segment (a, b), all on
+        /// raw snapped coordinates. Extracted from the probe-on-edge fold so the clip stage can
+        /// reuse it (vertex classification's on-edge = OUT rule, contact splitting). Overflow:
+        /// each product ≤ n · 9.03e15 — Int64-safe up to n ≈ 1021 (same audit as the parity core).
+        /// </summary>
+        internal static bool PointOnSegmentScaled(
+            long pxN, long pzN, int n, long ax, long az, long bx, long bz)
+        {
+            long ex = bx - ax, ez = bz - az;
+            long cross = ex * (pzN - n * az) - ez * (pxN - n * ax);
+            if (cross != 0)
+                return false;
+            long sax = n * ax, sbx = n * bx, saz = n * az, sbz = n * bz;
+            return pxN >= (sax < sbx ? sax : sbx) && pxN <= (sax < sbx ? sbx : sax)
+                && pzN >= (saz < sbz ? saz : sbz) && pzN <= (saz < sbz ? sbz : saz);
+        }
+
+        /// <summary>Raw-point (n = 1) form of <see cref="PointOnSegmentScaled"/>.</summary>
+        internal static bool PointOnSegment(long px, long pz, long ax, long az, long bx, long bz)
+        {
+            return PointOnSegmentScaled(px, pz, 1, ax, az, bx, bz);
+        }
+
+        /// <summary>
+        /// Proper (transversal) segment crossing ONLY — endpoint contact, T-contact and collinear
+        /// overlap all report false.
+        ///
+        /// <para><b>Who needs it.</b> Four of its five call sites are the CLIP stage — transition
+        /// collection (a transition IS a proper crossing of a wall by a footprint side) and all
+        /// three checks on the emitted rings. That is also why this is <c>internal</c> rather than
+        /// private: <see cref="FPNavMeshClipper"/> is a different class. The fifth is the boundary
+        /// test under <see cref="FPBoundaryPlacementPolicy.Touch"/>, where only a transversal
+        /// crossing may reject and flush contact must carve.</para>
+        ///
+        /// <para><b>The duplication is deliberate.</b> This is
+        /// <see cref="SegmentsIntersectOrTouch"/>'s first branch, copied rather than extracted:
+        /// that method needs <c>o1..o4</c> for its four collinear branches as well, so calling this
+        /// one from it would recompute four exact <c>Orient2D</c> — on the predicate the boundary
+        /// loop measures at 95% of the per-building rebake cost. Sharing the expression would cost
+        /// more than the twelve characters it saves.</para>
+        /// </summary>
+        internal static bool SegmentsProperlyCross(
+            long ax, long az, long bx, long bz,
+            long cx, long cz, long dx, long dz)
+        {
+            int o1 = FPGeoPredicates.Orient2D(ax, az, bx, bz, cx, cz);
+            int o2 = FPGeoPredicates.Orient2D(ax, az, bx, bz, dx, dz);
+            int o3 = FPGeoPredicates.Orient2D(cx, cz, dx, dz, ax, az);
+            int o4 = FPGeoPredicates.Orient2D(cx, cz, dx, dz, bx, bz);
+            return o1 != o2 && o3 != o4 && o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0;
         }
 
         /// <summary>
@@ -2154,6 +2777,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private readonly int[] _polyStart;
         private readonly int _buildingCount, _polyVertCount;
         private readonly FPBuildingPlacementRules _rules;
+        private readonly FPNavMeshClipper.Transition[] _clipTransitions;
+        private readonly int[] _clipTransitionStart;
 
         private Phase _phase;
         private int[] _tris;
@@ -2178,7 +2803,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             IKLogger logger, FPNavMesh previous,
             FPNavMeshBuildPipeline.IncrementalOutcome outcome, FPBuildingAcceptedSet accepted,
             long[] polyX, long[] polyZ, int[] polyStart, int buildingCount, int polyVertCount,
-            FPBuildingPlacementRules rules)
+            FPBuildingPlacementRules rules,
+            FPNavMeshClipper.Transition[] clipTransitions, int[] clipTransitionStart)
         {
             _snapshot = snapshot;
             _cdt = cdt;
@@ -2198,6 +2824,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _buildingCount = buildingCount;
             _polyVertCount = polyVertCount;
             _rules = rules;
+            _clipTransitions = clipTransitions;
+            _clipTransitionStart = clipTransitionStart;
 
             _phase = Phase.Extract;
             _cdt.ExtractBegin(true);
@@ -2357,7 +2985,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 // The one place a rebake is known to have produced a mesh, and therefore the only
                 // place the preview cache may be told what the current building set is.
                 _accepted?.Capture(_polyX, _polyZ, _polyStart, _buildingCount, _polyVertCount,
-                    _snapshot.ShapeExpansion?.Catalog?.MaxVertexCount ?? 4, _rules);
+                    _snapshot.ShapeExpansion?.Catalog?.MaxVertexCount ?? 4, _rules,
+                    _clipTransitions, _clipTransitionStart);
 
                 _logger?.KInformation(
                     $"[FPNavMeshRebaker] rebaked: {_snapshot.BaseMesh.Triangles.Length} → {mesh.Triangles.Length} triangles, " +

@@ -2091,5 +2091,157 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 }
             }
         }
+
+        /// <summary>
+        /// T-9. The per-frame ghost preview against a growing accepted set — the shape an RTS
+        /// placement UI actually has — under all three boundary policies, because the answer
+        /// differs by an order of magnitude between them.
+        ///
+        /// <para><b>Two fixtures, not one, and that is forced.</b> A placement that clips a wall
+        /// cannot be placed at all under <c>Reject</c>, and a placement <c>Reject</c> accepts is by
+        /// definition not touching the boundary — so under <c>ClipOverlap</c> it carves its plain
+        /// footprint and never enters the clip stage. There is no geometry that measures both
+        /// paths. So the strict policies get footprints strictly inside the region, and
+        /// <c>ClipOverlap</c> gets footprints that clip, which is the case it exists for.</para>
+        ///
+        /// <para>The assertion is a RATIO rather than a millisecond ceiling, because the ratio is
+        /// what the caching and localisation layers changed and it survives being run on another
+        /// machine. Measured on Field: 2.3x from N = 4 to N = 32 with them, 11.2x without.</para>
+        /// </summary>
+        [Test]
+        public void GhostPreview_ClipOverlap_CostBarelyGrowsWithTheAcceptedSet()
+        {
+            string root = RepoRoot();
+            string path = Path.Combine(root, "Samples/Brawler/Assets/NavMesh/Data/Field.NavMeshData.bytes");
+            if (!File.Exists(path))
+                Assert.Ignore("Field asset missing");
+            FPNavMesh baseMesh = FPNavMeshSerializer.Deserialize(path);
+
+            // The two spot sets live in FieldPlacementSpots — the preview allocation gate quotes
+            // the same placements in its own baseline, and a table copied into both files would let
+            // one drift while the other's recorded numbers still claimed to describe it.
+            TestContext.Out.WriteLine(
+                $"=== Ghost preview, Field ({baseMesh.Triangles.Length} tris) ===");
+            double at4 = 0, at32 = 0;
+            foreach (FPBoundaryPlacementPolicy policy in new[]
+                     {
+                         FPBoundaryPlacementPolicy.Reject,
+                         FPBoundaryPlacementPolicy.Touch,
+                         FPBoundaryPlacementPolicy.ClipOverlap,
+                     })
+            {
+                bool clipping = policy == FPBoundaryPlacementPolicy.ClipOverlap;
+                var spots = clipping ? FieldPlacementSpots.Clipping : FieldPlacementSpots.Strict;
+                var rules = new FPBuildingPlacementRules(allowBuildingTouch: false, policy);
+                FPBuildingRect ghost = FieldPlacementSpots.Ghost(spots);
+
+                foreach (int n in new[] { 1, 4, 16, 32 })
+                {
+                    FPBuildingRect[] existing = FieldPlacementSpots.Take(spots, n);
+                    var context = FPNavMeshRebaker.CreateContext(baseMesh, null);
+                    FPNavMeshRebaker.Rebake(context, existing, null, rules);
+
+                    // The preview must be answering the question, not refusing early — a refusal
+                    // that never reaches the boundary tests would measure the separation loop.
+                    Assert.IsTrue(
+                        FPNavMeshRebaker.TryValidateOne(context, ghost, out var rejection, rules),
+                        $"the ghost was refused under {policy} at N = {n} ({rejection.Reason}), so "
+                        + "this measures a rejection path rather than the real work");
+                    // And the clipping row has to be clipping. Without this the fixture could drift
+                    // to interior footprints and report the cheap path under the expensive label.
+                    if (clipping)
+                        Assert.Greater(context.Accepted.CachedTransitionStart[n], 0,
+                            $"no existing building crosses a wall at N = {n}, so this row is "
+                            + "measuring the identity carve rather than the clip stage");
+
+                    var m = Measure(() => FPNavMeshRebaker.TryValidateOne(context, ghost, out _, rules));
+                    long bytes = MeasureAlloc(
+                        () => FPNavMeshRebaker.TryValidateOne(context, ghost, out _, rules));
+                    Report($"preview under {policy}, {n} down", m, $"{bytes} B");
+                    if (!clipping) continue;
+                    if (n == 4) at4 = m.minMs;
+                    if (n == 32) at32 = m.minMs;
+                }
+            }
+            TestContext.Out.WriteLine($"ClipOverlap N=32 / N=4 = {at32 / at4:F2}x");
+            Assert.Less(at32 / at4, 5.0,
+                $"the preview cost grew {at32 / at4:F1}x from 4 buildings to 32 ({at4:F4} -> "
+                + $"{at32:F4} ms). Either the accepted set's transition cache is not being filled "
+                + "or the post-walk validation is no longer localised to the ghost's group — "
+                + "without both it was 11.2x.");
+        }
+
+        /// <summary>
+        /// The boundary policy's cost, which the guide's §8 claims two things about: that
+        /// `ClipOverlap` costs what `Touch` costs while no footprint overhangs, and that a rebake
+        /// which does emit a clip ring takes the full-rebuild path.
+        ///
+        /// <para>Written because those figures were quoted in the guide without a fixture behind
+        /// them — §8 says every number there is reproducible from this class, and for that callout it
+        /// was not true.</para>
+        /// </summary>
+        [Test]
+        public void BoundaryPolicy_CostsWhatTouchCostsUntilAFootprintOverhangs()
+        {
+            TestContext.Out.WriteLine(
+                "=== boundary policy cost: interior placements vs one that overhangs ===");
+            TestContext.Out.WriteLine(
+                $"{"tris",9} {"policy",12} {"case",10} {"ms",8} {"patched",8} {"fallback",9}");
+
+            foreach (int half in new[] { 40, 80 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                int tris = baseMesh.Triangles.Length;
+                int warm = tris > 60_000 ? 4 : 8;
+                int iters = tris > 60_000 ? 5 : 5;
+                FPBuildingRect[] interior = LatticePlacements(4, half);
+
+                // Overhanging: the last footprint's expanded box crosses the stage border, so the
+                // clip stage actually runs. Under Touch or Reject this same set is refused, which is
+                // the reason the comparison below has to change the SET and not just the policy.
+                var over = new FPBuildingRect[interior.Length];
+                System.Array.Copy(interior, over, interior.Length);
+                FP64 edge = FP64.FromInt(half);
+                over[over.Length - 1] = new FPBuildingRect(
+                    edge - FP64.One, FP64.Zero, edge, FP64.One, FP64.Zero);
+
+                void Row(string label, FPBuildingPlacementRules rules, FPBuildingRect[] set)
+                {
+                    var ctx = FPNavMeshRebaker.CreateContext(baseMesh, null, prewarm: false);
+                    if (!FPNavMeshRebaker.TryRebake(ctx, set, out FPNavMesh probe,
+                            out FPBuildingRejectionInfo rejection, null, rules))
+                    {
+                        TestContext.Out.WriteLine(
+                            $"{tris,9} {rules.BoundaryPolicy,12} {label,10}   refused: {rejection.Reason}");
+                        return;
+                    }
+                    ctx.CommitSwap(probe);
+
+                    void Cycle()
+                    {
+                        FPNavMesh m = FPNavMeshRebaker.Rebake(ctx, set, null, rules);
+                        ctx.CommitSwap(m);
+                    }
+
+                    var oc = ctx.PatchOutcome;
+                    int inc0 = oc.Incremental;
+                    int fb0 = oc.FallbackVertexShift + oc.FallbackGridGeometry
+                            + oc.FallbackEmpty + oc.FallbackDuplicateBoundaryEdge;
+                    var m2 = Measure(Cycle, warmup: warm, iterations: iters);
+                    int inc = oc.Incremental - inc0;
+                    int fb = oc.FallbackVertexShift + oc.FallbackGridGeometry
+                           + oc.FallbackEmpty + oc.FallbackDuplicateBoundaryEdge - fb0;
+                    TestContext.Out.WriteLine(
+                        $"{tris,9} {rules.BoundaryPolicy,12} {label,10} {m2.minMs,8:F2} {inc,8} {fb,9}");
+                }
+
+                Row("interior", new FPBuildingPlacementRules(
+                    false, FPBoundaryPlacementPolicy.Touch), interior);
+                Row("interior", new FPBuildingPlacementRules(
+                    false, FPBoundaryPlacementPolicy.ClipOverlap), interior);
+                Row("overhang", new FPBuildingPlacementRules(
+                    false, FPBoundaryPlacementPolicy.ClipOverlap), over);
+            }
+        }
     }
 }

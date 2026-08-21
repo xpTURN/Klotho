@@ -141,5 +141,72 @@ namespace xpTURN.Klotho.Deterministic.Math.Tests
         }
 
         #endregion
+
+        #region DivRem
+
+        [Test]
+        public void DivRem_MatchesBigInteger_Randomized()
+        {
+            // Truncated (toward-zero) semantics, remainder carries the dividend's sign —
+            // BigInteger's operator semantics match C#'s, so it is a direct oracle.
+            var rng = new SysRandom(96004);
+            for (int i = 0; i < 2000; i++)
+            {
+                long a = rng.NextInt64(long.MinValue + 1, long.MaxValue);
+                long b = rng.NextInt64(long.MinValue + 1, long.MaxValue);
+                long d = 0;
+                while (d == 0) d = rng.NextInt64(long.MinValue + 1, long.MaxValue);
+
+                BigInteger dividend = (BigInteger)a * b;
+                BigInteger expectedQ = dividend / d;
+                if (expectedQ < long.MinValue || expectedQ > long.MaxValue)
+                    continue; // outside the contract (quotient must fit) — not this API's domain
+
+                long q = FPInt128.DivRem(FPInt128.Mul64(a, b), d, out long r);
+                Assert.AreEqual((long)expectedQ, q, $"quotient iter {i}: {a}*{b}/{d}");
+                Assert.AreEqual((long)(dividend % d), r, $"remainder iter {i}: {a}*{b}%{d}");
+            }
+        }
+
+        [Test]
+        public void DivRem_ClipStageDomain_ExactFloorReconstruction()
+        {
+            // The consumer's shape: X' cell location — numerator = tNum · edgeDelta with
+            // |tNum| < |tDen|, coordinates within the snapped domain. The quotient plus
+            // remainder must reconstruct the dividend exactly (the floor adjustment at the
+            // call site rides on that identity).
+            var rng = new SysRandom(96005);
+            const long MAX = 47448064; // MAX_SNAPPED_COORD scale
+            for (int i = 0; i < 2000; i++)
+            {
+                long tDen = rng.NextInt64(1, (long)9e15);
+                long tNum = rng.NextInt64(-tDen + 1, tDen);
+                long delta = rng.NextInt64(-2 * MAX, 2 * MAX + 1);
+                long q = FPInt128.DivRem(FPInt128.Mul64(tNum, delta), tDen, out long r);
+                BigInteger dividend = (BigInteger)tNum * delta;
+                Assert.AreEqual(dividend, (BigInteger)q * tDen + r, $"reconstruction iter {i}");
+                Assert.LessOrEqual(System.Math.Abs(r), tDen - 1, $"remainder bound iter {i}");
+                Assert.LessOrEqual(System.Math.Abs(q), 2 * MAX, $"quotient stays in coordinate scale iter {i}");
+            }
+        }
+
+        [Test]
+        public void DivRem_SignMatrix_AndEdges()
+        {
+            foreach ((long a, long b, long d) in new[]
+            {
+                (7L, 1L, 3L), (-7L, 1L, 3L), (7L, 1L, -3L), (-7L, 1L, -3L),
+                (6L, 1L, 3L), (-6L, 1L, -3L), (0L, 0L, 5L), (1L, 1L, 1L),
+                (long.MaxValue, long.MaxValue, long.MaxValue),
+            })
+            {
+                BigInteger dividend = (BigInteger)a * b;
+                long q = FPInt128.DivRem(FPInt128.Mul64(a, b), d, out long r);
+                Assert.AreEqual((long)(dividend / d), q, $"{a}*{b}/{d}");
+                Assert.AreEqual((long)(dividend % d), r, $"{a}*{b}%{d}");
+            }
+        }
+
+        #endregion
     }
 }

@@ -6,6 +6,13 @@ using xpTURN.Klotho.Network;
 namespace xpTURN.Klotho.Unity
 {
     /// <summary>
+    /// Source of the per-frame dt that drives the session.
+    /// <see cref="WallClock"/> measures real elapsed time (engine-independent); <see cref="EngineFrame"/>
+    /// uses Unity's <c>Time.deltaTime</c> (honors timeScale / engine frame pacing).
+    /// </summary>
+    public enum SessionDtSource { WallClock, EngineFrame }
+
+    /// <summary>
     /// MonoBehaviour adapter that drives a KlothoSession through Unity's Update loop and exposes
     /// hooks for pre/post-Update logic and Stop teardown. Game code attaches a session via
     /// <see cref="Attach"/> and tears down through <see cref="DetachAndStop"/>. The driver also owns
@@ -20,13 +27,6 @@ namespace xpTURN.Klotho.Unity
     /// Multi-cast invocation follows C# default: first throw in the invocation list stops
     /// subsequent subscribers from firing.
     /// </summary>
-    /// <summary>
-    /// Source of the per-frame dt that drives the session.
-    /// <see cref="WallClock"/> measures real elapsed time (engine-independent); <see cref="EngineFrame"/>
-    /// uses Unity's <c>Time.deltaTime</c> (honors timeScale / engine frame pacing).
-    /// </summary>
-    public enum SessionDtSource { WallClock, EngineFrame }
-
     public sealed class KlothoSessionDriver : MonoBehaviour
     {
         public KlothoSession Session { get; private set; }

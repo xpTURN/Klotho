@@ -162,6 +162,150 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         }
 
         [Test]
+        public void ClipOverlap_WithoutClipRings_PatchesExactlyLikeTouch()
+        {
+            // The boundary policy must not decide whether the patch runs — the EMISSION must.
+            //
+            // ClipOverlap used to disable the patch on the policy alone, and the reason recorded
+            // at the call site named a mechanism this patch does not have ("the incremental patch
+            // derives its dirty region from FOOTPRINTS"): the diff is a merge over two arrays of
+            // vertex-index triples, and nothing in FPNavMeshBuildPipeline reads a footprint. The
+            // cost landed exactly where the reason did not apply — a placement set with no
+            // overhang emits the IDENTITY carve, which is byte-identical to what Touch emits, and
+            // Touch has always patched.
+            //
+            // Why the identity claim is airtight rather than probable: clip.RingCount == 0 implies
+            // every building had zero transitions (a building with transitions either walks its
+            // group's ring or belongs to a group already walked, and a successful walk always
+            // emits at least 3 vertices), so every building is an IdentityBuilding and the clip
+            // branch collapses into the same loop over the same arrays in the same order — with
+            // clip.Xs.Length == 0, holeCapacity and the constraint capacity collapse too.
+            //
+            // This is the gate that keeps the fix: revert it to `clipMode && previous != null` and
+            // Incremental goes to zero here.
+            var clip = new FPBuildingPlacementRules(
+                allowBuildingTouch: false, FPBoundaryPlacementPolicy.ClipOverlap);
+            var touch = new FPBuildingPlacementRules(
+                allowBuildingTouch: false, FPBoundaryPlacementPolicy.Touch);
+
+            FPNavMesh baseMesh = BuildBase();
+            var clipCtx = new FPNavMeshRebakeContext(
+                FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false));
+            var touchCtx = new FPNavMeshRebakeContext(
+                FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false));
+            FPNavMeshRebakeSnapshot fresh = FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false);
+
+            // Interior-only, so no footprint reaches the boundary and no clip ring is emitted.
+            var sequence = new[] { Buildings(1), Buildings(4), Buildings(12), Buildings(4) };
+            foreach (FPBuildingRect[] buildings in sequence)
+            {
+                FPNavMesh clipped = FPNavMeshRebaker.Rebake(clipCtx, buildings, null, clip);
+                FPNavMesh touched = FPNavMeshRebaker.Rebake(touchCtx, buildings, null, touch);
+                FPNavMesh reference = FPNavMeshRebaker.Rebake(fresh, buildings, null, clip);
+
+                // Against Touch AND against the full build: the first says the two policies are
+                // one emission, the second says the patch did not change the answer.
+                Assert.IsNull(FPNavMeshBuildPipeline.DescribeFirstDifference(clipped, touched),
+                    $"{buildings.Length} buildings: ClipOverlap and Touch must emit one mesh when "
+                    + "no footprint overhangs");
+                Assert.IsNull(FPNavMeshBuildPipeline.DescribeFirstDifference(clipped, reference),
+                    $"{buildings.Length} buildings: patched ClipOverlap mesh differs from the full build");
+
+                clipCtx.CommitSwap(clipped);
+                touchCtx.CommitSwap(touched);
+            }
+
+            Assert.Greater(clipCtx.PatchOutcome.Incremental, 0,
+                "ClipOverlap never patched, so the policy is still gating the patch instead of the "
+                + "emission — this is the regression this test exists for");
+            Assert.AreEqual(touchCtx.PatchOutcome.Incremental, clipCtx.PatchOutcome.Incremental,
+                "ClipOverlap must patch exactly as often as Touch when the emission is identical");
+        }
+
+        [Test]
+        public void ClipOverlap_AcrossClipRingSteps_StillEqualsTheFullBuild()
+        {
+            // The net for narrowing — or later removing — the ClipOverlap patch gate.
+            //
+            // The sequence deliberately straddles the gate: steps WITH an overhanging footprint
+            // emit a clip ring and take the full path today; the step that DEMOLISHES the overhang
+            // goes back to zero clip rings, so the patch runs against a previous mesh that was
+            // built WITH a clip ring in it. That last case is the one a first reading of this gate
+            // fears — a dirty region that has to cover geometry reaching past the footprint — and
+            // it is guarded, not unguarded: the diff key is protected by the vertex-prefix guard,
+            // which falls back to the full build rather than patching a shifted array. So no
+            // "which policy built the previous mesh" flag is needed, and this asserts that.
+            //
+            // Element-wise, not by fingerprint: ComputeFingerprint does not cover neighbours,
+            // portals or the spatial grid (see PatchedMeshEqualsFullBuild_ElementByElement).
+            var clip = new FPBuildingPlacementRules(
+                allowBuildingTouch: false, FPBoundaryPlacementPolicy.ClipOverlap);
+
+            FPNavMesh baseMesh = BuildBase();
+            var ctx = new FPNavMeshRebakeContext(
+                FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false));
+            FPNavMeshRebakeSnapshot fresh = FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false);
+
+            // Overhangs the x = -20 wall: expanded to [-20.75, -18.75] x [11.75, 13.75], so both
+            // crossings land in the INTERIOR of a wall edge (base ring vertices sit on integers),
+            // which is what keeps this a proper crossing instead of an ExactBoundaryContact refusal.
+            FPBuildingRect overhang = new FPBuildingRect(
+                FP64.FromDouble(-20.25), FP64.FromDouble(12.25),
+                FP64.FromDouble(-19.25), FP64.FromDouble(13.25), FP64.Zero);
+
+            FPBuildingRect[] With(int interior)
+            {
+                FPBuildingRect[] inner = Buildings(interior);
+                var all = new FPBuildingRect[interior + 1];
+                Array.Copy(inner, all, interior);
+                all[interior] = overhang;
+                return all;
+            }
+
+            // Non-vacuity for "a clip ring was really emitted", black box: a transversal crossing
+            // is exactly what Touch refuses, so a Touch refusal on this very set proves the
+            // footprint crosses the boundary — and crossing is what produces transitions, hence a
+            // ring. Without this the sequence below could be all-identity and prove nothing.
+            Assert.Throws<InvalidOperationException>(
+                () => FPNavMeshRebaker.Rebake(
+                    FPNavMeshRebaker.CreateSnapshot(baseMesh, null, prewarm: false),
+                    With(4), null,
+                    new FPBuildingPlacementRules(false, FPBoundaryPlacementPolicy.Touch)),
+                "the overhang fixture stopped crossing the boundary — it no longer emits a clip "
+                + "ring and this test would pass while measuring nothing");
+
+            var sequence = new[]
+            {
+                Buildings(4),               // no clip ring — patch
+                With(4),                    // clip ring appears
+                With(8),                    // clip ring stays, interior grows
+                Buildings(8),               // overhang DEMOLISHED — patch against a clipped mesh
+                With(8),                    // and back
+                Buildings(4),               // shrink, no clip ring
+            };
+
+            for (int step = 0; step < sequence.Length; step++)
+            {
+                FPBuildingRect[] buildings = sequence[step];
+                FPNavMesh patched = FPNavMeshRebaker.Rebake(ctx, buildings, null, clip);
+                FPNavMesh reference = FPNavMeshRebaker.Rebake(fresh, buildings, null, clip);
+
+                Assert.IsNull(FPNavMeshBuildPipeline.DescribeFirstDifference(patched, reference),
+                    $"step {step} ({buildings.Length} buildings)");
+                Assert.IsNull(FPNavMeshBuildPipeline.DescribeDuplicateBoundaryEdge(patched),
+                    $"step {step} ({buildings.Length} buildings)");
+
+                ctx.CommitSwap(patched);
+            }
+
+            Assert.Greater(ctx.PatchOutcome.Incremental, 0,
+                "no step patched, so this compared the full path against itself");
+            Assert.AreEqual(0, ctx.PatchOutcome.FallbackDuplicateBoundaryEdge,
+                "a patched mesh had an edge two triangles both call a boundary — the output is "
+                + "still correct, but that is a patch bug wearing a performance cost");
+        }
+
+        [Test]
         public void ThePatchIsActuallyFasterThanRebuilding()
         {
             // A gate, not a benchmark. The numbers a benchmark reports belong in the perf fixture;

@@ -493,12 +493,20 @@ namespace Brawler
         /// failure rather than as a rejection.
         ///
         /// Same reason it is a constant and not a setting: it must be identical on every peer and
-        /// in every replay. A build that flipped it would diverge from recordings made before.
-        /// (Touching the walkable BOUNDARY has no flag and stays rejected — see
-        /// FPBuildingPlacementRules.)
+        /// in every replay. A build that flipped it would diverge from recordings made before —
+        /// for the boundary axis specifically, a recording that contains a placement REJECTED
+        /// under the old policy replays as accepted under the new one, so flipping this orphans
+        /// exactly those recordings (accepted placements all replay unchanged).
+        ///
+        /// The walkable-BOUNDARY axis is ClipOverlap: a footprint may hang past any wall at any
+        /// angle — it is clipped to the walkable region and the clipped shape is carved, which is
+        /// what lets a placement seal a corridor whose walls have no lattice point to sit flush
+        /// against (Docs/IMP/IMP96/Plan-BoundaryOverlapClip.md). Neighbouring wall runs merge into
+        /// one obstacle; the clip-specific refusals are all deterministic and worded in
+        /// Describe below.
         /// </summary>
         public static readonly FPBuildingPlacementRules PlacementRules =
-            new FPBuildingPlacementRules(allowBuildingTouch: true);
+            new FPBuildingPlacementRules(allowBuildingTouch: true, FPBoundaryPlacementPolicy.ClipOverlap);
 
         /// <summary>Log-friendly shape name — a bare pair of indices would make the log unreadable
         /// once the catalog holds two families.</summary>
@@ -535,10 +543,21 @@ namespace Brawler
                 case FPBuildingRejection.TouchesWalkableBoundary:
                     return "too close to the edge of the walkable area";
                 case FPBuildingRejection.OutsideWalkableRegion:
+                    // Under ClipOverlap this verdict means "clips to nothing" — the footprint
+                    // never reaches the walkable area at all, not merely "centre is off-mesh".
                     return "not on the walkable area";
                 case FPBuildingRejection.SwallowsBakedHole:
                     return $"would cover a gap in the ground at "
                         + $"({r.Site.x.ToDouble():F1}, {r.Site.y.ToDouble():F1})";
+                // ClipOverlap refusals. All deterministic, all fixable by nudging the ghost —
+                // the wording tells the player to move rather than naming the geometry.
+                case FPBuildingRejection.ExactBoundaryContact:
+                    return "resting exactly on the edge of the walkable area — move it a little";
+                case FPBuildingRejection.ClipCandidateMissing:
+                    return "barely grazes the walkable area — move it further in or out";
+                case FPBuildingRejection.ClipSplitsWalkableRegion:
+                case FPBuildingRejection.ClipRunsInterleave:
+                    return "the ground under it is too broken up to build across";
                 default:
                     return $"placement refused ({r.Reason})";
             }

@@ -227,11 +227,21 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         /// <summary>
         /// DEBUG-only machine verification of the conforming-input contract: (a) every
-        /// referenced vertex is on the predicate grid and XZ-unique (weld-complete), (b)(c) the
-        /// skipped epsilon checks must be no-ops — the T-junction scan (same predicate as the
-        /// full path, grid-index accelerated) must find zero candidates. A candidate here means
-        /// either misuse (non-CDT input) or a premise-divergence case
-        /// (a near-edge sliver can appear even on exact-valid geometry).
+        /// referenced vertex is on the predicate grid and XZ-unique (weld-complete), (c) no
+        /// vertex sits EXACTLY on the interior of an edge it does not belong to — the invariant
+        /// CDT output actually guarantees.
+        ///
+        /// <para>The epsilon T-junction scan is kept as a PREFILTER only. An epsilon candidate on
+        /// exact geometry is not misuse: T_JUNCTION_EPSILON is 2 mm and a building accepted under
+        /// the DEFAULT placement policy can legally sit 1–2 snap units (&lt; 2 mm) from a wall or
+        /// from another building, leaving a real, walkable, exactly-representable sliver whose
+        /// vertices fall inside the epsilon of the far edge. This used to Debug.Fail on every such
+        /// placement — reachable in any DEBUG game build since the rebaker shipped, first pinned
+        /// by FPBoundaryTouchSealTests.Touch_OneSnapGap_PathSurvives_PolicyOpen. The full build
+        /// path would have REPAIRED such candidates (it exists for float-imported meshes); the
+        /// conforming path correctly leaves exact geometry alone, so the divergence is the
+        /// design, not a defect. Only an EXACT incidence — impossible in valid CDT output, so
+        /// always misuse — asserts.</para>
         /// </summary>
         [System.Diagnostics.Conditional("DEBUG")]
         private static void VerifyConformingContract(FPVector3[] vertices, int vertexCount, ReadOnlySpan<int> indices)
@@ -264,8 +274,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     int eb = indices[t + (e + 1) % 3];
                     mids.Clear();
                     FindVerticesOnEdge(vertices, vertexCount, index, ea, eb, epsSq, T_JUNCTION_HEIGHT_EPSILON, mids);
-                    System.Diagnostics.Debug.Assert(mids.Count == 0,
-                        "BuildFromConformingTriangulation: epsilon T-junction candidate on conforming input (contract (c) / premise divergence)");
+                    for (int m = 0; m < mids.Count; m++)
+                    {
+                        // Exact incidence re-check on the snapped integers: epsilon proximity is
+                        // legitimate on exact geometry (see the summary); a vertex EXACTLY on the
+                        // open edge is not — no valid triangulation contains one, so it can only
+                        // be non-CDT input.
+                        FPVector3 mv = vertices[mids[m].vertIdx];
+                        long svx = FPGeoPredicates.Snap(mv.x), svz = FPGeoPredicates.Snap(mv.z);
+                        long sax = FPGeoPredicates.Snap(vertices[ea].x), saz = FPGeoPredicates.Snap(vertices[ea].z);
+                        long sbx = FPGeoPredicates.Snap(vertices[eb].x), sbz = FPGeoPredicates.Snap(vertices[eb].z);
+                        bool exact = FPGeoPredicates.Orient2D(sax, saz, sbx, sbz, svx, svz) == 0
+                            && svx >= (sax < sbx ? sax : sbx) && svx <= (sax < sbx ? sbx : sax)
+                            && svz >= (saz < sbz ? saz : sbz) && svz <= (saz < sbz ? sbz : saz);
+                        System.Diagnostics.Debug.Assert(!exact,
+                            "BuildFromConformingTriangulation: EXACT T-junction on conforming input "
+                            + "(contract (c)) — a vertex lies on the interior of a foreign edge; "
+                            + "valid CDT output cannot produce this, so the input is not CDT output");
+                    }
                 }
             }
         }

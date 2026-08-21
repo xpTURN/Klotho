@@ -3,17 +3,16 @@
 Place and remove buildings **during a match** and have the NavMesh change to match — deterministically, on every peer, with no authored variants.
 
 Supported footprints: **AABB** (axis-aligned box), **OBB** (oriented box, quantized to `M`
-directions) and **circle**, approximated by a hexagon so that it can still be packed.
+directions) and **circle** (approximated by a hexagon, so it can still be packed).
 
 > **Prerequisite**: [Navigation.md](Navigation.md) covers the static NavMesh runtime — query,
 > pathfinding, agents, ORCA. This document is about changing that NavMesh mid-match.
 >
 > **Where to start**: [2. Quick start](#2-quick-start) is the whole wiring, and
-> [6. Placing from a command stream](#6-placing-from-a-command-stream) is what the placement command
-> itself has to do. Those two are enough to ship. [4. Concepts](#4-concepts) answers "what shape can
-> I place, and why was this one refused" when you get there; 7 to 9 are the determinism envelope,
-> measured costs and limits. [11](#11-doing-it-by-hand) is an appendix for tooling and non-rollback
-> games — skip it otherwise.
+> [6. Placing from a command stream](#6-placing-from-a-command-stream) is what a placement command
+> has to do. Those two are enough to ship. [4. Concepts](#4-concepts) answers "what shape can I
+> place, and why was this one refused". Sections 7 to 9 cover determinism, measured costs and
+> limits. [11](#11-doing-it-by-hand) is an appendix for tooling and non-rollback games.
 >
 > **Units**: one world unit is **one metre**. Sizes on the shape API are in **snap units**, 1024 to
 > a metre — so a snap unit is just under a millimetre.
@@ -23,7 +22,7 @@ directions) and **circle**, approximated by a hexagon so that it can still be pa
 ## 1. What problem this solves
 
 A baked NavMesh is fixed at build time. When a player puts a building down, agents have to stop
-routing through it — and every peer has to agree, exactly.
+routing through it — and every peer has to agree exactly.
 
 The rebaker cuts the building's footprint out of the walkable region and re-triangulates what is
 left, so the space around the building stays walkable:
@@ -41,13 +40,13 @@ before                          after placing a building
 Everything runs on integer arithmetic, so every peer computes the **same** mesh from the same
 command — bit for bit, on Unity, Godot and the .NET server alike.
 
-Two simpler-looking approaches do not work, and it is worth knowing why before you try them:
+Two simpler-looking approaches do not work:
 
 - **Marking the covered triangles unwalkable.** NavMesh triangles are large — one can span a whole
   corridor. Blocking the triangle a small building sits on closes a path that is still mostly clear.
 - **Re-running Unity's or Godot's baker.** Those use floating-point maths, which can give slightly
-  different answers on different machines. Two players would end up with different NavMeshes, and
-  the match would desync.
+  different answers on different machines. Two players would end up with different NavMeshes and the
+  match would desync.
 
 ---
 
@@ -71,13 +70,13 @@ simulation.AddSystem(seam.Driver, SystemPhase.PreUpdate);   // ahead of whatever
 ```
 
 The engine finds that driver at `Initialize` and takes over from there: it paces the sliced rebake
-on every frame, establishes the invariant at world init, and re-establishes it after a full state
-applies. **Registering it IS the opt-in** — a game that does not register one pays nothing, and there
-is no way to opt out of the pacing once it is registered.
+every frame, establishes the invariant at world init, and re-establishes it after a full state
+applies. **Registering it is the opt-in** — a game that registers no driver pays nothing, and once
+registered there is no way to opt out of the pacing.
 
-For the command side, a validator answers "may this placement land?" against the set that will be
-live when it does — the same derivation the driver installs from, so what you accept is what gets
-baked:
+On the command side, a validator answers "may this placement land?" against the set that will be
+live when it does. That is the same derivation the driver installs from, so what you accept is what
+gets baked:
 
 ```csharp
 int count = validator.Survey(ref frame, atTick: frame.Tick + BuildDelayTicks);
@@ -90,10 +89,10 @@ if (!validator.TryPreviewWith(rebake, candidate, out FPBuildingRejectionInfo why
 frame.Add(entity, new MyBuilding { /* … */ Sequence = validator.NextSequence, … });
 ```
 
-Nothing swaps here. The component IS the outcome, and the driver installs the mesh on the tick that
-component names — which is what makes a rollback across that tick reproduce the swap instead of
-needing it undone. [6. Placing from a command stream](#6-placing-from-a-command-stream) is the whole
-story, including the four traps that cost live matches to find.
+Nothing swaps here. The component *is* the outcome, and the driver installs the mesh on the tick
+that component names — which is what lets a rollback across that tick reproduce the swap instead of
+having to undo it. [6. Placing from a command stream](#6-placing-from-a-command-stream) has the full
+story, including four traps worth knowing about.
 
 ---
 
@@ -107,13 +106,13 @@ You only ever supply two things: the stage's original NavMesh, and the current l
    building list ─┘
 ```
 
-Three things happen inside that are worth knowing about, because they affect what you pass:
+Three things happen inside that affect what you pass:
 
 - **Buildings are checked, never adjusted.** A placement that will not work is refused and the
   original mesh is left alone — see [4.5](#45-what-gets-rejected).
 - **The agent radius is added for you.** You give the building's real size; the rebaker widens the
-  carved hole so agents do not clip the wall. That is why a flush neighbour's offset has to be asked
-  for rather than derived from the size you authored ([4.3](#43-placing-shapes-flush)).
+  carved hole so agents do not clip the wall. That is why the offset to a flush neighbour has to be
+  asked for rather than derived from the size you authored ([4.3](#43-placing-shapes-flush)).
 - **The result is an ordinary NavMesh.** It goes through the same final assembly the offline baker
   uses and inherits the same bake settings, so nothing downstream can tell the two apart.
 
@@ -132,21 +131,23 @@ bool ok = FPGeoPredicates.IsOnGrid(x);           // or just check
 
 **Quantize early — before the position goes into the command**, not on the way into the rebaker.
 
-If you quantize late, you end up with two slightly different positions: the one your game stored,
-and the one the NavMesh was actually carved from. Nothing warns you about this. It shows up much
-later as buildings that no longer line up flush, because your offsets were calculated from the
-wrong one.
+Quantize late and you end up with two slightly different positions: the one your game stored, and
+the one the NavMesh was carved from. Nothing warns you. It shows up much later as buildings that no
+longer line up flush, because your offsets came from the wrong one.
 
 Two things that catch people out:
 
-- **It is 1/1024 m, not 1 m.** Whole metres are on the grid, so rounding to them does work — but
-  then buildings can no longer sit flush against each other, because the gaps between them are
-  almost never a whole number of metres.
+- **It is 1/1024 m, not 1 m.** Whole metres are on the grid, so rounding to them works — but then
+  buildings can no longer sit flush against each other, because the gaps between them are almost
+  never a whole number of metres.
 - **Only binary fractions are on it.** `0.5`, `0.25`, `0.125` yes; `0.1`, `0.3`, `2.7` no.
+- **Rounding to a coarse grid costs you placements.** Under `ClipOverlap`, a ghost that snaps to
+  quarter or half metres gets refused on a lot of positions. Moving your grid two snaps off the
+  round numbers fixes it — one snap makes it worse. [4.4](#44-building-wall-to-wall) says why.
 
 > **Why 1/1024 rather than a millimetre?** The engine's numbers are binary, and 1/1024 is an exact
-> binary fraction while 1/1000 is not. An exact one converts back and forth with no rounding at all,
-> which is what keeps every machine in agreement. It is also slightly finer than a millimetre.
+> binary fraction while 1/1000 is not. An exact one converts back and forth with no rounding, which
+> is what keeps every machine in agreement. It is also slightly finer than a millimetre.
 
 ### 4.2 Supported footprint types
 
@@ -157,8 +158,8 @@ Two things that catch people out:
 | **Circle** | Catalog shape from `AddHexagon` | Yes |
 
 Packing works **within** an orientation: two boxes turned the same way meet exactly, two boxes
-turned differently do not. "Circle" means a hexagon — that is the roundest footprint that can still
-be packed ([4.3](#43-placing-shapes-flush) has the numbers).
+turned differently do not. "Circle" means a hexagon — the roundest footprint that can still be
+packed ([4.3](#43-placing-shapes-flush) has the numbers).
 
 **A rectangle needs no catalog.** Give the footprint in metres; the rebaker adds the agent radius
 itself.
@@ -169,8 +170,8 @@ new FPBuildingRect(minX, minZ, maxX, maxZ, y)
 ```
 
 The four coordinates pair by **corner**, not by axis. The other common convention is
-`minX, maxX, minZ, maxZ`, and the same four numbers under that reading give a different rectangle
-with nothing to complain about — so it is worth a glance the first time.
+`minX, maxX, minZ, maxZ`, and the same four numbers read that way give a different rectangle with
+nothing to complain about — so it is worth a glance the first time.
 
 **Everything else comes from a catalog** — one table per stage, holding every size and type the game
 can place. A placement then names a shape in that table, a turn of it, and a centre.
@@ -250,7 +251,7 @@ var neighbour = new FPBuildingPlacement(
 ```
 
 No quantizing needed here: the delta is a whole number of snap units, so a centre already on the
-grid stays on it, however far the pattern is extended. For free-hand placement that still snaps to
+grid stays on it however far the pattern is extended. For free-hand placement that still snaps to
 the pattern, use `TrySnapToLattice` ([4.3](#43-placing-shapes-flush)).
 
 #### Things to know before you ship a rotate button
@@ -261,7 +262,7 @@ the pattern, use `TrySnapToLattice` ([4.3](#43-placing-shapes-flush)).
   fine for a rotate button, surprising if you were building a palette of 16 previews.
 - **Multiple of 4 is required** so that four quarter-turns land back on the exact starting integers.
   A box that drifted a snap unit per turn would lose flush contact with its neighbours, and you
-  would see it as a placement rejection long after the turn that caused it.
+  would only see it as a placement rejection long after the turn that caused it.
 - **The order of the `Add…` calls decides the ids, so it must never change by accident.** A stored
   placement refers to a shape by id. Reorder the calls and every stored placement now points at a
   different shape, with nothing to warn you. Write the table as plain straight-line code — never
@@ -271,7 +272,7 @@ the pattern, use `TrySnapToLattice` ([4.3](#43-placing-shapes-flush)).
 - **Use `AddHexagon`; do not build a hexagon yourself.** A regular hexagon has no integer form, and
   the obvious route (compute the vertices, pass them through `Snap`) loses the ability to pack —
   `Snap` is floor, which is not symmetric about the centre. It still carves perfectly, so the loss
-  only shows up much later, the first time someone builds wall to wall.
+  only shows up the first time someone builds wall to wall.
 
 Raw offsets are available as `ObbOffsets` / `HexagonOffsets` if you are assembling a table without
 the builder ([10. API reference](#10-api-reference)).
@@ -294,10 +295,9 @@ exp.TrySnapToLattice(shape, orientation, cursorX, cursorZ, out FP64 x, out FP64 
 **Only boxes and hexagons can be packed.** Those two are the shapes that tile a plane with no gaps.
 Ask `catalog.TilesThePlane(shape, orientation)` if you are unsure.
 
-Rounder shapes — an octagon, a 16-gon — cannot. They will give you one flush neighbour and look
-fine, but keep building outward in two directions and the copies start to overlap. Such a shape is
-still perfectly placeable and carves correctly; it just is not something a player can pack wall to
-wall.
+Rounder shapes — an octagon, a 16-gon — cannot. They give you one flush neighbour and look fine, but
+keep building outward in two directions and the copies start to overlap. Such a shape is still
+perfectly placeable and carves correctly; it just is not something a player can pack wall to wall.
 
 ### 4.4 Building wall to wall
 
@@ -312,12 +312,93 @@ FPNavMeshRebaker.Rebake(rebake, buildings, logger, rules);
 With the flag on, a shared edge, a shared corner and a collinear overlap are accepted and carved as
 one merged obstacle.
 
-Two things stay rejected whatever the flag says:
+Touching the **walkable boundary** is a second, independent policy:
+
+```csharp
+var rules = new FPBuildingPlacementRules(
+    allowBuildingTouch: true, FPBoundaryPlacementPolicy.Touch);
+```
+
+There are three policies:
+
+| Policy | What a footprint may do at the walkable boundary |
+| --- | --- |
+| `Reject` (default) | Nothing — any contact with the boundary is refused |
+| `Touch` | Sit flush against a wall: shared edges, shared corners and T-contacts all carve |
+| `ClipOverlap` | Hang past a wall at any angle; the part outside is clipped away and the rest is carved |
+
+Under `Touch`, a chain of flush buildings can **seal a corridor completely**: the walkable region
+splits in two and paths across it fail — the RTS "wall off the map" case. Flush contact with a baked
+hole (a pillar) works the same way.
+
+`ClipOverlap` adds the case `Touch` cannot serve: a wall with no lattice point to sit flush against,
+so one placement can seal a corridor at an arbitrary angle. Neighbouring placements whose wall runs
+overlap merge into one obstacle, and the strip carved between them hugs the wall within a few
+millimetres, so the passage away from the wall stays open. Everything `Touch` accepts is accepted
+bit-identically.
+
+> **`ClipOverlap` exists to seal a corridor, not to fit a building against the art.** It answers one
+> question — may the walkable region be closed here — and it answers it about the *navigation* mesh
+> only. The overhanging part is removed from the walkable region; nothing is removed from your
+> building's rendered mesh, and the rebaker never looks at it. So a footprint that hangs over the
+> cliff edge or into the rock face will pass, and on screen the building will clip into the wall art.
+>
+> **That is yours to manage, and the placement UI is where it belongs.** Nothing in the rebaker can
+> help: it knows the walkable boundary, which is where an agent may stand — not where the visual
+> wall begins, how it is chamfered, or how far it overhangs. Give the ghost its own check against
+> your art — a collider sweep against the wall/cliff meshes is the usual one — and require both that
+> and the rebake verdict before the placement is offered. Two independent gates, two different
+> questions.
+
+`ClipOverlap` has four refusals of its own, all deterministic and all explainable to a player:
+*clips to nothing* (entirely outside the region), *exact boundary contact while crossing* (move a
+snap), *no candidate near the crossing* (the sliver is thinner than ~4 mm), and *clips into more than
+one region*. Both previews answer under this policy — the single-ghost `TryValidateOne` and the
+full-list `TryPreviewPlacements`.
+
+**Do not round the ghost to the same grid your stage art uses.** A build UI that snaps to quarter or
+half metres gets *exact boundary contact* refusals on a lot of positions — on a dense stage, about
+one in five. Move your grid a couple of snaps off the round numbers and they nearly all go away.
+
+```csharp
+// A quarter-metre ghost grid, stepped two units off the round numbers.
+const int  CellShift = 8;   // 2^8 grid units = 1/4 m — there are 1024 to a metre
+const long Bias      = 2;
+
+static FP64 SnapGhost(FP64 cursor)
+{
+    long cell = (FPGeoPredicates.Snap(cursor) - Bias) >> CellShift;   // a shift is floor
+    return FPGeoPredicates.Unsnap((cell << CellShift) + Bias);
+}
+```
+
+**Two units rather than one.** One unit still parks the footprint as close to the wall as the grid
+allows, so it trades the exact contacts for the thinnest slivers the clip can be handed — on a dense
+stage that costs a couple of percent of positions back. Two behaves the same as three, four or
+eight, so there is nothing to tune here.
+
+Neither refusal is something `ClipOverlap` took away: `Touch` and the default refuse those same
+placements too. They are just the ones clipping could not rescue.
+
+> **Why the round grid is the bad one.** The expanded footprint is an axis-aligned rectangle, so each
+> of its sides is a line of constant x or constant z. A wall vertex sits exactly on a side as soon as
+> it shares *one* coordinate with it — and on real stages roughly half the vertices have their x or
+> their z on a quarter-metre boundary, even though hardly any sit on one in both. Round the ghost to
+> quarter metres and your footprint's sides line up with all of them at once.
+
+Things that stay rejected whatever the policies say:
 
 - **Overlapping interiors**, including one building nested inside another — nesting would turn the
   inner shape back into walkable and hand you a building with a courtyard in it.
-- **Touching the walkable boundary.** A footprint that shares an edge with the outer edge of the
-  mesh would be accepted while carving *nothing*, which is worse than a rejection.
+- **Transversally crossing the boundary.** Flush is allowed under `Touch`; poking through is not.
+- **A boundary chord running corner-to-corner of the footprint** (for a rect: a diagonal wall
+  through both corners). The placement probe lands exactly on the ring edge, where inside/outside is
+  undefined. Move the building a snap.
+
+One thing `Touch` does **not** give you: a sub-snap gap is still a corridor. A building placed one
+snap short of the wall leaves a 1/1024 m walkable strip and agents route through it — the engine
+cannot tell a 1 mm gap from a doorway, so closing near-misses is a game rule (snap placements to a
+lattice, or place flush).
 
 > Whichever way you set the flag, it must be the same on every peer **and in every replay** — a
 > build that flips it diverges from recordings made before. Source it from inside the determinism
@@ -325,13 +406,12 @@ Two things stay rejected whatever the flag says:
 
 ### 4.5 What gets rejected
 
-**The rebake is the validation**, and every peer reaches the same verdict on the same input.
+**The rebake is the validation**, and every peer reaches the same verdict on the same input. There is
+no second set of rules anywhere — but you can ask the question early, for a placement ghost. See
+[4.6 Showing the player before they click](#46-showing-the-player-before-they-click).
 
-There is no *second* set of rules anywhere — but there is a way to ask the question early, for a
-placement ghost. See [Showing the player before they click](#46-showing-the-player-before-they-click).
-
-**A refused placement comes back as a value.** It is what a player causes by pointing somewhere
-they cannot build, so it is a return value, not an exception:
+**A refused placement comes back as a value.** It is what a player causes by pointing somewhere they
+cannot build, so it is a return value, not an exception:
 
 ```csharp
 if (!FPNavMeshRebaker.TryRebakePlacements(
@@ -346,17 +426,22 @@ if (!FPNavMeshRebaker.TryRebakePlacements(
 | `rejection.Reason` | Meaning | Indices |
 | --- | --- | --- |
 | `BuildingsOverlap` | Two buildings are too close once the agent radius is added. This also covers buildings that merely touch, when your rules forbid touching — the check cannot tell the two cases apart, so tell the player "too close" rather than "overlapping". | `IndexA`, `IndexB` |
-| `TouchesWalkableBoundary` | The footprint reaches the edge of the walkable region. | `IndexA` |
-| `OutsideWalkableRegion` | The footprint is not on the mesh at all. | `IndexA` |
+| `TouchesWalkableBoundary` | The footprint reaches the edge of the walkable region. Under `Touch` only a transversal crossing reports this — flush contact carves. | `IndexA` |
+| `OutsideWalkableRegion` | The footprint is not on the mesh at all. Under `ClipOverlap` it means **clips to nothing** — the footprint never reaches the walkable region. | `IndexA` |
 | `SwallowsBakedHole` | It swallowed a pillar or other baked hole, which would flip that hole back to walkable. | `IndexA`, and `Site` — *which* hole, which a building index alone cannot say |
-| `EmptyWalkableRegion` | Nothing walkable was left. **No placement can cause this** — every building is already checked to sit strictly inside the region, so a gap always survives. If you do see it, the base mesh itself is degenerate. | — |
+| `EmptyWalkableRegion` | Nothing walkable was left. No placement can cause this under the default policy; under `Touch`/`ClipOverlap` a footprint flush on every side can cover the whole region. | — |
+| `ProbeOnBoundaryRing` | A boundary chord runs corner-to-corner of the footprint, so the placement probe sits exactly on a ring edge. Only reachable under `Touch`/`ClipOverlap`; tell the player to nudge the building. | `IndexA` |
+| `ExactBoundaryContact` | `ClipOverlap`: the footprint touches the boundary exactly at a lattice point while also crossing it. Nudge a snap. Common if your ghost snaps to a coarse grid — see [4.4](#44-building-wall-to-wall). | `IndexA` |
+| `ClipCandidateMissing` | `ClipOverlap`: the placement barely grazes the walkable region (sliver under ~4 mm). Move it. | `IndexA` |
+| `ClipSplitsWalkableRegion` | `ClipOverlap`: the clipped shape would split into several regions (a spur through the footprint, or a chain enclosing a whole boundary ring). | `IndexA` |
+| `ClipRunsInterleave` | `ClipOverlap`: degenerate interleaved wall contact the clip cannot represent. | `IndexA` |
 
 `Rebake` / `RebakePlacements` do exactly the same thing but throw an `InvalidOperationException`
 instead of returning `false`. Use those for one-off work such as tests or tooling, and the `Try…`
 pair anywhere a player is placing buildings.
 
-**A malformed request still throws, and that is the point.** These are `ArgumentException`, and
-they mean the call should never have been built:
+**A malformed request still throws, and that is the point.** These are `ArgumentException`, and they
+mean the call should never have been built:
 
 | Refusal | Meaning |
 | --- | --- |
@@ -372,16 +457,16 @@ they mean the call should never have been built:
 | `…Count n is negative` | Only `-1` means "the whole array" — see [Reuse the buffer](#reuse-the-buffer--do-not-build-an-array-per-placement). |
 
 **Keep the two apart.** A refusal is the map answering the player, and the player should see it. An
-`ArgumentException` is a bug in your code. If you handle both in the same branch, your bug reaches
-the player as "you cannot build there" — on every machine, identically, with nothing left to notice
-it by.
+`ArgumentException` is a bug in your code. Handle both in the same branch and your bug reaches the
+player as "you cannot build there" — on every machine, identically, with nothing left to notice it
+by.
 
 Two rows above deserve a second look: **the degenerate rectangle and the off-map one are your bugs,
-yet an ordinary player gesture produces them** — a click with no drag, or a drag past the edge of
-the map. Filter those in your placement UI rather than catching the exception.
+yet an ordinary player gesture produces them** — a click with no drag, or a drag past the edge of the
+map. Filter those in your placement UI rather than catching the exception.
 
-If you do catch, catch `ArgumentException` specifically. Do **not** catch `Exception`: a null
-context or a corrupt catalog throws something else entirely, and a blanket catch hides it.
+If you do catch, catch `ArgumentException` specifically. Do **not** catch `Exception`: a null context
+or a corrupt catalog throws something else entirely, and a blanket catch hides it.
 
 A rejection is a normal outcome, not an error: reject the command, raise a UI event, change nothing.
 
@@ -396,14 +481,14 @@ and mean the asset cannot be rebaked at all:
 | `base mesh has XZ-duplicate vertices (multi-level)` | `NotSupportedException` | Stacked floors — see [Limits](#9-limits). |
 
 Handle these at load time, where you can still fall back to running that stage without runtime
-building at all. If one of them shows up in a command handler instead, it means you built the
-context lazily on the first placement — build it at load.
+building at all. If one shows up in a command handler instead, it means you built the context lazily
+on the first placement — build it at load.
 
 ### 4.6 Showing the player before they click
 
 A placement UI needs an answer as the cursor moves, and the rebake cannot give it: it costs
-milliseconds and must run from the command stream, not from input. So ask the same question
-without the carving:
+milliseconds and must run from the command stream, not from input. So ask the same question without
+the carving:
 
 ```csharp
 // Each frame the ghost moves. Nothing to set up and nothing to keep —
@@ -415,21 +500,40 @@ ShowGhost(canBuild ? Colour.Green : Colour.Red);
 if (!canBuild) ShowHint(why.Reason);
 ```
 
-**It is the same verdict, not a guess.** Every reason a player can be refused is decided before
-any triangle is cut, so this runs the rebake's own validation and stops there. It checks the ghost
-against whatever the last successful rebake through that context carved — you do not hand it a
-building list, and there is no list to get out of step. `TryValidateOnePlacement` takes a catalog
-placement instead; the ghost's shape need not match what is already on the map.
+**It is the same verdict, not a guess.** Almost every reason a player can be refused is decided
+before any triangle is cut, so this runs the rebake's own validation and stops there (the one
+exception is at the end of this section). It checks the ghost against whatever the last successful
+rebake through that context carved — you hand it no building list, so there is no list to get out of
+step. `TryValidateOnePlacement` takes a catalog placement instead; the ghost's shape need not match
+what is already on the map.
 
 The `rules` argument is optional and defaults to **the ones that rebake ran under**, which is what
 keeps the two answers together. Pass a value only when you mean something different — "what would
 this look like if contact were allowed", say.
 
+> **The one answer a preview cannot give.** *Nothing walkable was left* is only discovered while the
+> ground is being cut, so a preview never sees it. Under the default policy that costs you nothing —
+> a building always sat strictly inside the region, so a gap always survived. Under `Touch` and
+> `ClipOverlap` it is reachable: a footprint flush on every side can cover the whole walkable area,
+> and the rebake refuses it while the preview said green. If your game can build shapes that large,
+> handle a refusal arriving after a green ghost.
+
+**What it costs.** About **0.085 ms** on a 22k-triangle stage, and flat — it walks the base mesh's
+edges once, so the buildings already down do not enter it. `ClipOverlap` is the exception: answering
+means building the clip rings, which costs **0.231 ms with 4 buildings down and 0.622 ms with 32**.
+That is still a per-frame budget (3.7% of a 60 Hz frame at 32 buildings), but unlike the other
+policies the time grows with the building count. **Allocation does not** — no policy's preview
+allocates anything in steady state, so previewing every frame costs the collector nothing.
+[§8](#the-per-frame-preview) has the full table.
+
 Two things to get right:
 
-- **Preview from the same thread that rebakes, one previewer per context.** The ghost is written
-  into storage the context owns, so a second previewer, or a rebake running alongside, corrupts it.
-  In a client that is usually true already.
+- **Preview from the same thread that rebakes, one previewer per context.** The ghost is written into
+  storage the context owns, and so are the working buffers the clip stage reuses — which is what
+  makes the call allocation-free. A second previewer, or a rebake running alongside, corrupts both.
+  In a client that is usually true already. The snapshot-taking overloads are safe on any thread
+  because each caller brings its own `FPBuildingPreviewScratch`; one scratch per caller is the same
+  rule.
 - **Green is optimistic, not final.** Another player may build there between the preview and your
   command reaching the tick. Keep handling the refusal — in a multiplayer build that is a normal
   outcome, not an edge case.
@@ -461,14 +565,14 @@ are hashed frame state. Skipping `ReseedAgents` desyncs the peer rather than mer
 somebody.
 
 `FPNavAgentInstaller` packages that pair — `Swap` and `Reseed`, as two calls rather than one, because
-the second writes hashed state and the first does not. It also re-collects the agent set on both, which
-matters more than it looks: a cached set can be last tick's, and the reseed-only path has no swap ahead
-of it to have refreshed anything. [6. Placing from a command stream](#6-placing-from-a-command-stream)
-is about when to call them at all.
+the second writes hashed state and the first does not. It also re-collects the agent set on both,
+which matters: a cached set can be last tick's, and the reseed-only path has no swap ahead of it to
+have refreshed anything. [6. Placing from a command stream](#6-placing-from-a-command-stream) is
+about when to call them at all.
 
-**`CommitSwap` is not optional.** It is what tells the context which mesh is live, and two things
-hang off that: the *previous* mesh's arrays can be recycled, and the next rebake can reuse most of
-it instead of rebuilding. Skip it and you pay full price for both — see
+**`CommitSwap` is not optional.** It tells the context which mesh is live, and two things hang off
+that: the *previous* mesh's arrays can be recycled, and the next rebake can reuse most of it instead
+of rebuilding. Skip it and you pay full price for both — see
 [8. Performance](#what-each-choice-costs-you).
 
 > Do not cache an `FPNavMesh` across a swap — read the current one from `FPNavAgentSystem.CurrentMesh`
@@ -485,7 +589,7 @@ runs into: **when** to install the result.
 ### Do not swap when the command arrives
 
 A placement command is handled on a tick, and in a rollback netcode that tick may only have been
-**predicted**. When the rollback comes, it rewinds the frame — and nothing rewinds the NavMesh with
+**predicted**. When the rollback comes it rewinds the frame — and nothing rewinds the NavMesh with
 it. The mesh is now ahead of the state that describes it, and every re-executed tick runs against a
 mesh its own frame does not agree with. Both peers hold identical components, and the state hash
 covers components, so it diverges quietly.
@@ -496,15 +600,15 @@ The fix is not to undo the swap. It is to stop treating the install as an event:
 >
 > `installed == Bake(snapshot, { b : b.EffectiveTick <= tick < b.RemovalEffectiveTick })`
 
-Stated as an invariant, four situations collapse into one case — moving forward, re-executing after
-a rollback, waking up on a full state, and spectating or replaying a match. A swap performed as an
+Stated as an invariant, four situations collapse into one case — moving forward, re-executing after a
+rollback, waking up on a full state, and spectating or replaying a match. A swap performed as an
 event only ever handles the first.
 
 This is why the building's **tick window has to be frame state** (see
-[7. Determinism](#7-determinism)): the invariant is only checkable if "what is in
-the mesh at tick T" is answerable from state that rolls back.
+[7. Determinism](#7-determinism)): the invariant is only checkable if "what is in the mesh at tick T"
+is answerable from state that rolls back.
 
-### One rule that costs four matches to learn
+### Install and reseed are two separate calls
 
 Installing the mesh and reseeding the agents look like one operation. They are not:
 
@@ -515,10 +619,10 @@ Installing the mesh and reseeding the agents look like one operation. They are n
 
 Fusing them puts the reseed behind a peer-local comparison that does not roll back. A boundary tick
 re-executed after its mesh was already installed then skips the reseed entirely: the authority
-reseeded once and kept the value, the client's last pass left the agent with the triangle index it
-had from *before* the swap. That divergence took four live matches to find.
+reseeded once and kept the value, while the client's last pass left the agent with the triangle
+index it had from *before* the swap.
 
-The invariant to carry away: **derived state may be skipped when it is already right; frame state may
+The rule to carry away: **derived state may be skipped when it is already right; frame state may
 not** — because "already right" is a question about this peer's history, and the frame does not know
 it.
 
@@ -562,14 +666,16 @@ simulation.AddSystem(driver, SystemPhase.PreUpdate);
 // That is the whole wiring. The engine finds the driver at Initialize and paces it.
 ```
 
-**The engine owns the two moments the per-tick invariant misses.** It covers every tick that
-*executes*; two moments are outside it. At world init the initial full state's nav fingerprint is
-sampled before tick 0 runs, so a peer that has installed nothing is accused of a mismatch by a peer
-that has. And a receiving peer's fingerprint is compared **synchronously** right after the apply, so
-waiting for the next tick is too late. `KlothoEngine` calls `CorrectNow` at both, and advances slices
-on every frame, so registering the driver is all a game writes. It used to be three separate calls in
-three callbacks that did not know about each other, and a host that reached none of them looked
-perfectly healthy — which is why they are not left to the game any more.
+**The engine owns the two moments the per-tick invariant misses.** The invariant covers every tick
+that *executes*; two moments are outside it:
+
+- At world init the initial full state's nav fingerprint is sampled before tick 0 runs, so a peer
+  that has installed nothing would be accused of a mismatch by a peer that has.
+- A receiving peer's fingerprint is compared **synchronously** right after a full-state apply, so
+  waiting for the next tick is too late.
+
+`KlothoEngine` calls `CorrectNow` at both, and advances slices every frame, so registering the driver
+is all a game writes.
 
 **Why the seam is a table and not a set of predicates.** The driver derives everything else from it
 — whether this tick is a boundary, which tick the next one is, the active set, a digest that detects
@@ -578,19 +684,19 @@ has two chances to get it wrong.
 
 ### Spreading the cost over frames
 
-A rebake on a large stage does not fit in one tick ([8. Performance](#8-performance)). The driver pays
-for it across the frames between a placement and its effective tick, and the engine drives that for
-you — there is nothing to switch on, and nothing to switch off:
+A rebake on a large stage does not fit in one tick ([8. Performance](#8-performance)). The driver
+pays for it across the frames between a placement and its effective tick, and the engine drives that
+for you — there is nothing to switch on, and nothing to switch off:
 
 - **Frames, not ticks.** A client catching up runs many ticks in one frame; a tick-paced budget would
   spend eleven frames' work in the single frame this exists to protect.
-- **Optional, and safe to forget.** If the slices did not get there in time, the boundary finishes the
-  remainder synchronously — the same thing every rebake did before slicing existed.
+- **Optional, and safe to forget.** If the slices did not get there in time, the boundary finishes
+  the remainder synchronously.
 - **The output is identical either way**, so the number of slices is peer-local and harmless. That is
   what lets the budget be a guess rather than a negotiated constant.
 
-Underneath, `FPNavMeshRebaker.TryBeginRebake` hands back a resumable `FPNavMeshRebakeTask`; the driver
-owns it. Drive one yourself only if you are not using the driver:
+Underneath, `FPNavMeshRebaker.TryBeginRebake` hands back a resumable `FPNavMeshRebakeTask`; the
+driver owns it. Drive one yourself only if you are not using the driver:
 
 ```csharp
 if (!FPNavMeshRebaker.TryBeginRebake(context, buildings, out var task, out var rejection))
@@ -606,8 +712,7 @@ synchronous rebake while one is in flight needs a **second context**. Abandon a 
 ### Crossing a boundary more than once
 
 A predicting client does not cross a placement's effective tick once. It crosses, rolls back, and
-crosses again — and the mesh it wants each time is one of **two**. Measured on a live match, the
-install sequence was a perfect two-cycle.
+crosses again — and the mesh it wants each time is one of **two**.
 
 `slotCount` (default 2) is how many meshes the driver keeps live for that. One context can only hold
 one installed mesh — its next commit recycles the other — so the second slot exists to hold the
@@ -619,8 +724,8 @@ partner:
 | **2** | **8** |
 | 3+ | 8 |
 
-Eight is the number of distinct sets, i.e. the theoretical minimum. More than two bought nothing.
-The cost is a second work-buffer pool, which scales with the stage — about **+26.6 MB** on a
+Eight is the number of distinct sets, i.e. the theoretical minimum. More than two buys nothing. The
+cost is a second work-buffer pool, which scales with the stage — about **+26.6 MB** on a
 205k-triangle stage and nothing worth measuring on a small one. Pass `slotCount: 1` to disable it.
 
 ### Validating a command without installing anything
@@ -683,8 +788,9 @@ installed mesh derivable rather than something you have to sequence by hand
 
 ## 8. Performance
 
-Measured on an Apple Silicon laptop, .NET 8, Release. **Field** is a real shipped asset: 22,321
-triangles, 17,142 vertices. Every figure below comes from one fixture, so you can reproduce them:
+Measured on an Apple Silicon laptop, .NET 8, Release, on 2026-08-21. **Field** is a real shipped
+asset: 22,321 triangles, 17,142 vertices. Every figure comes from one fixture, so you can reproduce
+them:
 
 ```
 dotnet test -c Release --filter FullyQualifiedName~FPNavMeshRebakerPerfTests
@@ -693,18 +799,36 @@ dotnet test -c Release --filter FullyQualifiedName~FPNavMeshRebakerPerfTests
 ### The cost of placing a building
 
 The timed event is the rebake that **adds** the Nth building. Re-running an unchanged set is much
-cheaper — nothing to carve differently — so it would not be a useful number here.
+cheaper — nothing to carve differently.
 
 | Placing building # | min | allocation |
 | ---: | ---: | ---: |
-| 1 | 4.91 ms | 9.3 KB |
-| 2 | 4.98 ms | 8.7 KB |
-| 4 | 5.14 ms | 10.2 KB |
-| 8 | 5.52 ms | 20.6 KB |
-| 16 | 6.20 ms | 29.7 KB |
-| 32 | 7.73 ms | 44.0 KB |
+| 1 | 2.76 ms | 10.4 KB |
+| 2 | 2.82 ms | 9.9 KB |
+| 4 | 2.96 ms | 11.6 KB |
+| 8 | 3.21 ms | 22.4 KB |
+| 16 | 3.75 ms | 32.3 KB |
+| 32 | 4.97 ms | 48.1 KB |
 
-The base mesh dominates; each building already on the map adds roughly **0.09 ms**.
+The base mesh dominates; each building already on the map adds roughly **0.07 ms**.
+
+> **`ClipOverlap` costs the same as the other policies until a footprint actually overhangs.** Four
+> interior footprints on a synthetic grid, same placements, policy the only variable:
+>
+> | Triangles | `Touch` | `ClipOverlap` | `ClipOverlap`, one footprint overhanging |
+> | ---: | ---: | ---: | ---: |
+> | 12,800 | 1.52 ms · patched 13 | 1.52 ms · patched 13 | **7.04 ms · patched 0** |
+> | 51,200 | 4.07 ms · patched 13 | 3.96 ms · patched 13 | **11.92 ms · patched 0** |
+>
+> The interior columns match, because that set carves exactly what `Touch` carves. An overhanging
+> footprint takes the full-rebuild path instead of the incremental patch, which is the whole of the
+> difference. If your stage seals corridors every few seconds, budget for the full path on those
+> placements.
+>
+> Allocation for the clip stage is about **3.7 KB per placement** above what the default policy
+> allocates, whatever the boundary looks like. Under `Reject` and `Touch` the stage never runs.
+> A rebake allocates those buffers per call by design: the per-frame preview brings its own and
+> reaches zero ([§4.6](#46-showing-the-player-before-they-click)), and the two must not share a pool.
 
 **Installing the result is free**, so the numbers above are the whole cost of a placement. Swapping
 the mesh in allocates nothing: the query, pathfinder and funnel are rebound rather than rebuilt, and
@@ -712,15 +836,49 @@ the ORCA obstacle re-extraction reuses its buffers across swaps.
 
 | Asset | Triangles | Rebake | `SwapNavMesh(mesh)` | Per placement |
 | --- | ---: | ---: | ---: | ---: |
-| **Field** | 22,321 | 2 KB | **0 KB** | **2 KB** |
-| Stage01 | 116 | 2 KB | 0 KB | 2 KB |
-| Stage02 | 60 | 2 KB | 0 KB | 2 KB |
+| **Field** | 22,321 | 3 KB | **0 KB** | **3 KB** |
+| Stage01 | 116 | 3 KB | 0 KB | 3 KB |
+| Stage02 | 60 | 3 KB | 0 KB | 3 KB |
 
 Even on a 22k-triangle stage, placing a building is kilobytes.
 
-> The four-argument `SwapNavMesh(mesh, query, pathfinder, funnel)` is the exception: it has you
-> build those three objects, and each is sized from the triangle count — about **1.4 MB per
-> placement** on Field. Use it only if you own the instances for some other reason.
+> The four-argument `SwapNavMesh(mesh, query, pathfinder, funnel)` is the exception: it has you build
+> those three objects, and each is sized from the triangle count — about **1.4 MB per placement** on
+> Field. Use it only if you own the instances for some other reason.
+
+### The per-frame preview
+
+`TryValidateOne` answers without carving anything, so it is the call a placement UI makes as the
+cursor moves. Same asset, one ghost, against N buildings already down.
+
+| Buildings already down | `Reject` / `Touch` | `ClipOverlap` |
+| ---: | --- | --- |
+| 1 | 0.087 ms · **0 B** | 0.214 ms · **0 B** |
+| 4 | 0.084 ms · **0 B** | 0.231 ms · **0 B** |
+| 16 | 0.084 ms · **0 B** | 0.362 ms · **0 B** |
+| 32 | 0.086 ms · **0 B** | **0.622 ms** · **0 B** |
+
+**Nothing here allocates, under any policy** — zero in steady state, and a test asserts exactly that
+for every configuration above. A preview is a per-frame call, so there is no amount of garbage per
+frame that is fine.
+
+Under the strict policies the **time** is flat too: the work is one walk of the base mesh's edges,
+and what is already built does not enter it.
+
+Under `ClipOverlap` answering means actually building the clip rings, so it starts about 2.5× higher
+*and grows*: each existing building's contribution is cached on the accepted set and the ring checks
+are narrowed to the ghost's own group, so what is left is the pair layer between that group and
+everything else. At 32 buildings that is 3.7% of a 60 Hz frame — budget for it if your stage ends a
+match with hundreds of buildings.
+
+Previewing only when the ghost's snapped cell changes is still free performance and worth taking, but
+it is no longer necessary: a cursor that previews every frame allocates nothing.
+
+> **Why two fixtures.** A footprint that clips a wall cannot be placed under `Reject` at all, and one
+> `Reject` accepts is by definition not touching the boundary — so under `ClipOverlap` it carves its
+> plain footprint and never enters the clip stage. No single geometry measures both paths. The strict
+> columns use footprints strictly inside the region; the `ClipOverlap` column uses footprints that
+> clip.
 
 ### How many you add at once barely matters
 
@@ -729,9 +887,9 @@ rebake had already produced.
 
 | Reaching an 11-building mesh | min |
 | --- | ---: |
-| From 10 buildings — one placement | 5.76 ms |
-| From none — eleven at once | 6.02 ms |
-| With no previous mesh to work from | 10.94 ms |
+| From 10 buildings — one placement | 3.45 ms |
+| From none — eleven at once | 3.62 ms |
+| With no previous mesh to work from | 8.17 ms |
 
 Placing eleven buildings costs about what placing one costs. Most of the work is proportional to the
 **size of the map**, not to how much changed, and only the small area around each new building is
@@ -744,17 +902,17 @@ single placement.
 ### Keep the building list in placement order
 
 The single biggest thing under your control. The shortcut works by matching what did not change
-between two rebakes, and that matching holds only while existing geometry keeps its identity —
-which it does when the list grows at the end.
+between two rebakes, and that matching holds only while existing geometry keeps its identity — which
+it does when the list grows at the end.
 
 | Building list order | Rebakes that took the shortcut |
 | --- | ---: |
-| **Placement order** | **96%** |
-| Sorted by position | 18% |
+| **Placement order** | **96%** (27 of 28) |
+| Sorted by position | 18% (5 of 28) |
 
-Both are equally deterministic, so the choice is free. Sorted by position, a building placed at a
-low `x` lands in the middle of the list and everything after it shifts, so the rebake builds the
-whole mesh instead. Give each building a placement sequence and sort by that.
+Both are equally deterministic, so the choice is free. Sorted by position, a building placed at a low
+`x` lands in the middle of the list and everything after it shifts, so the rebake builds the whole
+mesh instead. Give each building a placement sequence and sort by that.
 
 **Check it in your own game** with `context.PatchOutcome`. Compare its `Incremental` count against
 the `Fallback…` counters: if `FallbackVertexShift` climbs with every rebake, your list has lost
@@ -765,30 +923,32 @@ non-zero value means a bug in the rebaker itself and is worth reporting.
 
 ### What each choice costs you
 
-Four ways to call the rebaker, same asset, one building. The first three are what you get by
-skipping something.
+Four ways to call the rebaker, same asset, one building. The first three are what you get by skipping
+something.
 
 | Configuration | Time |
 | --- | ---: |
-| `Rebake(baseMesh, …)` — snapshot rebuilt every call | 49.8 ms |
-| `Rebake(snapshot, …)` — snapshot cached | 9.4 ms |
-| `Rebake(context, …)` — cached + pooled, full rebuild | 9.3 ms |
-| `Rebake(context, …)` + `CommitSwap` — previous mesh reused | **4.6 ms** |
+| `Rebake(baseMesh, …)` — snapshot rebuilt every call | 45.9 ms |
+| `Rebake(snapshot, …)` — snapshot cached | 7.29 ms |
+| `Rebake(context, …)` — cached + pooled, full rebuild | 7.28 ms |
+| `Rebake(context, …)` + `CommitSwap` — previous mesh reused | **2.50 ms** |
 
 | Configuration | Allocation (0 buildings) |
 | --- | ---: |
-| `Rebake(snapshot, …)` | 7,766 KB |
+| `Rebake(snapshot, …)` | 8,229 KB |
 | `Rebake(context, …)` — work buffers pooled | 3,110 KB |
-| `Rebake(context, …)` + `CommitSwap` — output recycled too | **2 KB** |
+| `Rebake(context, …)` + `CommitSwap` — output recycled too | **3 KB** |
 
-Three independent mechanisms, and they compose: caching the snapshot is worth about 5× on time,
-carrying the previous mesh across another 2×, and pooling plus output recycling is what turns
-megabytes of allocation into kilobytes. **`CommitSwap` enables the last two** — skip it and you get
-neither, which is why the quick start calls it.
+Three independent mechanisms, and they compose — but they do not all pay in time. Caching the
+snapshot is worth about **6×** on time and carrying the previous mesh another **2.9×**; **pooling the
+work buffers buys no time at all** (7.29 vs 7.28 ms is noise) and shows up entirely in the allocation
+table, where it is 8,229 KB → 3,110 KB. Output recycling takes the last 3,110 KB down to 3.
+**`CommitSwap` enables the last two** — skip it and you get neither, which is why the quick start
+calls it.
 
 ### Smaller stages
 
-Uncached `Rebake(baseMesh, …)`, so directly comparable to the 49.8 ms row above.
+Uncached `Rebake(baseMesh, …)`, so directly comparable to Field's 45.9 ms above.
 
 | Asset | Triangles | Rebake |
 | --- | ---: | ---: |
@@ -806,29 +966,30 @@ total — it is a lower **worst single step**, which is what a frame actually fe
 
 | Triangles | Whole | Sliced (worst step) |
 | ---: | ---: | ---: |
-| 12,800 | 0.65 ms | 0.30 ms |
-| 51,200 | 2.27 ms | 0.61 ms |
-| 115,200 | 5.11 ms | 1.17 ms |
-| 204,800 | 9.33 ms | **2.13 ms** |
+| 12,800 | 0.73 ms | 0.31 ms |
+| 51,200 | 2.56 ms | 0.67 ms |
+| 115,200 | 5.70 ms | 1.37 ms |
+| 204,800 | 10.09 ms | **2.41 ms** |
 
 **The worst step is set by the largest unit that cannot be cut, not by the budget you pass.**
 Everything proportional to the triangle count is cut mid-pass and resumed on the next frame — the
 incremental patch included, which is the bulk of a rebake and is stepped through its own phases
 rather than run as one call.
 
-What stays whole is the **spatial-grid rebuild**, about 1.9 ms at 205k triangles. That is the floor;
-no budget goes under it, and it is the first thing to divide if a game needs lower.
+What stays whole are the patch's two tail steps — **Patch/Grid** (the spatial-grid rebuild) at
+2.29 ms and **Patch/Assemble** at 1.95 ms, at 205k triangles; together 65% of the sliced total. That
+is the floor; no budget goes under it.
 
-**Release does not scan this path for degenerate triangles**, which is worth about 2.5 ms per rebake
-at that size. It cannot need to: the triangulation the patch starts from is non-degenerate by
-construction, and the scan is a full pass over every triangle that no early exit can shorten. DEBUG
-keeps it as an assertion, so a build that breaks the guarantee says so loudly instead of carrying
-slivers into the mesh — which also means a DEBUG step is noticeably slower than the shipped one here.
+**Release does not scan this path for degenerate triangles**, so the fixture measures that scan at
+**0.00 ms** — the triangulation the patch starts from is non-degenerate by construction. DEBUG keeps
+the scan as an assertion (worth about 2.5 ms per rebake at that size), which makes a DEBUG step
+noticeably slower than the shipped one.
 
 **Budget.** 20000 work units per frame is at or within noise of the best at every size above and does
-the fewest steps to get there; 100000 starts chaining phases back together (1.27 vs 0.61 ms at 51k)
-and 1000 spends steps for nothing. A game on a different stage size should measure its own —
-`FPNavMeshRebakerPerfTests.P0F_SliceBudgetCalibration` is the fixture.
+the fewest steps to get there; 100000 starts chaining phases back together, and 1000 spends steps for
+nothing (at 51k: 0.67 ms worst at 20000, 1.37 at 100000, 0.55 at 1000 for 472 steps instead of 24). A
+game on a different stage size should measure its own — `FPNavMeshRebakerPerfTests.P0F_SliceBudgetCalibration`
+is the fixture.
 
 The budget is a **constructor argument and peer-local**, so a PC build and a phone may pass different
 values; the mesh is byte-identical either way. Set it per platform rather than per engine —
@@ -840,12 +1001,14 @@ tells you when you have crossed it.
 
 | Operation | Cost | When |
 | --- | ---: | --- |
-| `CreateContext` on Field | 41 ms | Once per match, at load — **not on the tick thread** |
-| First rebake in a cold process | 324 ms | Absorbed by `prewarm: true` (the default) |
+| `CreateContext` on Field, `prewarm: false` | 38.6 ms | Once per match, at load — **not on the tick thread** |
+| First rebake in a cold process | 67.4 ms | What `prewarm` exists to absorb |
+| `CreateContext` on Field, default (`prewarm: true`) | 77.1 ms | The two above, folded into load |
 
-That 324 ms is not real work — it is the .NET runtime compiling the code the first time it runs.
-Prewarming does one throwaway rebake at load so the first real placement in a match pays the normal
-cost instead. It does nothing under IL2CPP/AOT, where there is no such warm-up to pay.
+That 67 ms is not real work — it is the .NET runtime compiling the code the first time it runs.
+Prewarming does one throwaway rebake at load, which is why the default costs about the sum of the
+other two rows: it moves the JIT cost off the first real placement. It does nothing under IL2CPP/AOT,
+where there is no such warm-up to pay.
 
 ### Shape cost at the agent layer
 
@@ -854,13 +1017,13 @@ has edges. 25 buildings, 64 agents, 200 ticks, seven interleaved box/hexagon rep
 
 | Footprint | Obstacles | Tick (min) | Tick (median) | Own spread |
 | --- | ---: | ---: | ---: | ---: |
-| Box (4 edges) | 260 | 0.840 ms | 0.843 ms | 4.2% |
-| Hexagon (6 edges) | 310 | 0.824 ms | 0.827 ms | 1.2% |
-| | **+19.2%** | −2.0% | −1.9% | |
+| Box (4 edges) | 260 | 0.858 ms | 0.889 ms | 11.7% |
+| Hexagon (6 edges) | 310 | 0.845 ms | 0.867 ms | 3.8% |
+| | **+19.2%** | −1.6% | −2.5% | |
 
-**19% more obstacles does not show up in the tick at all.** The difference is smaller than the
-normal run-to-run variation, and the hexagon actually came out marginally faster every time. Agents
-only consider obstacles near them, so the total count on the map does not translate into cost.
+**19% more obstacles does not show up in the tick at all.** The difference is well inside the box
+row's own 11.7% spread, in either direction. Agents only consider obstacles near them, so the total
+count on the map does not translate into cost.
 
 **Pick footprint shapes for how the game should feel, not for performance.**
 
@@ -881,6 +1044,9 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | **Shape size ceiling** | Around a kilometre of extent, the miter arithmetic runs out of Int64 and refuses by name. Real footprints are a few metres. |
 | **Uniform area/cost only** | A base with non-uniform `areaMask`/`costMultiplier` loses per-triangle values on re-triangulation; the rebaked mesh keeps pipeline defaults and logs an error. |
 | **A rebake is not per-tick** | It is a discrete event; do not call it every frame. The driver's own per-tick work is separate and cheap — one pass over your placement table plus an integer compare, and zero allocation. |
+| **A preview cannot report `EmptyWalkableRegion`** | *Nothing walkable was left* is only discovered while the ground is being cut. Unreachable under the default policy; under `Touch`/`ClipOverlap` a footprint that covers the whole region shows green and is then refused ([4.6](#46-showing-the-player-before-they-click)). |
+| **`ClipOverlap`: the preview's time grows with the building count** | Flat under the other policies. Under `ClipOverlap` answering means building the clip rings, so it goes 0.231 ms → 0.622 ms between 4 and 32 buildings ([8](#the-per-frame-preview)). Allocation does not grow — no preview allocates in steady state. |
+| **`ClipOverlap`: no incremental patch on a clip ring** | A placement that actually overhangs a wall takes the full-rebuild path; one that does not is unaffected — it carves what `Touch` carves and patches the same way (see [8. Performance](#8-performance)). |
 
 ---
 
@@ -903,7 +1069,7 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | `FPNavMeshRebaker.TryValidateOnePlacement(context, ghost, out rejection, rules)` | Same, from a catalog placement |
 | `FPNavMeshRebaker.TryValidateOne(snapshot, existing, count, ghost, out rejection, scratch, rules)` | Preview without a context — you supply the accepted list |
 | `FPNavMeshRebaker.TryValidateOnePlacement(snapshot, …)` | Same, from catalog placements |
-| `FPBuildingPreviewScratch` | Working buffers for the snapshot-form preview calls — keep one per caller |
+| `FPBuildingPreviewScratch` | Working buffers for the snapshot-form preview calls — **keep one per caller**, and do not share it between two previewers. It holds the clip stage's reused buffers too, which is why a preview allocates nothing |
 | `context.Snapshot` | The stage snapshot, for the snapshot-form calls |
 | `FPNavMeshRebaker.ComputeFingerprint(mesh)` | Cross-peer check value |
 | `context.CommitSwap(mesh)` | Marks the mesh live; retires the previous one |
@@ -911,14 +1077,14 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | `context.ShapeExpansion` | The stage's expanded shape table |
 | `context.PatchOutcome` | Running tally of how often this context patched instead of rebuilt |
 
-**Use the context form.** `Rebake` / `RebakePlacements` also accept a snapshot or a bare
-`FPNavMesh` instead of a context. Those exist for tests and one-off tooling and are much slower —
-they skip the buffer reuse and, in the bare-mesh case, redo the whole setup on every call. The
-`Try…` pair is offered on the context form only, for the same reason.
+**Use the context form.** `Rebake` / `RebakePlacements` also accept a snapshot or a bare `FPNavMesh`
+instead of a context. Those exist for tests and one-off tooling and are much slower — they skip the
+buffer reuse and, in the bare-mesh case, redo the whole setup on every call. The `Try…` pair is
+offered on the context form only, for the same reason.
 
 | Member | Purpose |
 | --- | --- |
-| `FPBuildingRejection` | Why the map refused — `BuildingsOverlap` · `TouchesWalkableBoundary` · `OutsideWalkableRegion` · `SwallowsBakedHole` · `EmptyWalkableRegion`. Values are wire-stable by convention: add at the end, never reorder |
+| `FPBuildingRejection` | Why the map refused — `BuildingsOverlap` · `TouchesWalkableBoundary` · `OutsideWalkableRegion` · `SwallowsBakedHole` · `EmptyWalkableRegion` · `ProbeOnBoundaryRing` · `ExactBoundaryContact` · `ClipCandidateMissing` · `ClipSplitsWalkableRegion` · `ClipRunsInterleave`. Values are wire-stable by convention: add at the end, never reorder |
 | `FPBuildingRejectionInfo` | `Reason` plus `IndexA` / `IndexB` (which buildings) and `Site` (which swallowed hole) |
 
 ### Delayed install
@@ -933,7 +1099,7 @@ The layer that owns *when* a rebake is installed ([6. Placing from a command str
 | `driver.SliceFaults` | Slices that ended in an exception. **Must be 0.** Non-zero does not break consistency — the boundary rebuilds synchronously and installs the same mesh — but it means a core defect, and the driver logs one error on the next tick |
 
 **The engine wires itself to a registered driver.** It resolves one at `Initialize` and from then on
-owns three things you used to write:
+owns three things:
 
 | What the engine does | When |
 | --- | --- |
@@ -943,7 +1109,7 @@ owns three things you used to write:
 
 **It also tells you what you have not folded.** A rebaking game changes its navmesh from a table no
 state hash covers, so two hooks decide whether a disagreement about it can ever be reported —
-`INavFingerprintSource` (the installed mesh) and `IGameFingerprintSource` (the shape catalog, the
+`INavFingerprintSource` (the installed mesh) and `IGameFingerprintSource` (the shape catalog, and the
 delay that picks a placement's tick). Both are optional, and a missing one folds 0, which is
 indistinguishable from a game that has nothing to fold. So when a driver is registered and either
 hook is absent, the engine says so once, as a warning:
@@ -957,21 +1123,18 @@ game one is yours to write. If you check those inputs at load through the match 
 line is a known false positive — nothing has diverged either way; what the warning reports is the
 absence of the net that would tell you if it did.
 
-**Opt-in is the registration itself, and there is no opt-out.** A game that registers no driver pays a
-null check at each of those points; a game that registers one cannot pace slices itself. The two
-`CorrectNow` calls and the frame subscription used to be the game's, spread over three callbacks that
-did not know about each other — one host reached none of them and went a whole release without
-slicing, which is why they are the engine's now.
+**Opt-in is the registration itself, and there is no opt-out.** A game that registers no driver pays
+a null check at each of those points; a game that registers one cannot pace slices itself.
 
 | Member | Purpose |
 | --- | --- |
 | `driver.CorrectNow(ref frame)` | Re-derive right now. Still public: a game with its own reason to correct may call it |
 | `driver.AdvanceSlice(deltaTime)` | Advance an in-flight rebake by one frame's budget. The engine calls this; a host without the engine can call it directly |
-| `driver.TryClaimSliceHeartbeat()` | **You do not need this.** The engine claims it at `Initialize`, so a later caller is told "someone else is pacing" — which is how older hand-written wiring steps aside on its own. Pacing happens either way |
+| `driver.TryClaimSliceHeartbeat()` | **You do not need this.** The engine claims it at `Initialize`, so a later caller is told "someone else is pacing" — which is how hand-written wiring steps aside on its own. Pacing happens either way |
 | `IFPNavMeshPlacementSource` | **Yours.** `Capacity` · `Collect(ref frame, buffer, out eligible)` · `DestroyDue(ref frame, tick)` |
 | `IFPNavMeshInstaller` | **Yours.** `Install(ref frame, mesh)` and `Reseed(ref frame)` — two calls, never one |
 | `FPNavMeshTimedPlacement` | `Sequence` · `Placement` · `EffectiveTick` · `RemovalEffectiveTick` |
-| `driver.CacheHits` / `CacheMisses` / `SlicedFrames` / `BoundaryFinishes` / `TaskInstalls` / `RebuildInstalls` / `Corrections` / `Reseeds` / `TaskId` | Peer-local counters. Slicing and caching are invisible from the state, so these are the only way to tell a working one from one that never runs |
+| `driver.CacheHits` / `CacheMisses` / `SlicedFrames` / `BoundaryFinishes` / `TaskInstalls` / `RebuildInstalls` / `Corrections` / `Reseeds` / `TaskId` | Peer-local counters. Slicing and caching are invisible from the state, so these are the only way to tell a working driver from one that never runs |
 
 `Sequence` must be unique among the entries of one collect, and `Capacity` must be the **storage**
 bound rather than the number of buildings you let stand — a demolished one keeps its slot until its
@@ -1002,9 +1165,7 @@ the driver does not expose them.
 target is still inside its own tick window and nothing else drops it. If two live entries share that
 number, `Survey` returns **-1** and you must refuse the command: with a duplicate, "the one to
 exclude" is not a well-defined entry, and removing whichever the comparison reached first deletes a
-building that is still standing while its hole stays carved in the mesh. That is stricter than
-excluding by entity identity, deliberately — identity is immune to the duplicate, so this is the one
-place sharing the derivation buys strictness rather than mere equivalence.
+building that is still standing while its hole stays carved in the mesh.
 
 **Not reentrant.** One command is one `Survey` followed by its preview; a nested `Survey` replaces the
 first, and previewing without one throws.
@@ -1022,14 +1183,14 @@ FPNavMeshRebakeSnapshot snapshot = FPNavMeshRebaker.CreateSnapshot(baseMesh, log
 var rebake = new FPNavMeshRebakeContext(snapshot);
 ```
 
-Where this runs matters more than it looks. A snapshot costs a full base insertion, and the first
-rebake in a process additionally pays the JIT (`prewarm: true` absorbs it at boot). A dedicated server
-creates rooms on its main loop, so doing it per room puts that cost between the network poll and the
-room dispatch — every OTHER room's tick budget shrinks by exactly that much.
+Where this runs matters. A snapshot costs a full base insertion, and the first rebake in a process
+additionally pays the JIT (`prewarm: true` absorbs it at boot). A dedicated server creates rooms on
+its main loop, so doing it per room puts that cost between the network poll and the room dispatch —
+every OTHER room's tick budget shrinks by exactly that much.
 
-There is no helper for the pattern, and that is deliberate: the stage keying, the missing-stage
-fallback and how many hosting modes you have are yours, and a helper shaped around one server's
-answers would be wrong for the next one.
+There is no helper for the pattern: the stage keying, the missing-stage fallback and how many hosting
+modes you have are yours, and a helper shaped around one server's answers would be wrong for the
+next one.
 
 ### Sliced rebake
 
@@ -1050,7 +1211,9 @@ answers would be wrong for the next one.
 | `FPBuildingRect(minX, minZ, maxX, maxZ, y)` | Axis-aligned footprint, unexpanded |
 | `FPBuildingPlacement(shapeId, orientation, centreX, centreZ, y)` | Catalog reference plus a centre |
 | `FPBuildingPlacement(shapeId, centreX, centreZ, y)` | The same, for a shape that does not turn |
-| `FPBuildingPlacementRules(allowBuildingTouch)` | Whether contact is allowed |
+| `FPBuildingPlacementRules(allowBuildingTouch)` | Whether building-pair contact is allowed |
+| `FPBuildingPlacementRules(allowBuildingTouch, boundaryPolicy)` | Plus the walkable-boundary policy |
+| `FPBoundaryPlacementPolicy` | `Reject` (default) / `Touch` (flush placement, corridor sealing) / `ClipOverlap` (overhang clipping — arbitrary-angle sealing) |
 | `FPBuildingShapeCatalogBuilder` | Assembles a table from several sizes/types; each `Add…` returns a shape id |
 | `builder.AddObb(hw, hd, directions)` | Appends an **OBB** that turns `directions` ways; `directions` divides a full circle and must be a multiple of 4 |
 | `builder.AddHexagon(circumradius)` | Appends a **circle**; one orientation |
@@ -1133,8 +1296,8 @@ rebake.CommitSwap(newMesh);          // recycles the retired mesh's storage
 original stage mesh every time and carves the whole list out of it. Removing a building therefore
 means rebaking with a shorter list.
 
-This matters because the result never depends on how you got there: a carved mesh is never carved
-again, so small errors cannot pile up over a long match.
+That is also why the result never depends on how you got there: a carved mesh is never carved again,
+so small errors cannot pile up over a long match.
 
 Internally the rebaker reuses what the previous rebake already worked out, which makes it much
 faster. The mesh you get is identical either way, so this is not something you manage —
