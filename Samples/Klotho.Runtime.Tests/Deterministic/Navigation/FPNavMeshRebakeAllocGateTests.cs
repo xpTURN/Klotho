@@ -52,12 +52,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
         private static string RepoRoot()
         {
-            // Klotho.Tests.sln. There is no Klotho.sln, and naming one here does not fail —
-            // the walk just runs off the top of the filesystem and returns null, after which the
-            // byte gate silently measured a synthetic mesh while its own assertion message said
-            // "on Field". Hence LoadField below refusing to fall back.
+            // The com.xpturn.klotho directory, the marker every other fixture in this suite walks
+            // up for. A marker that does not exist does not fail here: the walk runs off the top of
+            // the filesystem and returns null. This asked for "Klotho.Tests.sln", which is in no
+            // repo, so both byte gates threw on the first Release run to reach them — DEBUG
+            // self-ignores, so local runs never saw it. Hence LoadField below refusing to fall back.
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Klotho.Tests.sln")))
+            while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "com.xpturn.klotho")))
                 dir = dir.Parent;
             return dir?.FullName;
         }
@@ -71,7 +72,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         private static FPNavMesh LoadField()
         {
             string root = RepoRoot();
-            Assert.NotNull(root, "could not locate the repo root (Klotho.Tests.sln) from "
+            Assert.NotNull(root, "could not locate the repo root (com.xpturn.klotho) from "
                 + AppContext.BaseDirectory);
             string path = Path.Combine(root, "Samples/Brawler/Assets/NavMesh/Data/Field.NavMeshData.bytes");
             Assert.IsTrue(File.Exists(path), $"the byte gate measures the real Field asset and it is missing: {path}");
