@@ -202,15 +202,20 @@ namespace xpTURN.Klotho.Generator.Emitters
             sb.AppendLine("    [xpTURN.Klotho.ECS.Preserve]");
             sb.AppendLine("    internal static void Register()");
             sb.AppendLine("    {");
+            // Optional named args are appended as text so each new trait costs one string, not a new
+            // branch: the four cases below differ only in which of them they carry.
             var coreArg = info.IsCore ? ", core: true" : "";
+            var cleanupArg = info.Cleanup != null
+                ? $", cleanup: xpTURN.Klotho.ECS.CleanupMode.{info.Cleanup}"   // member name, never a raw cast
+                : "";
             if (info.IsSingleton)
-                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID, isSingleton: true{coreArg});");
+                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID, isSingleton: true{coreArg}{cleanupArg});");
             else if (info.MaxCount > 0)
-                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID, maxCount: {info.MaxCount}{coreArg});");
+                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID, maxCount: {info.MaxCount}{coreArg}{cleanupArg});");
             else if (info.IsCore)
-                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID, core: true);");
+                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID, core: true{cleanupArg});");
             else
-                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID);");
+                sb.AppendLine($"        ComponentStorageRegistry.Register<{fullTypeName}>({fullTypeName}.TYPE_ID{cleanupArg});");
             sb.AppendLine("    }");
             sb.AppendLine("}");
         }

@@ -20,9 +20,14 @@ Supports client-side prediction, rollback, and frame synchronization.
   - Synced mode: emitted only on verified ticks
   - EventBuffer / EventCollector / EventDispatcher — internal collection / dispatch
 - **Hash-based desync detection** — engine-level local/remote hash comparison
+  - **StateHashBreakdown** — per-component-type split of the frame hash, so a mismatch names the component type instead of just a number. `LogComponentHashes` dumps `count` + `hash` per typeId for log diffing
+  - **StateHashRing** — rolling per-tick, per-type hash history (`ISimulationConfig.DiagnosticHistoryTicks`, default 60, `0` = off and free) dumped on detection via `FlushHashHistory`, so the *first* diverged tick is visible rather than the tick you noticed
+  - **Layout fingerprint** — the component registry folds `maxEntities`, the sorted typeId set, type names, slot capacity (`MaxCount`) and each type's `[KlothoCleanup]` mode into one value. The registered type set is itself state-hash input, so this is the check to read *first*: a peer loading an extra assembly's components diverges from tick 0 while every per-component number looks like a symptom
+  - **Environment fingerprint** — static colliders XOR navmesh XOR a game-owned slot (`IGameFingerprintSource`), for data that must be identical across builds but is deliberately outside the state hash (a shape catalog, a tuning table, an asset-id map). Each source is reported separately, so a game-data difference does not read as a NavMesh problem
+  - See **[DesyncDiagnostics.md](DesyncDiagnostics.md)** for the symptom table and the diagnostic funnel
 - **SyncTestRunner** — GGPO-style determinism verification (snapshot → run → rollback → re-run → hash compare, no network)
 - **DeterminismAnalyzer (build-time)** — Roslyn diagnostic analyzer shipped in `KlothoGenerator.dll` that flags determinism hazards at compile time, before they surface as replay/rollback desync. Warnings (category `KlothoGenerator.Determinism`): `KLOTHO_DET002` float/double in a deterministic context · `KLOTHO_DET003` non-deterministic API/type (`Mathf`, `Random`, `System.Math`, `DateTime`, float-backed `UnityEngine.Vector2/3/4`/`Quaternion`/`Matrix4x4`) · `KLOTHO_DET004` `UnityEngine.Time` (wall-clock). Scoped to deterministic-context types (those implementing a deterministic interface / inheriting a deterministic base, plus ref-`Frame` helper methods); the FP64 conversion boundary (`FromFloat`/`FromDouble`/`ToFloat`/`ToDouble`/`ToFP64`) is exempt; test / tool assemblies are skipped
-- **SimulationConfig / ISimulationConfig** — tick interval, input delay, max rollback, sync-check interval, prediction toggle
+- **SimulationConfig / ISimulationConfig** — tick interval, input delay, max rollback, sync-check interval, prediction toggle. Also the peer-local diagnostic knobs (`DiagnosticHistoryTicks`, `SystemPerfMonitoring`) and the two determinism-input memory knobs (`ComponentMaxCountOverrides`, `PrunedComponentTypeIds` via `SetRuntimePrunedComponentTypeIds` — authority-set, wire-propagated to joining peers)
 - **SessionConfig / ISessionConfig** — session-init parameters (network mode, player info, etc.)
 - **KlothoSession / IKlothoSession** — session lifecycle management (a wrapper around KlothoEngine)
   - **KlothoSessionSetup** — session-construction helper. Field-injected:
@@ -105,14 +110,30 @@ Supports client-side prediction, rollback, and frame synchronization.
 - **FPNavMesh** — deterministic navmesh (engine-agnostic runtime; the `.bytes` data is baked from a Unity NavMesh via the Editor exporter, then loaded on either engine)
   - Vertex / triangle arrays, adjacency, grid acceleration
 - **FPNavMeshSerializer** — navmesh-data serialization / deserialization
-- **NavAgentComponent / FPNavAgentSystem** — ECS agent component (speed, radius, stopping distance, status) + per-tick update system
+- **NavAgentComponent** — ECS agent component (speed, radius, stopping distance, corridor, status)
 - **FPNavMeshPathfinder** — A* search (with FPNavMeshBinaryHeap)
 - **FPNavMeshFunnel** — funnel-algorithm (SSFA) path smoothing
 - **NavCorridorHelper** — corridor / path-following helpers
-- **FPNavMeshTriangle** — triangle struct (adjacency, portals, area, cost)
+- **FPNavMeshTriangle** — triangle struct (adjacency, packed portal-flip bits, area, cost)
 - **FPNavMeshQuery** — triangle-containment test (barycentric)
-- **FPNavAvoidance** — ORCA collision avoidance
-- **FPNavAgentSystem** — batch agent update (path request → steering → avoidance → movement → navmesh constraint)
+- **FPNavAvoidance** — ORCA collision avoidance, agent-to-agent **and** agent-to-static via obstacle lines
+- **FPNavMeshObstacleExtractor** — extracts ORCA static-obstacle rings from a navmesh boundary (edges with `neighbor == -1`); load/build-time only. Second source: convex blocks supplied by a generator, so a game can feed both
+- **FPNavMeshBuildPipeline** — engine-agnostic geometry pipeline (weld → grid-snap → T-junction split → triangulate → adjacency) shared by the Unity `FPNavMeshExporter` and the Godot exporter
+- **FPNavAgentSystem** — batch agent update (path request → steering → avoidance → movement → navmesh constraint); also the `INavFingerprintSource` for the cross-peer environment check
+
+### Runtime rebake — the NavMesh changes mid-match
+
+- **FPNavMeshRebaker** — deterministic runtime re-carve: each building footprint is cut out of the walkable region and the remainder re-triangulated with exact integer predicates over a 1/1024-metre placement grid (from-scratch constrained Delaunay), so Unity / Godot / the .NET server produce a **bit-identical** mesh from the same command. `CreateSnapshot` (per stage, immutable, shared read-only) + `CreateContext` (per room, owns the work buffers); `TryRebake` / `TryRebakePlacements` return `false` plus a typed reason instead of throwing
+- **Placement validation is the same code path as the rebake** — `TryValidateOne` / `TryValidateOnePlacement` answer a placement-UI ghost without cutting a triangle, so a preview that says yes over a rebake that says no cannot happen. Allocation-free in steady state, so it can follow the cursor every frame
+- **FPBoundaryPlacementPolicy** — `Reject` (0, historical: any boundary contact refuses), `Touch` (1: flush against a wall — this is what lets a chain of buildings seal a corridor), `ClipOverlap` (2: a footprint may hang past a wall at any angle; the clipped shape is what gets carved)
+- **FPBuildingShapeCatalog / FPBuildingShapeExpansion** — footprints are entries in a per-stage table (rectangle, oriented box, hexagon), not arbitrary geometry. Every footprint is widened by the bake agent radius before carving, so the expansion table hands back the tiling delta / lattice snap instead of leaving the game to guess the spacing that leaves two buildings flush
+- **FPNavMeshRebakeDriver** — register it as a system and it keeps the installed mesh equal to what the frame says it should be, every tick. This is the part a rollback game cannot get right on its own: a mesh installed on a *predicted* tick is not rewound by the rollback. Two game-supplied seams — `IFPNavMeshPlacementSource` (where placements live in frame state) and `IFPNavMeshInstaller`
+- **FPNavMeshPlacementValidator** — builds the active placement set from frame state, hands out the next placement number, and answers "does this set bake?" identically on every peer
+- **FPNavAgentInstaller** — the install-and-reseed pair as two *named* calls on purpose: installing is derived state and may be skipped, reseeding writes hashed frame state and must run on **every** execution of a tick. Fusing them hides the reseed behind a peer-local comparison that does not roll back
+- **Deterministic time-slicing** — a rebake can be spread across the frames between a placement and the tick it takes effect on (peer-local budget, default 20,000 work units/frame), byte-identical however many slices it took; missing the deadline just completes the remainder on the spot. Cut the worst single frame from 9.33 ms to 2.13 ms on a 204,800-triangle stage
+- **FPNavMeshRebakeBufferPool** — pooled work buffers recycled across swaps, so installing a rebaked mesh allocates nothing
+- **The mesh stays out of the state hash** — peers compare one small value instead (`INavFingerprintSource` → the environment fingerprint), so a diverged mesh surfaces at join / resync rather than several ticks later as an unexplained agent-position desync
+- Full guide: **[Navigation.Rebake.md](Navigation.Rebake.md)**
 
 ## Input
 
@@ -129,6 +150,7 @@ Supports client-side prediction, rollback, and frame synchronization.
 - **IServerDrivenNetworkService / ServerDrivenClientService** — server-driven-mode client service
 - **ServerNetworkService** — server-side network service (input collection, frame verification, state broadcast)
 - **Handshake protocol** — SyncRequest → SyncReply → SyncComplete → Ready → GameStart
+- **Setup validation before the first tick** — `PlayerReadyMessage` carries the layout + environment fingerprints, and because the host relays a ready verbatim every peer compares against every other, so a cold-start match that never delivers a FullState is still checked. A **layout** difference is state-hash input and therefore fatal: the side with transport control refuses the peer (`JoinFailReason.LayoutMismatch`, wire code 12) and a peer without it leaves (`AbortReason.LayoutMismatch`); an **environment** difference stays a warning and is only compared before the match runs, since runtime rebakes move it legitimately. `KlothoEngine.CheckReadyFingerprints` → `ReadyFingerprintVerdict`; `KlothoSessionSetup.AllowLayoutMismatch` / `SpectatorSessionSetup.AllowLayoutMismatch` (default `false`) is the per-peer dev escape hatch — deliberately on the setup and not in `ISimulationConfig`, because a guest runs the config it received over the wire. The refusal message names both sanctioned fixes (match the assembly sets, or prune the difference authority-side). A spectator gets the check for free from the relayed readies
 - **Bootstrap handshake (SD)** — server-driven first-tick alignment: BootstrapBegin → PlayerBootstrapReady (replaces implicit start tick)
 - **Reconnect protocol** — ReconnectRequest → ReconnectAccept/Reject
 - **Late-join protocol** — FullStateRequest → FullStateResponse → LateJoinAccept
@@ -203,7 +225,7 @@ Supports client-side prediction, rollback, and frame synchronization.
 
 - **EntityRef** — lightweight entity reference (8 bytes, generational index prevents dangling)
 - **EntityManager** — entity-lifecycle management (generational index + free-list slot reuse, fixed capacity)
-- **ComponentStorage\<T\>** — sparse-set component storage (`unmanaged` constraint, O(1) Add/Remove/Has)
+- **ComponentStorageFlat\<T\>** — sparse-set view over a slice of the frame heap (`unmanaged` constraint, O(1) Add/Remove/Has)
 - **ComponentStorageRegistry** — assembly-scan-based automatic component-type registration
 - **Frame** — ECS world state (EntityManager + a set of ComponentStorages, Tick, hash, snapshots / rollback)
   - `Get<T>`, `Has<T>`, `Add<T>`, `Remove<T>`, `CreateEntity`, `DestroyEntity`
@@ -212,26 +234,35 @@ Supports client-side prediction, rollback, and frame synchronization.
   - `CopyFrom()` — BlockCopy-based snapshot / restore
 - **IComponent** — `unmanaged` component marker interface
 - **IEntityPrototype / EntityPrototypeRegistry** — entity-prototype interface and registry (data-driven entity creation)
-- **[KlothoComponent(typeId)]** — component-type-registration attribute (source-generator integration; UserMinId=100)
+- **[KlothoComponent(typeId, MaxCount = n)]** — component-type-registration attribute (source-generator integration; `UserMinId=100`). The optional `MaxCount` caps the type's reserved heap slots at `min(MaxCount, maxEntities)` instead of one per entity — a determinism input, so every peer must agree. `[StructLayout(LayoutKind.Sequential, Pack = 4)]` is required alongside it (`KLOTHO_STRUCT_LAYOUT_MISSING`, error)
 - **[KlothoSingletonComponent]** — marks a component type as singleton (exactly one carrier entity per frame). `Frame.Add<T>` throws on a second carrier; read via `Frame.GetSingleton<T>` / `GetReadOnlySingleton<T>` / `TryGetSingleton<T>`. Source generator emits an `IsSingleton` flag onto `ComponentStorageRegistry.TypeIdCache<T>`
-- **[FrameData]** — frame-data field-serialization attribute
+- **[KlothoCleanup(CleanupMode)]** — declares a component that lives exactly one tick. `RemoveComponent` empties the storage through the type-erased clear dispatch (O(sparse), no iteration); `DestroyEntity` destroys the carrier instead (pre-allocated buffer, `IsAlive`-guarded, so two markers destroy once). The engine runs both passes after every system and before the tick advances, so the cleaned state is what gets hashed and snapshotted — no cleanup system to write and no mutate-during-iteration trap. The mode is folded into the layout fingerprint. Analyzer rules: `KLSG_ECS007` (cleanup on a core component, warning) · `KLSG_ECS008` (`DestroyEntity` on a singleton, error) · `KLSG_ECS009` (undefined `CleanupMode` value, error)
+- **[KlothoCoreComponent]** — marks a component type engine-essential: force-excluded from the pruning denylist, so listing one by mistake cannot drop it. Orthogonal to lifetime
+- **[Primitive]** — renders a value struct on one line via `ToString()` in the ECS inspector instead of recursing into its fields. Editor display only — the source generator never reads it, so serialization / hashing / the wire are unaffected. Applied to `FixedString32` / `FixedString64`
+- **[FrameData]** — declared, but nothing consumes it yet (no generator or runtime reader)
 - **SystemPhase** — PreUpdate / Update / PostUpdate / LateUpdate
 - **ISystem** — `Update(ref Frame)` system interface
 - **IInitSystem / IDestroySystem** — init / destroy system interfaces
 - **ICommandSystem** — `OnCommand(ref Frame, ICommand)` command-system interface
 - **ISyncEventSystem** — system interface that processes events only on synced ticks
 - **IEntityCreatedSystem / IEntityDestroyedSystem** — entity-lifecycle system interfaces
-- **ISignal / ISignalOnComponentAdded\<T\> / ISignalOnComponentRemoved\<T\>** — component-change signal interfaces
-- **SystemRunner** — system registration and phase-ordered execution (AddSystem → auto-sorted)
+- **ISignalOnComponentAdded\<T\> / ISignalOnComponentRemoved\<T\>** — component-change signals, called by `Frame.Add`/`Remove`, by `DestroyEntity` per component, and by the `[KlothoCleanup]` clear per entity. Free when no system implements them (per-typeId gate). Rules in [ECS.md](ECS.md) §6
+- **ISignal / SignalInvoker\<TSignal\> / SystemRunner.Signal\<TSignal\>** — a separate, general broadcast to systems implementing a game's own `ISignal`-derived interface. Unrelated to the component signals above (which do not derive from `ISignal`), and the invocation delegate allocates per call — not for per-tick paths
+- **SystemRunner** — system registration and phase-ordered execution (`AddSystem` → auto-sorted). Also owns the two built-in passes: previous-transform capture ahead of `PreUpdate`, and the `[KlothoCleanup]` clear/destroy passes after the last system. `AddSystem(sys, phase, group: "combat")` takes an optional **perf-report label** — diagnostic only, never a sort key, never folded into the layout fingerprint
+- **ISnapshotParticipant** — for state a system owns *outside* components (a physics broadphase, an accumulator). `GetSnapshotSize` / `SaveSnapshot` / `RestoreSnapshot`; the ring buffer captures and restores it alongside the frame, wired automatically at `AddSystem`
+- **Frame-heap memory tuning** — per-type slot caps (`MaxCount` on the attribute, or `ISimulationConfig.ComponentMaxCountOverrides`) and **pruning** (`SetRuntimePrunedComponentTypeIds` — a *denylist*, so anything unlisted stays reserved; `[KlothoCoreComponent]` types are force-excluded). Both are determinism inputs, set before the first tick and propagated authority → joining peers. **ComponentMemoryReport / ComponentMemoryPeakSampler** produce the `[Mem]` per-type reservation + live-peak report to measure against — see [ECSMemoryOptimization.md](ECSMemoryOptimization.md)
+- **SystemPerfMonitor** — opt-in per-system elapsed time + per-tick allocation, plus the two builtin passes. Hard-gated: with it off, no `Stopwatch` or GC call runs at all. `EcsSimulation.EnableSystemPerfMonitor(warmupExecutions)` / `AppendSystemPerfLog()`; rows print as `group/SystemName` with trailing `= group` totals (additive columns only — per-system peaks landed on different ticks), never-executed rows omitted, and `ICommandSystem` work is not measured
 - **FrameRingBuffer** — Frame ring buffer (ECS-specific snapshot / rollback)
 - **StateSnapshot** — `IStateSnapshot` implementation (full-state byte buffer, FNV-1a hash)
 - **HFSMBuilder / HFSMRoot** — fluent hierarchical-FSM assembler (`Default` / `State` / `OnEnter`·`OnUpdate`·`OnExit` / `To` / `Build`). `Build()` validates the graph at registration (duplicate / dangling / non-dense state ids, default-not-set), runs a reachability BFS, stably sorts each state's transitions by descending priority (the runtime evaluates them in array order), and registers an `HFSMRoot` (ticked via `HFSMRoot.Get(id).Tick(...)`). Advisory findings (unreachable / duplicate priority / self-transition) warn via `IKLogger`; `Build(strict: true)` promotes them to throws
 - **EcsSimulation** — ISimulation implementation (owns Frame + SystemRunner; pluggable into KlothoEngine)
   - **`GetSystem<T>()` / `TryGetSystem<T>(out T)` / `GetSystems<T>(List<T> buffer)`** — type-match lookup over registered systems (`T : class`). Returns the first registration in `AddSystem` order; `GetSystems` appends every match into a caller-owned buffer (alloc-free for the lookup itself). Lets a callback boundary expose a registered system's secondary interface (e.g. `PhysicsSystem` → `IFPPhysicsWorldProvider`) without process-wide static slots
 - **FixedString32 / FixedString64** — `unmanaged` fixed-size UTF-8 strings (for component fields)
-- **Built-in components** — TransformComponent, VelocityComponent, MovementComponent, HealthComponent, CombatComponent, OwnerComponent, PhysicsBodyComponent, NavAgentComponent, SessionParticipantComponent (engine writes one per active player at `Start()` for a deterministic all-participants-spawned gate), RandomSeedComponent (singleton — engine-injected at session start; restored on LateJoin / Reconnect / Spectator / Replay via FullState)
+- **Engine components** (`Runtime/ECS/Components/`) — the engine itself reads or writes these; all but `OwnerComponent` are `[KlothoCoreComponent]`:
+  - TransformComponent (1), OwnerComponent (2), ErrorCorrectionTargetComponent (3, marker for the error-smoothing path), SessionParticipantComponent (4 — engine writes one per active player at `Start()` as a deterministic all-participants-spawned gate), RandomSeedComponent (5, singleton — engine-injected at session start; restored on LateJoin / Reconnect / Spectator / Replay via FullState), MatchEndStateComponent (26, singleton — `Ended` / `WinnerPlayerId` for the end-of-match ladder)
+- **Optional gameplay components** (`Runtime/Gameplay/Components/`) — reference implementations with no engine privileges, safe to ignore entirely: HealthComponent (21), VelocityComponent (22), MovementComponent (23), CombatComponent (24), PhysicsBodyComponent (25). NavAgentComponent (11) belongs to the navigation module
 - **TransformComponent prev-snapshot** — `PreviousPosition` / `PreviousRotation` / `PreviousInitialized` marker. Engine auto-initializes Previous* on first `Frame.Add` and via a PreUpdate `SavePrev` pass. Use `Frame.RefreshPreviousTransform(entity)` after a post-Add ref-set to keep Previous* in lockstep with `Position` (suppresses unwanted one-frame interpolation; see GameDevAPI §4.1)
-- **Built-in systems** — MovementSystem, CombatSystem, PhysicsSystem, NavigationSystem, CommandSystem, EventSystem
+- **Built-in systems** — every one is opt-in via `AddSystem`; the engine registers nothing on your behalf. `EventSystem` (`Runtime/ECS/Systems/`) batch-publishes enqueued simulation events in `LateUpdate`; `MovementSystem` / `PhysicsSystem` / `CombatSystem` and the `ICommandSystem` `CommandSystem` (`Runtime/Gameplay/Systems/`) are reference implementations over the gameplay components above; `FPNavMeshRebakeDriver` (navigation) owns the runtime-rebake install
 
 ## Replay
 
@@ -243,19 +274,18 @@ Supports client-side prediction, rollback, and frame synchronization.
 - **File format** — `RPLY` magic (uncompressed, self-framed)
 - **Implementations** — ReplayRecorder, ReplayPlayer, ReplaySystem, ReplayData
 
-## Editor *(Unity-only)*
+## Editor Tooling
 
-> These are Unity Editor tools (`com.xpturn.klotho/Editor/`). Godot has no equivalent editor tooling; the artifacts they produce (`.bytes` navmesh / collider data) are loaded on either engine at runtime.
+> Both engines ship an editor toolchain (Unity: `com.xpturn.klotho/Unity/Editor/` · Godot: `com.xpturn.klotho/Godot~/Adapters/Editor/`), and the artifacts they produce (`.bytes` navmesh / static-collider data) load on **either** engine at runtime. The geometry pipeline behind the two navmesh exporters is the shared, engine-agnostic `FPNavMeshBuildPipeline`, so an asset baked on one engine is byte-identical to one baked on the other.
 
-- **FPNavMeshExporter** — Unity NavMesh → FPNavMesh conversion (triangle baking + grid build)
-- **NavMesh Visualizer** — editor visualization tool
-  - FPNavMeshVisualizerWindow — editor window
-  - FPNavMeshSceneOverlay — scene-overlay rendering
-  - FPNavMeshAgentSimulator — agent-movement test
-  - FPNavMeshInteraction — click-to-navigate test
-- **Static Collider Tools** — editor tooling for static colliders
-  - FPStaticColliderExporterWindow — static-collider exporter window
-  - FPStaticColliderConverter — Unity Collider → FPStaticCollider conversion
+- **NavMesh export** — **FPNavMeshExporter** (Unity NavMesh → FPNavMesh: weld → grid-snap → triangle bake → grid build) · **GodotFPNavMeshExporter** (the Godot counterpart)
+- **NavMesh visualizer** — **FPNavMeshVisualizerWindow** + **FPNavMeshSceneOverlay** + **FPNavMeshAgentSimulator** (agent-movement test) + **FPNavMeshInteraction** (click-to-navigate) · Godot: **GodotFPNavMeshVisualizerDock** + **GodotFPNavMeshOverlay** + **GodotFPNavMeshAgentSimulator** + **GodotFPNavMeshInteraction**
+- **Static collider tools** — **FPStaticColliderExporterWindow** + **FPStaticColliderConverter** (Unity `Collider` → `FPStaticCollider`) · Godot: **GodotFPStaticColliderExporter** + **GodotFPStaticColliderConverter** + **GodotFPStaticColliderViewer**
+  - The exporter window also **lists what the export will leave out**: colliders tagged neither `FPStatic` nor `FPTrigger`, and tagged-but-inactive objects (`FindGameObjectsWithTag` returns only active objects, so a tag alone was never enough). Counted in the window, listed in a warning, and logged on export. The collection path that produces the bytes is untouched — it derives collider ids from enumeration order — so the export stays byte-identical
+- **Physics visualization** — **FPPhysicsWorldVisualizerEditor** (Unity) · Godot: **GodotFPPhysicsWorldVisualizer** + **GodotFPPhysicsDebugPanel** + **GodotFPPhysicsImmediateDrawer** (in-editor overlay of the deterministic physics world)
+- **ECS inspector** *(Unity-only)* — **EntityComponentVisualizerWindow** + **ComponentReflectionCache**: live per-entity component values, driven by `Frame.TryGetReflectableStorage`. Value structs marked `[Primitive]` print on one line via `ToString()` instead of being recursed into
+- **HFSM visualizer** *(Unity-only)* — **HFSMVisualizerWindow** + **HFSMStateTreeRenderer** + **HFSMReflectionCache**: state-tree view of a running hierarchical FSM
+- **DataAsset conversion** — **JsonToBytesConverter** (Unity) · Godot: **KlothoDataAssetConvertTool** + **KlothoJsonContextMenu** (FileSystem-dock context menu)
 
 ## Unity Integration
 
@@ -277,7 +307,7 @@ Supports client-side prediction, rollback, and frame synchronization.
   - **BindBehaviour / ViewFlags** — view-binding enums (Verified / NonVerified; snapshot-interpolation flags). Present on both engines (Godot defines them in `ViewEnums.cs`)
   - **UpdatePositionParameter / ErrorVisualState** — auxiliary types (`UpdatePositionParameter` is *Unity-only*; `ErrorVisualState` exists on both)
 - **FPStaticColliderOverride** — MonoBehaviour for overriding static-collider parameters *(Unity-only)*
-- **FPStaticColliderVisualizer** — MonoBehaviour for scene visualization of static colliders *(Unity-only — Physics visualization has no Godot equivalent)*
+- **FPStaticColliderVisualizer** — MonoBehaviour for scene visualization of static colliders *(Unity-only; Godot covers the same ground with the editor-side `GodotFPStaticColliderViewer` / `GodotFPPhysicsWorldVisualizer`)*
 
 ## Godot Integration
 
@@ -295,6 +325,7 @@ The Godot (.NET) adapter (`com.xpturn.klotho/Godot~/Adapters/`) mirrors the Unit
 - **GodotKlothoLogger** — `CreateDefault()`: `GodotLogSink` + `RollingFileSink` combined, defaulting to `ProjectSettings.GlobalizePath("user://logs")` (required for exported apps where relative paths are not writable). Mirrors `KlothoLogger.CreateDefault()` on the Unity side
 - **GodotAutoReconnect / GodotReconnectCredentialsStore / GodotDeviceIdProvider** — cold-start reconnect (`user://` credential store, `OS.GetUniqueId()`)
 - **GodotDebugSink / GodotLogSink / GodotKLoggerFactory** — console sinks (`GD.Print` / `GD.PushError`); compose with the core `KLoggerFactory` + `AddRollingFile`
+- **Editor tooling** — navmesh exporter / visualizer dock / agent simulator, static-collider exporter + viewer, physics-world visualizer + debug panel, DataAsset JSON convert tool. See **[Editor Tooling](#editor-tooling)** for the Unity ↔ Godot pairing
 
 ## Samples
 
@@ -317,11 +348,13 @@ The Godot (.NET) adapter (`com.xpturn.klotho/Godot~/Adapters/`) mirrors the Unit
 
 ## Tests
 
+> Where they live: **`Samples/Klotho.Runtime.Tests`** (net8.0 NUnit — the bulk of the suite, engine-agnostic and runnable with plain `dotnet test`) · **`Tools/KlothoGenerator.Tests`** (source-generator + analyzer diagnostics) · **`Samples/DevLobbyServer.Tests`** (the reference lobby stack) · **`Samples/Brawler/Assets/Tests`** (Unity EditMode — for what genuinely needs the editor/runtime: asmdef wiring, editor compilation, engine-specific paths).
+
 - **Core** — Command serialization, SyncTestRunner, FullStateResync
 - **Integration** — late-join integration, server-driven-mode integration / benchmarks, replay integration (ReplayIntegrationTests), SD late-join connection
-- **Network** — Handshake, Reconnect, Spectator, LateJoin, ServerDriven unit tests; message serialization; LiteNetLib integration
-- **ECS** — EntityManager, ComponentStorage, Frame, Filter, SystemRunner, FrameRingBuffer, StateSnapshot, EcsSimulation; built-in systems (movement / combat / physics / nav / command / event); SourceGenerator validation; OOP hash comparison
-- **Deterministic** — Math (FP64 / Vector / Quaternion / Matrix); Geometry (Bounds / Ray / Plane / Capsule / Sphere); Physics (RigidBody / Collider / Shape / Broadphase / Narrowphase / Sweep / Constraint / StaticBVH / PhysicsWorld); Navigation (Pathfinder / Funnel / Linearizer / Avoidance / Query / Serializer); Random; Curve
+- **Network** — Handshake, Reconnect, Spectator, LateJoin, ServerDriven unit tests; ready-exchange setup fingerprints; message serialization; LiteNetLib integration
+- **ECS** — EntityManager, ComponentStorageFlat, Frame, Filter, SystemRunner, FrameRingBuffer, StateSnapshot, EcsSimulation; component signal wiring and `[KlothoCleanup]` passes; per-system perf monitor; built-in systems (movement / combat / physics / nav / command / event); SourceGenerator validation; OOP hash comparison
+- **Deterministic** — Math (FP64 / Vector / Quaternion / Matrix); Geometry (Bounds / Ray / Plane / Capsule / Sphere); Physics (RigidBody / Collider / Shape / Broadphase / Narrowphase / Sweep / Constraint / StaticBVH / PhysicsWorld); Navigation (Pathfinder / Funnel / Linearizer / Avoidance / Query / Serializer, plus the runtime rebaker — placement rules, boundary policies, clip stage, slicing determinism, and allocation gates on the real baked asset); Random; Curve
 - **DeterminismVerification** — determinism stress-verification framework (ArithmeticStressSystem, EntityLifecycleSystem, RandomStressSystem, TrigStressSystem, DeterminismVerificationRunner, ServerDrivenDeterminismRunner)
 - **State** — RingSnapshotManager
 - **Input** — InputBuffer
@@ -329,4 +362,4 @@ The Godot (.NET) adapter (`com.xpturn.klotho/Godot~/Adapters/`) mirrors the Unit
 
 ---
 
-*Last updated: 2026-06-20*
+*Last updated: 2026-08-23*

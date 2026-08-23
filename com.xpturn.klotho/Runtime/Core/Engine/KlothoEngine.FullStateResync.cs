@@ -562,7 +562,7 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         public long GetLocalStaticFingerprint()
         {
-            return ComputeLocalEnvironmentFingerprint();
+            return ComputeLocalStaticFingerprint();
         }
 
         /// <summary>
@@ -571,16 +571,42 @@ namespace xpTURN.Klotho.Core
         /// (FullStateResponseMessage.StaticFingerprint) — no wire change. 0 stays reserved as
         /// the "not provided" sentinel.
         /// </summary>
-        private long ComputeLocalEnvironmentFingerprint()
+        private long ComputeLocalStaticFingerprint()
         {
-            if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation ecs)
+            if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation)
                 return 0;
 
             // Component-registry layout is folded in first. It is always present, so peers now
             // always have something comparable — and a registry difference is worth surfacing
             // HERE, at join, rather than letting it appear later as an inexplicable state-hash
             // divergence (the registered type set is state-hash input; see LayoutFingerprint).
-            long fp = xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
+            //
+            // Split into (layout ^ environment) so the Ready path can carry the two halves in
+            // separate wire fields and react to them differently (a layout difference is fatal
+            // from tick 0; an environment difference is not part of the state hash). This value
+            // stays bit-identical to the pre-split fold: the environment half is raw and the
+            // 0 -> 1 sentinel normalization still happens here and only here.
+            long fp = xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint
+                    ^ ComputeLocalEnvironmentFingerprintRaw();
+
+            if (fp == 0)
+                fp = 1; // preserve the 0 = "not provided" wire sentinel
+            return fp;
+        }
+
+        /// <summary>
+        /// Environment half only — static colliders XOR navigation XOR the game's own slot, with the
+        /// component registry deliberately EXCLUDED so the two Ready-path fields stay orthogonal
+        /// (a layout difference must not also move this value). Raw: no 0 -> 1 normalization, so a
+        /// peer with no environment source at all reports 0 and receivers skip it, exactly as the
+        /// combined path treats "not provided".
+        /// </summary>
+        private long ComputeLocalEnvironmentFingerprintRaw()
+        {
+            if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation ecs)
+                return 0;
+
+            long fp = 0;
             var svc = ecs.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
             if (svc != null)
                 fp ^= svc.GetStaticFingerprint();
@@ -589,7 +615,7 @@ namespace xpTURN.Klotho.Core
             long navFp = nav != null ? nav.GetNavFingerprint() : 0;
             fp ^= navFp;
 
-            // The game's own slot. The three sources above are things the engine can see for
+            // The game's own slot. The two sources above are things the engine can see for
             // itself; this is for what it cannot — a shape catalog, a tuning table, an asset id
             // map: data that must be identical across builds and is deliberately outside the
             // state hash. Without it a game with such data has nowhere to put it but inside one
@@ -598,8 +624,6 @@ namespace xpTURN.Klotho.Core
             if (game != null)
                 fp ^= game.GetGameFingerprint();
 
-            if (fp == 0)
-                fp = 1; // preserve the 0 = "not provided" wire sentinel
             return fp;
         }
 
@@ -616,7 +640,7 @@ namespace xpTURN.Klotho.Core
         {
             if (serverStaticFingerprint == 0) return;
 
-            long localFp = ComputeLocalEnvironmentFingerprint();
+            long localFp = ComputeLocalStaticFingerprint();
             if (localFp == 0) return; // nothing registered locally to compare
 
             if (localFp == serverStaticFingerprint)

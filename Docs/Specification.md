@@ -106,7 +106,7 @@ The lobby→session credential handoff that crosses this boundary (ticket carria
 │tion    │ │fer       │            │Transport   │ │Messages  │
 └───┬────┘ └──────────┘            └────────────┘ └──────────┘
     │
-    ├──── (ECS) Frame ──── EntityManager + ComponentStorage[]
+    ├──── (ECS) Frame ──── EntityManager + one byte[] heap of ComponentStorageFlat views
     ├──── SystemRunner ──── ISystem[]
     ├──── FrameRingBuffer (ECS snapshots)
     └──── RingSnapshotManager (IStateSnapshot)
@@ -138,6 +138,7 @@ The lobby→session credential handoff that crosses this boundary (ticket carria
 │   │   ├── Gameplay/       built-in component / system / command / event reference implementations
 │   │   │                   (xpTURN.Klotho.Gameplay, noEngineReferences)
 │   │   ├── Diagnostics/    FaultInjection, FaultInjectionLoader, RttSpikeMetricsCollector
+│   │   ├── LowLevel/       KUnsafe (unsafe span/pointer helpers)
 │   │   ├── Input/          IInputBuffer, IInputPredictor, IInputHandler, InputBuffer
 │   │   ├── Network/        IKlothoNetworkService, IServerDrivenNetworkService, INetworkTransport,
 │   │   │                   KlothoNetworkService, ServerDrivenClientService, ServerNetworkService,
@@ -147,31 +148,52 @@ The lobby→session credential handoff that crosses this boundary (ticket carria
 │   │   ├── State/          IStateSnapshot, IStateSnapshotManager, RingSnapshotManager
 │   │   ├── Serialization/  SpanWriter, SpanReader, SerializationBuffer, ISpanSerializable
 │   │   ├── Replay/         IReplaySystem, ReplayRecorder, ReplayPlayer, ReplayData
-│   │   ├── ECS/            Frame, EntityManager, ComponentStorage, ComponentStorageRegistry,
-│   │   │                   EntityPrototypeRegistry, IEntityPrototype, SystemRunner,
-│   │   │                   FrameRingBuffer, EcsSimulation, FixedString32/64,
-│   │   │                   ISystem/IInitSystem/ICommandSystem/ISyncEventSystem/ISignal family
+│   │   ├── ECS/            Core/ (Frame, EntityManager, EntityRef, ComponentStorageFlat,
+│   │   │                          ComponentStorageRegistry, StorageLayout, EntityPrototypeRegistry,
+│   │   │                          IEntityPrototype, FixedString32/64, StateHashBreakdown,
+│   │   │                          StateHashRing, IStorageReflector)
+│   │   │                   Attributes/ ([KlothoComponent], [KlothoSingletonComponent],
+│   │   │                                [KlothoCleanup]+CleanupMode, [KlothoCoreComponent])
+│   │   │                   System/ (ISystem/IInitSystem/IDestroySystem/ICommandSystem/
+│   │   │                            ISyncEventSystem/IEntityCreated·DestroyedSystem,
+│   │   │                            ISignal family, ISnapshotParticipant, Filter, SystemRunner)
+│   │   │                   Snapshot/ (FrameRingBuffer) · Components/ · Systems/ (EventSystem)
+│   │   │                   Diagnostics/ (ComponentMemoryReport, ComponentMemoryPeakSampler,
+│   │   │                                 SystemPerfMonitor) · FSM/ (HFSM) · EcsSimulation
 │   │   │                   DataAsset/ (IDataAsset, DataAssetRegistry, DataAssetRef,
 │   │   │                               DataAssetReader/Writer, [KlothoDataAsset(typeId)],
 │   │   │                               Json/ — xpTURN.Klotho.DataAsset.Json assembly)
-│   │   ├── Deterministic/  FP64, FPVector2/3/4, FPQuaternion, FPMatrix, FPPhysicsWorld,
-│   │   │                   FPStaticCollider, FPStaticBVH, FPStaticColliderSerializer,
-│   │   │                   FPNavMesh, FPNavMeshSerializer, NavAgentComponent, FPNavAgentSystem,
-│   │   │                   DeterministicRandom, FPAnimationCurve, etc.
+│   │   ├── Deterministic/  Math/ (FP64, FPVector2/3/4, FPQuaternion, FPMatrix)
+│   │   │                   Geometry/ (FPBounds, FPRay, FPPlane, FPCapsule, FPSphere)
+│   │   │                   Physics/ (FPPhysicsWorld, FPStaticCollider, FPStaticBVH,
+│   │   │                             FPStaticColliderSerializer, solver / narrowphase / sweep)
+│   │   │                   Navigation/ (FPNavMesh, FPNavMeshSerializer, FPNavMeshBuildPipeline,
+│   │   │                                NavAgentComponent, FPNavAgentSystem, FPNavAvoidance,
+│   │   │                                FPNavMeshObstacleExtractor, and the runtime rebaker —
+│   │   │                                FPNavMeshRebaker, FPNavMeshRebakeDriver,
+│   │   │                                FPNavMeshPlacementValidator, FPNavAgentInstaller,
+│   │   │                                FPBuildingShapeCatalog, FPConstrainedDelaunay)
+│   │   │                   Random/ (DeterministicRandom) · Curve/ (FPAnimationCurve)
 │   │   ├── LiteNetLib/     LiteNetLibTransport — INetworkTransport implementation
 │   │   │                   (xpTURN.Klotho.LiteNetLib, noEngineReferences)
 │   │   └── ThirdParty/     vendored: LiteNetLib.v2.1.4 (UDP networking)
 │   ├── Unity/              Unity adapter — USimulationConfig, USessionConfig, EcsDebugBridge,
+│   │                       KlothoSessionDriver, KlothoSessionFlowAsync, KlothoConnectionAsync,
+│   │                       KlothoAutoReconnect, PlayerPrefsReconnectCredentialsStore,
+│   │                       UnityDeviceIdProvider, KlothoLogger,
+│   │                       KlothoFlowSetupBuilderUnityExtensions (WithUnityDefaults)
 │   │                       View/ (EntityView, EntityViewComponent, EntityViewFactory,
 │   │                              EntityViewUpdater, IEntityViewPool, DefaultEntityViewPool,
 │   │                              BindBehaviour, ViewFlags, VerifiedFrameInterpolator,
 │   │                              UpdatePositionParameter, ErrorVisualState)
-│   │                       FPStaticColliderOverride, FPStaticColliderVisualizer,
+│   │                       Physics/ (FPStaticColliderOverride, FPStaticColliderVisualizer)
+│   │                       Deterministic/ · Diagnostics/ · Prefabs/
 │   │                       Logging/ (UnityDebugSink, KLogBuilderUnityExtensions)
 │   │   └── Editor/         NavMesh/ (FPNavMeshExporter, Visualizer Window/Overlay/Simulator/Interaction)
-│   │                       Physics/ (FPStaticColliderExporterWindow, FPStaticColliderConverter)
-│   │                       ECS/ (EntityComponentVisualizerWindow, FrameHeapBenchmarkWindow)
-│   │                       FSM/ (HFSMVisualizerWindow)
+│   │                       Physics/ (FPStaticColliderExporterWindow, FPStaticColliderConverter,
+│   │                                 FPPhysicsWorldVisualizerEditor)
+│   │                       ECS/ (EntityComponentVisualizerWindow, ComponentReflectionCache)
+│   │                       FSM/ (HFSMVisualizerWindow, HFSMStateTreeRenderer, HFSMReflectionCache)
 │   │                       DataAsset/ (JsonToBytesConverter)
 │   ├── Godot~/             Godot (.NET) adapter — Adapters/ (EntityViewNode, EntityViewUpdaterNode,
 │   │                       GodotSessionDriver, GodotConnectionAsync, GodotSessionFlowAsync,
@@ -184,6 +206,8 @@ The lobby→session credential handoff that crosses this boundary (ticket carria
 │   │   └── Adapters/Editor/  Godot editor tools — NavMesh (GodotFPNavMeshExporter, Visualizer/Dock/Overlay/Simulator/Interaction),
 │   │                       StaticCollider (GodotFPStaticColliderExporter/Converter/Viewer),
 │   │                       DataAsset (KlothoDataAssetConvertTool, KlothoJsonContextMenu) · plugin.gd EditorPlugin
+│   │   └── Adapters/Physics/ GodotFPPhysicsWorldVisualizer, GodotFPPhysicsDebugPanel,
+│   │                       GodotFPPhysicsImmediateDrawer
 │   ├── Plugins/Analyzers/  KlothoGenerator.dll (Roslyn source generator, RoslynAnalyzer label)
 │   ├── Plugins~/Logging.Mel/  opt-in MEL interop adapter (UPM "Import Sample" → MEL Logging Plugin)
 │   └── Server~/            dedicated-server build assets (per-assembly csproj mirroring client
@@ -191,20 +215,30 @@ The lobby→session credential handoff that crosses this boundary (ticket carria
 │                           Session/SimulationConfigLoader)
 │
 ├── Samples/                ← standalone sample projects (each consumes the package via `file:`)
-│   ├── Brawler/            4-player fighting-game sample (+ dedicated server, NavMesh, tests)
+│   ├── Brawler/            4-player fighting-game sample (+ dedicated server, NavMesh, EditMode tests)
 │   ├── P2pSample/          minimal P2P sample (Unity)
 │   ├── SdSample/           minimal ServerDriven sample (Unity client + .NET 8 dedicated server)
 │   ├── GodotP2pSample/     minimal P2P sample (Godot .NET)
-│   ├── GodotSdSample/      minimal ServerDriven sample (Godot client + .NET 8 dedicated server)
+│   ├── GodotSdSample/      minimal ServerDriven sample (Godot client) + GodotSdSampleServer/
+│   ├── GodotPolySample/    Godot sample exercising the runtime NavMesh rebake / placement path
+│   ├── GodotNetCheck/ · GodotDeterminismCheck/   Godot cross-runtime harnesses
+│   ├── DevLobbyServer/     reference lobby stack (+ DevLobbyServer.Tests)
+│   ├── IdentityP2pRef/ · IdentitySdRef/          player-identity reference services
+│   ├── Klotho.Runtime.Tests/  the main engine-agnostic NUnit suite (net8.0, plain `dotnet test`)
+│   ├── Unity2022.Tests/    Unity 2022.3 compile/EditMode compatibility project
 │   └── LoggingMelConsole/  .NET console sample (IKLogger → Microsoft.Extensions.Logging)
 │
 ├── Docs/                   ← documentation
+├── dist/                   ← packed Godot addon output
 └── Tools/                  ← .NET tooling (not redistributed)
-    ├── KlothoGenerator/         Roslyn source generator project (built by gen.sh)
-    ├── KlothoGenerator.Tests/   generator unit tests
+    ├── KlothoGenerator/         Roslyn source generator + analyzers (built by gen.sh)
+    ├── KlothoGenerator.Tests/   generator / analyzer unit tests
     ├── DeterminismVerification/ determinism verification (.NET console)
     ├── PhysicsDeterminismProbe/ cross-platform FP determinism probe
-    └── gen.sh                   generator build script
+    ├── gen.sh                   generator build script
+    ├── pack-godot-addon.sh      packs com.xpturn.klotho into dist/addons/klotho
+    ├── deploy-addon-to-samples.sh  syncs the packed addon into the Godot samples
+    └── run-all-tests.sh         full-suite runner
 ```
 
 ---
@@ -282,6 +316,32 @@ Configuration is split into two layers.
 | TickDriftWarnMultiplier | 2 | × | Tick-loop drift warning multiplier (warns if actual interval > TickIntervalMs × multiplier). 0 or less = disabled |
 | StageId | 0 | int | Match stage/content selector, set per-match by the authority and propagated to all peers. 0 = default single stage. The game maps it to stage assets; the engine only carries it |
 | MatchConfigData | null | byte[] | Opaque, game-defined per-match config (game mode / rules / difficulty), set per-match by the authority and propagated. null/empty = none. The engine carries only the bytes — the game owns the codec |
+| ComponentMaxCountOverrides | empty | map | Per-typeId slot-cap overrides for the frame heap, for types whose source you cannot edit (the in-source form is `[KlothoComponent(id, MaxCount = n)]`). **Determinism input** — it changes the heap layout, so it is folded into the layout fingerprint and propagated authority → joining peers. See §7.6 / ECSMemoryOptimization.md |
+| PrunedComponentTypeIds | empty | list | **Denylist** of component typeIds to skip reserving entirely — anything unlisted stays reserved, which is the fail-safe default. `[KlothoCoreComponent]` types are force-excluded, so listing one cannot drop it. Set via `SetRuntimePrunedComponentTypeIds`; authority-owned and wire-propagated. Also a determinism input |
+
+##### Dynamic InputDelay (client-reactive policy)
+
+These drive `DynamicInputDelayPolicy` (§9.6) and are server-authoritative.
+
+| Field | Default | Unit | Description |
+| ---- | ---- | ---- | ---- |
+| ReactiveWindowTicks | 80 | ticks | Sliding window over which non-spawn `CommandRejected(PastTick)` events are counted |
+| ReactiveEscalateThreshold | 3 | count | PastTick rejects within the window that trigger an escalation |
+| ReactiveStep | 4 | ticks | Extra-delay increment applied per escalation |
+| ReactiveMax | 40 | ticks | Ceiling for reactive extra delay. Clamped at `Validate()` to `MaxRollbackTicks / 2` with a warning |
+| ServerPushGraceTicks | 40 | ticks | Both triggers ignore events within this many ticks of the last authoritative `RecommendedExtraDelayUpdate` push, so the reactive path never double-counts against it |
+| ReactiveEscalateCooldownTicks | 80 | ticks | Minimum spacing between rollback-triggered escalations |
+| ReactiveDeEscalateStableTicks | 160 | ticks | Quiet period required before reactive delay is walked back down |
+| RollbackBurstCount | 3 | count | Rollbacks within `RollbackWindowTicks` that trigger an escalation. Primary trigger for P2P guests, which receive no `CommandRejected` |
+| RollbackWindowTicks | 200 | ticks | Sliding window for the rollback-burst trigger |
+
+##### Peer-local diagnostics (never wire-propagated, no effect on determinism)
+
+| Field | Default | Unit | Description |
+| ---- | ---- | ---- | ---- |
+| DiagnosticHistoryTicks | 60 | ticks | Rolling per-tick / per-type state-hash history (`StateHashRing`) dumped on desync detection, so the *first* diverged tick is visible rather than the tick it was noticed. `0` disables — no subscription, zero cost |
+| ComponentMemoryPeakSampling | false | bool | Samples per-component-type live peaks at tick boundaries for the `[Mem]` report, so `MaxCount` can be sized against measurement instead of a guess |
+| SystemPerfMonitoring | false | bool | Arms the per-system elapsed-time / per-tick-allocation monitor. Hard-gated: when off, no `Stopwatch` or GC call runs at all |
 
 > **Dev-diagnostic build symbols (cross-engine note)**: the core gates many diagnostics — including the `EventDispatchWarnMs` warning — behind `#if DEVELOPMENT_BUILD || UNITY_EDITOR`. Both are **Unity-defined** symbols. On Unity they are active in the Editor / development builds automatically. On **Godot (.NET) and the .NET dedicated server** neither symbol is defined by default, so these diagnostics are **compiled out** — define `DEVELOPMENT_BUILD` in your game `.csproj` (`<DefineConstants>`) to enable them.
 
@@ -305,7 +365,7 @@ Configuration is split into two layers.
 | CountdownDurationMs | 3000 | ms | Game-start countdown length |
 | CatchupMaxTicksPerFrame | 200 | ticks | Max ticks per frame during catchup |
 | AbortGraceMs | 1500 | ms | Post-match grace duration on abort. Time between `OnMatchAborted` fire and `Room.State` transition to `Draining`, giving clients time to display the error dialog and the server side time for abort logging |
-| EndGracePolicy | Continue | enum | Simulation behavior during the post-match grace window. `Continue` keeps the simulation running (input/heartbeat/replay continuity); `Pause` halts tick advancement (`Running` → `Ending`) |
+| EndGracePolicy | Continue | enum | Simulation behavior during the post-match grace window. `Continue` keeps the simulation running (input / heartbeat / replay continuity). `Pause` **also stays in `Running` and keeps advancing ticks** — it does *not* transition to `Ending`; instead the engine auto-injects a per-tick `StopCommand` on the deterministic input stream in place of game input, so characters halt while transport keepalives are preserved. Use it when post-result physics drift or stray events would clutter the result screen |
 | EndGraceMs | 5000 | ms | Post-match grace duration on normal end. Time between `OnMatchEnded` fire and `Room.State` transition to `Draining`, giving clients time to display the result screen and the server side time for any post-processing hook. Range: 0 (immediate drain, debug/integration only) or greater |
 | ClientShutdownGraceMs | 4500 | ms | Client-side grace duration on normal end. Time between `OnMatchEnded` on the client and the client's self-initiated session shutdown, so the result screen plays out before the chain-stall warning storm begins. Must stay below `EndGraceMs` — inversion risks chain-stall warnings |
 | Old-data cleanup threshold | CurrentTick - MaxRollbackTicks - 10 | ticks | Threshold for discarding old data |
@@ -389,10 +449,23 @@ ExecuteTick():
 
 ```
 EcsSimulation.Tick(commands):
-  1. SystemRunner.RunCommandSystems(frame, cmd) — PreUpdate: apply commands
-  2. SystemRunner.RunUpdateSystems(frame)       — Update → PostUpdate → LateUpdate
+  1. for each command: SystemRunner.RunCommandSystems(frame, cmd)   — ICommandSystem
+  2. SystemRunner.RunUpdateSystems(frame):
+       a. SaveAllPreviousTransforms(frame)      — built-in, ahead of the first PreUpdate system
+                                                  (TransformComponent.Previous* for view interpolation)
+       b. ISystem.Update for every registered system
+                                                  — PreUpdate → Update → PostUpdate → LateUpdate,
+                                                    registration order within a phase
+       c. frame.RunCleanupClear()               — built-in, [KlothoCleanup(RemoveComponent)] storages
+       d. frame.RunCleanupDestroy(buffer)       — built-in, [KlothoCleanup(DestroyEntity)] carriers
+                                                  (c/d skipped entirely when nothing declares the attribute)
   3. frame.Tick++
 ```
+
+Both built-in passes live **inside** `RunUpdateSystems`, and the caller's `SaveSnapshot` / `GetStateHash`
+run after `Tick` returns — so the state that is snapshotted and hashed is the **post-cleanup** state, and
+rollback / re-simulation reproduce it exactly. When `SystemPerfMonitoring` is on, each built-in pass gets its
+own report slot (`(builtin) SavePrevTransforms` / `CleanupClear` / `CleanupDestroy`) alongside the per-system rows.
 
 ### 2.7 KlothoSession & Callback Interfaces
 
@@ -642,28 +715,46 @@ Frame:
   IDataAssetRegistry       AssetRegistry    // global DataAsset lookup (locked after Frame.Add internal layout fixed)
   Action<EntityRef>        OnEntityCreated / OnEntityDestroyed
   int    MaxEntities { get; }               // fixed capacity specified at creation
-  ComponentStorage<T>[] (source-generated, single byte[] heap layout)
+  ComponentStorageFlat<T> per registered type, all backed by ONE byte[] heap
+                                            // layout computed at first use by ComponentStorageRegistry
 
   // entity lifecycle
   EntityRef  CreateEntity()
-  EntityRef  CreateEntity(int prototypeId)  // delegates to Prototypes.Create
+  EntityRef  CreateEntity(int prototypeId)          // delegates to Prototypes.Create
+  EntityRef  CreateEntity<TProto>(in TProto proto)  // typed, registry-free (see §7.7)
   void       DestroyEntity(EntityRef)
 
   // component access
-  ref T          Get<T>(EntityRef)
+  ref T          Get<T>(EntityRef)          // UNCHECKED — absent component indexes sparse[-1]
   ref readonly T GetReadOnly<T>(EntityRef)
   bool           Has<T>(EntityRef)
-  void           Add<T>(EntityRef, T)
+  void           Add<T>(EntityRef, T)       // throws: duplicate / slot cap / singleton already carried
   void           Remove<T>(EntityRef)
+  int            GetLiveCount(int typeId)   // carrier count by typeId, no generic parameter
+
+  // singletons ([KlothoSingletonComponent])
+  ref T          GetSingleton<T>()          // throws when absent
+  ref readonly T GetReadOnlySingleton<T>()
+  bool           TryGetSingleton<T>(out EntityRef carrier)
 
   // queries (ref struct, GC 0)
   Filter<T1..T5>             Filter<T1..T5>()
   FilterWithout<T1..T5, TEx> FilterWithout<T1..T5, TEx>()
 
-  // hash / snapshot
-  ulong  CalculateHash()    // FNV-1a (Tick + EntityCount + ComponentStorages)
-  void   CopyFrom(Frame)    // restore the entire heap with a single Buffer.BlockCopy
+  // built-in transform hook
+  void   RefreshPreviousTransform(EntityRef)  // re-sync Previous* after a post-Add ref-set
+
+  // hash / snapshot / full state
+  ulong  CalculateHash()                      // FNV-1a (Tick + EntityCount + ComponentStorages)
+  ulong  CalculateHash(StateHashBreakdown)    // same value, plus the per-typeId split
+  void   CopyFrom(Frame)                      // restore the entire heap with a single Buffer.BlockCopy
+  void   Clear()                              // zero the heap, reset entities, Tick = 0
+  byte[] SerializeTo() / void DeserializeFrom(byte[])   // full state (resync / late-join / spectator / replay)
 ```
+
+Not copied by `CopyFrom`: `EventRaiser`, `OnEntityCreated` / `OnEntityDestroyed`, the component-signal sink
+and masks (only the executing frame ever has them, so ring slots and the sync-test buffer fire nothing),
+`AssetRegistry` and `Prototypes` (session-wide shared read-only references).
 
 ### 7.2 EntityManager
 
@@ -671,12 +762,17 @@ Frame:
 - Fixed capacity (specified at creation), runtime GC 0
 - `IsAlive(EntityRef)` — verifies Index + Version together to prevent dangling references
 
-### 7.3 ComponentStorage\<T\>
+### 7.3 ComponentStorageFlat\<T\>
 
-- Sparse-set implementation: `_sparse[entityIndex] → denseIndex`, `_dense[denseIndex] → entityIndex`
+A typed *view* over one slice of the frame's single `byte[]` heap — not an owner of arrays.
+
+- Sparse-set implementation: `sparse[entityIndex] → denseIndex`, `dense[denseIndex] → entityIndex`
+- Per-type heap slice: `[ count(4) ][ sparse(maxEntities×4) ][ dense(slotCapacity×4) ][ components(slotCapacity×memSize) ]`
+- `slotCapacity` defaults to `maxEntities`, or the type's `MaxCount` when one is declared (§7.6)
 - `unmanaged` constraint — value types only
-- `Add/Remove/Has` O(1); `Remove` uses swap-with-last to keep the dense array contiguous
+- `Add/Remove/Has` O(1); `Remove` uses swap-with-last to keep the dense array contiguous. `Add` throws on a duplicate and on exceeding `slotCapacity`
 - `DenseSpan` / `DenseToSparse` — ReadOnlySpan-based iteration, GC 0
+- Because every storage lives in the same heap, snapshot / restore is one `Buffer.BlockCopy` and the hash is a fixed-order walk over the same bytes — no per-type allocation on any of the three paths
 
 ### 7.4 System Interfaces
 
@@ -687,12 +783,39 @@ Frame:
 | `IDestroySystem` | `OnDestroy(ref Frame)` | Teardown |
 | `ICommandSystem` | `OnCommand(ref Frame, ICommand)` | Command handling |
 | `ISyncEventSystem` | `EmitSyncEvents(ref Frame)` | Emit sync events when a verified tick is finalized |
-| `IEntityCreatedSystem` | `OnEntityCreated(ref Frame, EntityRef)` | Entity-created callback |
-| `IEntityDestroyedSystem` | `OnEntityDestroyed(ref Frame, EntityRef)` | Entity-destroyed callback |
-| `ISignalOnComponentAdded<T>` | `OnAdded(ref Frame, EntityRef, ref T)` | Component-added signal |
-| `ISignalOnComponentRemoved<T>` | `OnRemoved(ref Frame, EntityRef, T)` | Component-removed signal |
+| `IEntityCreatedSystem` | `OnEntityCreated(ref Frame, EntityRef)` | Fires from bare `CreateEntity()`, **before** any component is added (both the registry and typed prototype paths) |
+| `IEntityDestroyedSystem` | `OnEntityDestroyed(ref Frame, EntityRef)` | Fires during `DestroyEntity`, **after every component has been removed**. `IsAlive` is still true; `Has<T>` is false and `Get<T>` throws |
+| `ISignalOnComponentAdded<T>` | `OnAdded(ref Frame, EntityRef, ref T)` | Fires **after** the insert, with a `ref` into the storage slot — a listener may adjust what was just added |
+| `ISignalOnComponentRemoved<T>` | `OnRemoved(ref Frame, EntityRef, T)` | Fires **before** the removal, **by value**. Also fires per component on `DestroyEntity` (ascending typeId) and per carrying entity on a `[KlothoCleanup]` clear |
+| `ISnapshotParticipant` | `GetSnapshotSize` / `SaveSnapshot` / `RestoreSnapshot` | For deterministic state a system owns *outside* components; captured and restored alongside the frame by the ring buffer |
 
-**SystemPhase**: `PreUpdate → Update → PostUpdate → LateUpdate` (phase specified at AddSystem; auto-sorted)
+**SystemPhase**: `PreUpdate → Update → PostUpdate → LateUpdate` (phase specified at AddSystem; auto-sorted).
+`AddSystem(system, phase, group)` takes an optional group label — a **perf-report** label only: never a sort
+key, never written to the frame or the wire, and deliberately not folded into the layout fingerprint, so peers
+that label their systems differently still play together.
+
+#### Component signals — the invariants
+
+1. **They are not events.** They fire on every *execution* of a tick, not once per tick — a re-simulating client
+   may execute the same tick many times. A listener that only writes to the frame is reproduced exactly; one that
+   accumulates *outside* the frame over-counts. Frame-external one-shots belong in `ISyncEventSystem`.
+2. **A listener must not add or remove components.** `OnAdded` holds a `ref` into a storage slot, and a
+   same-type removal swap-backs another entity into it.
+3. **The destroy path interleaves.** Each component is removed immediately after its own `OnRemoved`, in
+   ascending typeId order, so inside a listener only *higher* typeIds are still readable — and by the time
+   `IEntityDestroyedSystem` runs the entity carries nothing.
+4. **The `[KlothoCleanup]` clear fires them too**, per carrying entity in dense order, before the storage is
+   emptied. This is the one place the cost is visible: a cleanup type nobody listens to is emptied with a single
+   dispatch call (O(sparse)), one with a listener is walked entity by entity (O(n)).
+5. **A throwing listener propagates** — nothing catches a tick exception, so it ends the match.
+
+A per-typeId mask gates the dispatch, so a project that registers no listener pays one field read per
+`Frame.Add`. Once a type *has* a listener, each `Add` of it walks the system list to find the implementers.
+
+`ISignal` / `SignalInvoker<TSignal>` / `SystemRunner.Signal<TSignal>` is a **separate** mechanism — a general
+broadcast to systems implementing a game-defined `ISignal`-derived interface. The two component-signal
+interfaces deliberately do *not* derive from `ISignal`, so `Signal<TSignal>` cannot dispatch them; and its
+invoker delegate allocates per call, which rules it out for per-tick paths.
 
 ### 7.5 EcsSimulation
 
@@ -704,9 +827,11 @@ new EcsSimulation(
     int maxEntities,
     int maxRollbackTicks = 10,
     int deltaTimeMs = 50,
-    ILogger logger = null,
-    IDataAssetRegistryBuilder registryBuilder = null,
-    IDataAssetRegistry assetRegistry = null);
+    IKLogger logger = null,
+    IDataAssetRegistryBuilder registryBuilder = null,   // mutually exclusive with assetRegistry
+    IDataAssetRegistry assetRegistry = null,
+    IReadOnlyDictionary<int, int> maxCountOverrides = null,      // per-typeId slot caps (§2.2)
+    IReadOnlyCollection<int> prunedComponentTypeIds = null);     // denylist (§2.2)
 
 // internal state
 EcsSimulation:
@@ -719,6 +844,17 @@ EcsSimulation:
   void   Rollback(int targetTick)
   long   GetStateHash()
   void   SaveSnapshot()          // calls FrameRingBuffer.SaveFrame
+  void   AddSystem(object system, SystemPhase phase, string group = null)
+  void   LockAssetRegistry()     // freezes the DataAssets; called for you on every engine path
+
+  // registered-system lookup (T : class) — lets a callback boundary reach a system's
+  // secondary interface without a process-wide static
+  T      GetSystem<T>()  /  bool TryGetSystem<T>(out T)  /  int GetSystems<T>(List<T>)
+
+  // diagnostics (peer-local, opt-in — see §2.2)
+  void   LogComponentHashes(...) / LogStateBreakdown(...) / LogStaticFingerprint(...)
+  void   SetHashHistoryCapacity(int) / RecordHashHistory(int) / FlushHashHistory(logger, dumpTick)
+  void   EnableSystemPerfMonitor(int warmupExecutions = 0)  /  string AppendSystemPerfLog()
 ```
 
 When attached to the engine:
@@ -727,20 +863,41 @@ When attached to the engine:
 KlothoEngine.Initialize(
     ISimulation simulation,
     IKlothoNetworkService networkService,
-    ILogger logger,
+    IKLogger logger,
     ISimulationCallbacks simulationCallbacks,
     IViewCallbacks viewCallbacks = null);
 ```
 
-### 7.6 [KlothoComponent(typeId)] Attribute
+### 7.6 Component Attributes
 
 ```csharp
-[KlothoComponent(100)]
-public struct PlayerComponent : IComponent { ... }
+[KlothoComponent(100)]                          // 1–99 framework-reserved; 100+ (UserMinId) for games
+[StructLayout(LayoutKind.Sequential, Pack = 4)] // REQUIRED — omitting it is a compile error
+public partial struct PlayerComponent : IComponent { ... }   // `partial` also required
 ```
 
-- `typeId` 1–99: reserved for the framework; 100+: for game developers
-- The source generator emits `Frame.Components.g.cs` (InitComponentStorages, CopyComponentStorages, etc.)
+| Attribute | Effect |
+| ---- | ---- |
+| `[KlothoComponent(typeId)]` | Registers the type. `typeId` is the discriminator `CalculateHash` walks in ascending order — **never renumber a shipped id**; it is a hash-and-wire break. The id plane is independent of `[KlothoSerializable]` and `[KlothoDataAsset]` |
+| `MaxCount = n` *(named arg)* | Caps the type's reserved slots at `min(n, maxEntities)` instead of one per entity. Exceeding it throws rather than growing. Ignored on a singleton (`KLSG_ECS006`, warning) |
+| `[KlothoSingletonComponent]` | At most one carrier per frame; `Frame.Add<T>` throws on a second. Read via `GetSingleton` / `GetReadOnlySingleton` / `TryGetSingleton` |
+| `[KlothoCleanup(CleanupMode)]` | One-tick lifetime. `RemoveComponent` empties the storage via the type-erased clear dispatch (O(sparse), no iteration); `DestroyEntity` destroys the carrier (pre-allocated buffer, `IsAlive`-guarded, so two markers destroy once). Both passes run at §2.6 step 2c/2d |
+| `[KlothoCoreComponent]` | Engine-essential: force-excluded from the pruning denylist. Orthogonal to lifetime — combining it with `[KlothoCleanup]` is `KLSG_ECS007` (warning) |
+
+**Determinism inputs.** `maxEntities`, the sorted typeId set, type names, each type's slot capacity
+(`MaxCount`) and each type's `CleanupMode` are folded into the **layout fingerprint** that peers exchange
+before the first tick (§9.4). Two builds that disagree about any of them are refused at the ready exchange
+rather than diverging from tick 0.
+
+**What the generator emits.** One `{TypeName}.g.cs` per component, containing the type's
+`Serialize` / `Deserialize` / `GetSerializedSize` / `GetHash` bodies and a `TYPE_ID` constant, plus a
+`ComponentStorageRegistry.Register<T>(TYPE_ID, isSingleton:/maxCount:/core:/cleanup:)` call carrying the
+attribute metadata. The heap layout itself is **not** generated — `ComponentStorageRegistry` computes it at
+runtime from the registered set, which is why adding an assembly changes the layout fingerprint.
+
+Analyzer rules on these attributes: `KLOTHO_STRUCT_LAYOUT_MISSING` (error) · `KLSG_ECS006` (MaxCount on a
+singleton, warning) · `KLSG_ECS007` (cleanup on a core component, warning) · `KLSG_ECS008` (`DestroyEntity`
+on a singleton, error) · `KLSG_ECS009` (undefined `CleanupMode` value, error).
 
 ### 7.7 Entity Prototype System
 
@@ -769,9 +926,15 @@ public class EntityPrototypeRegistry
 
 ```csharp
 Frame:
-  EntityPrototypeRegistry Prototypes   // registry (not part of CopyFrom — rollback-safe)
-  EntityRef CreateEntity(int prototypeId)  // overload: delegates to Prototypes.Create
+  EntityPrototypeRegistry Prototypes            // registry (not part of CopyFrom — rollback-safe)
+  EntityRef CreateEntity(int prototypeId)       // registry lookup; delegates to Prototypes.Create
+  EntityRef CreateEntity<TProto>(in TProto p)   // typed: no registration, no dictionary lookup,
+                                                // and the prototype instance carries per-spawn data
 ```
+
+Both paths call bare `CreateEntity()` first and then `Apply`, so `OnEntityCreated` fires **before** any
+component is added either way. Use the typed overload when the spawn needs parameters — it avoids the
+"create, then `ref`-set, then `RefreshPreviousTransform`" sequence entirely (§7.1).
 
 #### Usage
 
@@ -991,7 +1154,7 @@ INetworkTransport:
 | RoomHandshake | 1 | Handshake for multi-room server routing |
 | JoinRoom | 10 | Join a room |
 | LeaveRoom | 11 | Leave a room |
-| PlayerReady | 12 | Player ready state |
+| PlayerReady | 12 | Player ready state. Also carries the two **setup fingerprints** (`LayoutFingerprint`, `EnvironmentFingerprint`, appended after the original fields) — the host relays a ready verbatim, so every peer ends up comparing against every other and a cold-start match that never delivers a FullState is still checked (§9.4.4) |
 | GameStart | 13 | Game start + config delivery |
 | PlayerJoin | 14 | Player-join notification. Carries the optional lobby `Ticket` (opaque base64url credential) and an unverified `ClaimedDisplayName` (no-lobby nickname) — see Player Identity Handoff (§9.6) |
 | JoinReject | 15 | Room-join rejection. `Reason` is a wire byte: room codes 1~5, identity codes 6~11 — distinct from the client-local `JoinFailReason` enum (mapped by `FromJoinReject`); see §9.6 |
@@ -1025,6 +1188,10 @@ INetworkTransport:
 | LateJoinAccept | 73 | Late-join accept |
 | RecommendedExtraDelayUpdate | 74 | Dynamic InputDelay push (server → client) when smoothed RTT change crosses the asymmetric UP/DOWN threshold. Seed value also carried inline on SyncComplete / LateJoinAccept / ReconnectAccept |
 | LateJoinNotification | 75 | Host (P2P) / server (SD) → existing peers and spectators when a late-joiner is admitted. Recipients update their player list (`OnPlayerJoined` / `PlayerCount`) so mid-match joins propagate without a poll. Forged-sender guards: P2P rejects when `IsHost` is true; SD rejects when `peerId != 0`. Idempotent — duplicate notifications for the same player are dropped against the local roster |
+| ResyncFailureReport | 76 | Guest → host: a resync attempt failed. Feeds the recovery ladder's rung-3 corrective-reset attempt budget (`CorrectiveResetMaxAttempts`) |
+| MatchAbort | 77 | Host → guests: corrective resets are exhausted (rung 4). Broadcast when `AutoAbortOnRecoveryExhausted` is true, paired with a local `AbortReason.StateDivergence` |
+| PlayerStateNotification | 78 | In-game roster change — host (P2P) → existing guests on a confirmed disconnect / reconnect / leave, so guests exclude a departed peer from the timing vote |
+| PlayerJoinNotification | 79 | Pre-game (lobby) roster add — host (P2P) / server (SD) → existing peers when a player completes the normal-join handshake, so every peer's roster is consistent before StartGame |
 | **Server-Driven Mode** | | |
 | ClientInput | 80 | Client → server input |
 | VerifiedState | 81 | Server → client verified state |
@@ -1033,9 +1200,11 @@ INetworkTransport:
 | PlayerBootstrapReady | 84 | Client → server: bootstrap completed (player ready) — bootstrap handshake |
 | BootstrapBegin | 85 | Server → client: open bootstrap window (FirstTick, TickStartTimeMs) |
 | CommandRejected | 86 | Server → client unicast on input rejection (tick, cmdTypeId, RejectionReason). Surfaces as engine `OnCommandRejected` (§2.3) on the originating client |
+| PlayerLeaveNotification | 87 | Pre-game (lobby) roster removal — the counterpart of `PlayerJoinNotification` for a player leaving before StartGame (in-game leave uses `PlayerStateNotification`) |
 | **Config Layer** | | |
 | SimulationConfig | 90 | Simulation-parameter payload |
 | PlayerConfig | 91 | Per-player config payload |
+| ReactiveExtraDelayReport | 92 | Client → authority report of the client's *effective* extra delay (baseline + reactive), so the authority folds the client's reactive correction into its authoritative baseline. SD: client → server; P2P: guest → host (star topology, peerId 0) |
 | **User-Defined Reservation** | | |
 | UserDefined_Start | 200 | Values beyond this can be cast and used freely by sample/game code (prevents inverting Runtime enum dependency direction) |
 
@@ -1102,6 +1271,19 @@ Every SyncCheckInterval (20 ticks):
 └─ on mismatch → raise OnDesyncDetected(localHash, remoteHash)
 ```
 
+**Localizing a mismatch.** The single 64-bit value says *that* peers diverged, not *what* or *when*.
+Two peer-local aids narrow it down (both configured in §2.2, both off-by-default-free):
+
+- **`StateHashBreakdown`** — the per-component-type split of the same fold, so a mismatch names the component
+  type. `LogComponentHashes` dumps `count` + `hash` per typeId in ascending order; diffing a client log against
+  the server's at the suspect tick identifies the type without a debugger.
+- **`StateHashRing`** — a rolling window of per-tick, per-type hashes (`DiagnosticHistoryTicks`, default 60)
+  recorded as the match runs and dumped by `FlushHashHistory(logger, dumpTick)` on detection, so the **first**
+  diverged tick is visible rather than the tick the check happened to notice.
+
+Read the two **fingerprints** (§9.4.4) before either of these: a component-registry difference diverges from
+tick 0, which makes every per-component number a symptom rather than a cause.
+
 ### 9.4.1 Hash Gate (post-`ApplyFullState`)
 
 ```text
@@ -1144,6 +1326,45 @@ Every Update():
 ```
 
 Both host and guest peers run the watchdog locally — either can self-abort when its verified chain stalls past the threshold. Distinct from `Finished` so abort-handling UI (replay save / score aggregation) can branch via `KlothoStateExtensions.IsEnded()`.
+
+### 9.4.4 Setup Fingerprints (pre-first-tick build check)
+
+The desync pipeline above catches divergence *after* it happens. Two fingerprints catch the most common cause
+*before* the first tick, on the one pre-game message every peer sends.
+
+| Fingerprint | Folds | Severity |
+| ---- | ---- | ---- |
+| **Layout** | `maxEntities`, the sorted registered typeId set, type names, per-type slot capacity (`MaxCount`) and per-type `CleanupMode` | **Fatal.** The registered type set is state-hash input, so the peers would diverge from tick 0 |
+| **Environment** | static colliders XOR navmesh XOR the game's own slot (`IGameFingerprintSource`); registry deliberately excluded so the two halves stay orthogonal | **Warning.** Outside the state hash, and runtime rebakes move it legitimately — compared only before the match runs |
+
+```text
+PlayerReady (own fields + LayoutFingerprint + EnvironmentFingerprint)
+└─ receiver: KlothoEngine.CheckReadyFingerprints(playerId, remoteLayout, remoteEnv, compareEnvironment)
+     └─ ReadyFingerprintVerdict.LayoutMismatch and !AllowLayoutMismatch:
+          ├─ transport control (dedicated server / P2P host) → disconnect with
+          │                                                    JoinFailReason.LayoutMismatch (wire code 12)
+          └─ no transport control (guest / spectator)        → AbortMatch(AbortReason.LayoutMismatch)
+```
+
+- `0` is the "not provided" sentinel on both fields, and a difference counts only when **both** sides supplied
+  a value — so an unwired or older peer is never refused on this path.
+- The **server-driven client compares nothing**: the server relays other clients' readies, so this client holds
+  *their* fingerprints and never the server's (the server has no local player and sends no ready). Comparing
+  client-to-client would either stay silent when both differ from the server but agree with each other, or make
+  both report without either knowing which matches the authority. The server is the judge; the client learns its
+  verdict from the reject reason or the initial FullState comparison.
+- A **spectator** sends no ready but receives every player's, so it gets the layout check for free.
+- The refusal message names both sanctioned fixes: load the same assembly set on both sides (the usual cause is
+  an Editor session registering Editor-only test-assembly components against a player / server build), or prune
+  the difference via `SetRuntimePrunedComponentTypeIds` — an **authority-side** action, since the prune set is
+  host/server authoritative. When the type *counts* agree the difference is component metadata rather than the
+  type set, and the message says so by printing `cleanup=` next to `types=`.
+- `KlothoSessionSetup.AllowLayoutMismatch` / `SpectatorSessionSetup.AllowLayoutMismatch` (default `false`)
+  downgrade the refusal to a log for development. Deliberately on the setup and not in `ISimulationConfig`: a
+  guest runs the config it received over the wire, so a config-borne flag would read its default on exactly the
+  peer that needs it off.
+- The combined value the FullState path has always carried is still `layout ^ environment`, bit for bit, with the
+  `0 → 1` sentinel normalization in exactly one place — splitting the fold changed no wire value.
 
 ### 9.5 IKlothoNetworkService Events
 
@@ -1226,6 +1447,30 @@ Server ──► InputAck(82) + VerifiedState(81) [confirmed state/hash included
 - `ServerNetworkService` — server side: input collection, frame verification, state broadcast
 - `ServerDrivenClientService` — client side: input transmission, server-state receipt
 - `Room / RoomManager / RoomRouter` — multi-room: a single server managing multiple independent game sessions
+
+#### Dynamic InputDelay (client-reactive policy)
+
+Non-host sessions attach `DynamicInputDelayPolicy` automatically. It escalates `engine.RecommendedExtraDelay`
+when the authoritative push (`RecommendedExtraDelayUpdate`, 74) has not yet caught up with what the client is
+actually experiencing. Thresholds are server-authoritative (§2.2).
+
+| Trigger | Signal | Notes |
+| ---- | ---- | ---- |
+| **A — PastTick reject window** | non-spawn `CommandRejected(PastTick)` count within `ReactiveWindowTicks` crosses `ReactiveEscalateThreshold` | SD only — a P2P guest receives no `CommandRejected` |
+| **B — rollback burst** | rollback count within `RollbackWindowTicks` reaches `RollbackBurstCount` | the primary trigger for P2P guests |
+
+- Escalation calls `engine.EscalateExtraDelay(ReactiveStep, ReactiveMax)`; `ReactiveMax` is clamped at
+  `SimulationConfig.Validate()` to `MaxRollbackTicks / 2`.
+- **Grace gate**: both triggers ignore events within `ServerPushGraceTicks` of the last authoritative push
+  (tracked via `OnExtraDelayChanged`), so the reactive path never double-counts against it.
+- **Cooldown / de-escalation**: rollback-triggered escalations are spaced by `ReactiveEscalateCooldownTicks`,
+  and the reactive component walks back down after `ReactiveDeEscalateStableTicks` of quiet.
+- The client reports its **effective** delay (baseline + reactive) back with `ReactiveExtraDelayReport` (92) so
+  the authority folds the correction into its own baseline instead of fighting it.
+- Games normally do not subscribe to `OnCommandRejected` / `OnRollbackExecuted` for delay control — only for
+  game-specific responses such as shaping a spawn-command retry.
+- Smoothing input for the authoritative push side: `PlayerRttSmoother` (a 5-sample sliding median per player,
+  ≈5 s) feeds the asymmetric UP/DOWN threshold decision, rate-limited per peer.
 
 #### Player Identity Handoff
 
@@ -1407,4 +1652,4 @@ Payload:
 
 ---
 
-*Last updated: 2026-06-18 — ReliableCommandSubmit=23, IReliableCommand authoritative placement*
+*Last updated: 2026-08-23 — setup fingerprints on the ready exchange (§9.4.4), `[KlothoCleanup]` tick-end passes (§2.6 / §7.6), component signals wired (§7.4), runtime NavMesh rebake + memory / perf diagnostics in the layout and config tables*

@@ -72,8 +72,8 @@ namespace xpTURN.Klotho.Runtime.Tests.Contract
         {
             string src = ReadBrawler("ECS/BrawlerSimSetup.cs");
 
-            Match bot = Regex.Match(src, @"AddSystem\(\s*botFSMSystem\s*,\s*SystemPhase\.PreUpdate\s*\)");
-            Match cmd = Regex.Match(src, @"AddSystem\(\s*platformerCommandSystem\s*,\s*SystemPhase\.PreUpdate\s*\)");
+            Match bot = Regex.Match(src, @"AddSystem\(\s*botFSMSystem\s*,\s*SystemPhase\.PreUpdate\s*(?:,[^)]*)?\)");
+            Match cmd = Regex.Match(src, @"AddSystem\(\s*platformerCommandSystem\s*,\s*SystemPhase\.PreUpdate\s*(?:,[^)]*)?\)");
 
             Assert.IsTrue(bot.Success, "botFSMSystem is no longer registered into PreUpdate");
             Assert.IsTrue(cmd.Success, "platformerCommandSystem is no longer registered into PreUpdate");
@@ -89,9 +89,11 @@ namespace xpTURN.Klotho.Runtime.Tests.Contract
 
             // The DRIVER is what is registered, by its own core type — a game wrapper would hide it
             // from the engine's GetSystem<FPNavMeshRebakeDriver> lookup. The regex follows it there.
-            Match pump = Regex.Match(src, @"AddSystem\(\s*navMeshPlacementSeam\.Driver\s*,\s*SystemPhase\.PreUpdate\s*\)");
-            Match bot = Regex.Match(src, @"AddSystem\(\s*botFSMSystem\s*,\s*SystemPhase\.PreUpdate\s*\)");
-            Match cmd = Regex.Match(src, @"AddSystem\(\s*platformerCommandSystem\s*,\s*SystemPhase\.PreUpdate\s*\)");
+            // Trailing arguments are tolerated on purpose: the contract here is "registered into this
+            // phase, in this order", not the argument count (a perf-report group label may follow).
+            Match pump = Regex.Match(src, @"AddSystem\(\s*navMeshPlacementSeam\.Driver\s*,\s*SystemPhase\.PreUpdate\s*(?:,[^)]*)?\)");
+            Match bot = Regex.Match(src, @"AddSystem\(\s*botFSMSystem\s*,\s*SystemPhase\.PreUpdate\s*(?:,[^)]*)?\)");
+            Match cmd = Regex.Match(src, @"AddSystem\(\s*platformerCommandSystem\s*,\s*SystemPhase\.PreUpdate\s*(?:,[^)]*)?\)");
 
             Assert.IsTrue(pump.Success, "FPNavMeshRebakeDriver is no longer registered — without it "
                 + "a delayed swap never happens at all and buildings never reach the navmesh");

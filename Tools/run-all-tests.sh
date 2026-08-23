@@ -14,7 +14,14 @@
 #   Tools/run-all-tests.sh --unity-only     # Unity EditMode tests only
 #   Tools/run-all-tests.sh --no-unity-2022  # skip the 2022.3 LTS project (editor not installed)
 #   Tools/run-all-tests.sh --no-build       # pass --no-build to dotnet test
+#   Tools/run-all-tests.sh --debug          # dotnet test with the Debug configuration (default)
+#   Tools/run-all-tests.sh --release        # dotnet test with the Release configuration
+#   Tools/run-all-tests.sh --both-configs   # dotnet test with Debug and Release, in that order
+#   Tools/run-all-tests.sh -c <cfg>         # dotnet test with an arbitrary configuration name
 #   Tools/run-all-tests.sh -h | --help
+#
+# The configuration options apply to the .NET tests only; Unity EditMode runs are
+# unaffected (the editor compiles the project with its own settings).
 #
 # Environment variables:
 #   UNITY_PATH        Override the Unity executable path (default: Hub 6000.3.9f1)
@@ -55,6 +62,9 @@ RUN_DOTNET=1
 RUN_UNITY=1
 RUN_UNITY_2022=1
 DOTNET_NO_BUILD=0
+# Configurations passed to dotnet test, in run order. Debug alone matches the
+# dotnet default, so the unqualified invocation behaves as it always has.
+DOTNET_CONFIGS=("Debug")
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; }
 
@@ -64,6 +74,12 @@ while [[ $# -gt 0 ]]; do
     --unity-only)    RUN_DOTNET=0 ;;
     --no-unity-2022) RUN_UNITY_2022=0 ;;
     --no-build)      DOTNET_NO_BUILD=1 ;;
+    --debug)         DOTNET_CONFIGS=("Debug") ;;
+    --release)       DOTNET_CONFIGS=("Release") ;;
+    --both-configs)  DOTNET_CONFIGS=("Debug" "Release") ;;
+    -c|--configuration)
+      [[ $# -ge 2 ]] || { echo "$1 requires a configuration name" >&2; exit 2; }
+      DOTNET_CONFIGS=("$2"); shift ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
   esac
@@ -86,7 +102,7 @@ rm -f "${RESULTS_DIR}"/*.trx "${RESULTS_DIR}"/*.xml "${RESULTS_DIR}"/*.log 2>/de
 
 # ── .NET tests ───────────────────────────────────────────────────────────────
 run_dotnet_tests() {
-  section ".NET tests (dotnet test)"
+  section ".NET tests (dotnet test) — configuration: ${DOTNET_CONFIGS[*]}"
   if ! command -v dotnet >/dev/null 2>&1; then
     echo "${C_RED}dotnet not found. The .NET SDK must be installed.${C_RST}" >&2
     return 1
@@ -95,19 +111,24 @@ run_dotnet_tests() {
   local build_flag=()
   [[ "${DOTNET_NO_BUILD}" -eq 1 ]] && build_flag=(--no-build)
 
-  local proj name trx rc
+  local config proj name trx rc
   local overall=0
-  for proj in "${DOTNET_TEST_PROJECTS[@]}"; do
-    name="$(basename "$(dirname "${proj}")")"
-    trx="dotnet-${name}.trx"
-    echo "${C_BLD}▶ ${name}${C_RST}"
-    dotnet test "${REPO_ROOT}/${proj}" \
-      ${build_flag[@]+"${build_flag[@]}"} \
-      --nologo \
-      --results-directory "${RESULTS_DIR}" \
-      --logger "trx;LogFileName=${trx}"
-    rc=$?
-    [[ ${rc} -ne 0 ]] && overall=1
+  for config in "${DOTNET_CONFIGS[@]}"; do
+    for proj in "${DOTNET_TEST_PROJECTS[@]}"; do
+      name="$(basename "$(dirname "${proj}")")"
+      # The configuration is part of the trx name so a --both-configs run keeps both
+      # results (the summary parser derives the suite label from this file name).
+      trx="dotnet-${name}-${config}.trx"
+      echo "${C_BLD}▶ ${name} [${config}]${C_RST}"
+      dotnet test "${REPO_ROOT}/${proj}" \
+        --configuration "${config}" \
+        ${build_flag[@]+"${build_flag[@]}"} \
+        --nologo \
+        --results-directory "${RESULTS_DIR}" \
+        --logger "trx;LogFileName=${trx}"
+      rc=$?
+      [[ ${rc} -ne 0 ]] && overall=1
+    done
   done
   return ${overall}
 }

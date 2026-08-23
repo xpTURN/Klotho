@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using xpTURN.Klotho.Deterministic.Geometry;
@@ -28,15 +29,60 @@ namespace xpTURN.Klotho.Editor
         private Vector2 _scrollPos;
         private string _lastError;
 
+        // Audit of what the export would MISS. Kept entirely out of Collect/AssignIds: that path decides
+        // ids from enumeration order, so touching it would change the exported bytes (and with them the
+        // static fingerprint peers compare). Cached because a full Collider sweep must not run per repaint.
+        //
+        // NAMES, not GameObjects: holding references across a scene change left the window drawing
+        // destroyed objects (MissingReferenceException from `.name` inside OnGUI). The audit only ever
+        // renders text, so the names are all it needs and nothing here can dangle.
+        private List<string> _untagged;        // has a Collider, tagged neither FPStatic nor FPTrigger
+        private List<string> _taggedInactive;  // tagged, but inactive — FindGameObjectsWithTag skips it
+
+        private void OnEnable()
+        {
+            // Opening or creating a scene replaces the objects the counts were taken from — drop the
+            // cache so the next repaint re-audits instead of showing the previous scene's numbers.
+            EditorSceneManager.sceneOpened += OnSceneOpened;
+            EditorSceneManager.sceneClosed += OnSceneClosed;
+            EditorSceneManager.newSceneCreated += OnNewSceneCreated;
+        }
+
+        private void OnDisable()
+        {
+            EditorSceneManager.sceneOpened -= OnSceneOpened;
+            EditorSceneManager.sceneClosed -= OnSceneClosed;
+            EditorSceneManager.newSceneCreated -= OnNewSceneCreated;
+        }
+
+        private void OnSceneOpened(UnityEngine.SceneManagement.Scene scene, OpenSceneMode mode) => InvalidateAudit();
+        private void OnSceneClosed(UnityEngine.SceneManagement.Scene scene) => InvalidateAudit();
+        private void OnNewSceneCreated(UnityEngine.SceneManagement.Scene scene, NewSceneSetup setup, NewSceneMode mode) => InvalidateAudit();
+
+        private void InvalidateAudit()
+        {
+            _untagged = null;
+            _taggedInactive = null;
+            _preview = null;      // preview rows hold converted copies, but their ids belong to the old scene
+            _previewTags = null;
+            Repaint();
+        }
+
+        private void OnFocus() => Audit();
+
         private void OnGUI()
         {
             string sceneName = SceneManager.GetActiveScene().name;
             int staticCount = CountTag("FPStatic");
             int triggerCount = CountTag("FPTrigger");
+            if (_untagged == null || _taggedInactive == null) Audit();
 
             EditorGUILayout.LabelField("Scene", sceneName);
             EditorGUILayout.LabelField("FPStatic", $"{staticCount}  /  FPTrigger: {triggerCount}");
             EditorGUILayout.LabelField("Total", $"{staticCount + triggerCount}");
+            EditorGUILayout.LabelField("Excluded", $"untagged: {_untagged.Count}  /  tagged-but-inactive: {_taggedInactive.Count}");
+
+            DrawExclusionWarnings();
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Output Path", OutputDir);
@@ -44,6 +90,7 @@ namespace xpTURN.Klotho.Editor
 
             EditorGUILayout.Space();
             EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Rescan")) Audit();
             if (GUILayout.Button("Preview")) BuildPreview();
             if (GUILayout.Button("Export")) Export(sceneName);
             EditorGUILayout.EndHorizontal();
@@ -90,6 +137,7 @@ namespace xpTURN.Klotho.Editor
         void BuildPreview()
         {
             _lastError = null;
+            Audit();
             try
             {
                 var list = Collect(out var tags);
@@ -117,6 +165,8 @@ namespace xpTURN.Klotho.Editor
 
             try
             {
+                Audit();
+                LogExclusions();
                 var list = Collect(out _);
                 AssignIds(list);
 
@@ -135,6 +185,79 @@ namespace xpTURN.Klotho.Editor
                 _lastError = e.Message;
                 Debug.LogError($"[FPStaticColliderExporter] Export failed: {e.Message}");
             }
+        }
+
+        // Enumerates every Collider in the open scenes — inactive ones included — and splits out the two
+        // ways a Collider silently misses the export:
+        //   1) it carries neither tag, so CollectTag never sees it;
+        //   2) it carries a tag but its GameObject is inactive, and FindGameObjectsWithTag returns only
+        //      active objects, so CollectTag never sees it either.
+        // Read-only: nothing here feeds Collect/AssignIds.
+        void Audit()
+        {
+            _untagged = new List<string>();
+            _taggedInactive = new List<string>();
+            var seen = new HashSet<int>();   // one entry per GameObject, not per Collider
+
+            foreach (var col in AllColliders())
+            {
+                if (col == null) continue;
+                var go = col.gameObject;
+                if (go == null || !seen.Add(go.GetInstanceID())) continue;
+
+                // go.tag is a plain string read — unlike CompareTag/FindGameObjectsWithTag it cannot throw
+                // when a tag is missing from the project's tag list.
+                bool tagged = go.tag == "FPStatic" || go.tag == "FPTrigger";
+                if (!tagged)
+                    _untagged.Add(go.name);
+                else if (!go.activeInHierarchy)
+                    _taggedInactive.Add(go.name);
+            }
+        }
+
+        static Collider[] AllColliders()
+        {
+#if UNITY_2023_1_OR_NEWER
+            return UnityEngine.Object.FindObjectsByType<Collider>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+#else
+            return UnityEngine.Object.FindObjectsOfType<Collider>(true);
+#endif
+        }
+
+        const int MaxListed = 20;
+
+        void DrawExclusionWarnings()
+        {
+            if (_untagged.Count > 0)
+                EditorGUILayout.HelpBox(
+                    $"{_untagged.Count} Collider(s) carry neither FPStatic nor FPTrigger and will NOT be exported:\n{NameList(_untagged)}",
+                    MessageType.Warning);
+
+            if (_taggedInactive.Count > 0)
+                EditorGUILayout.HelpBox(
+                    $"{_taggedInactive.Count} tagged Collider(s) are inactive and will NOT be exported:\n{NameList(_taggedInactive)}",
+                    MessageType.Warning);
+        }
+
+        void LogExclusions()
+        {
+            if (_untagged.Count > 0)
+                Debug.LogWarning($"[FPStaticColliderExporter] untagged Colliders excluded ({_untagged.Count}): {NameList(_untagged)}");
+            if (_taggedInactive.Count > 0)
+                Debug.LogWarning($"[FPStaticColliderExporter] tagged-but-inactive Colliders excluded ({_taggedInactive.Count}): {NameList(_taggedInactive)}");
+        }
+
+        static string NameList(List<string> names)
+        {
+            var sb = new StringBuilder();
+            int shown = Math.Min(names.Count, MaxListed);
+            for (int i = 0; i < shown; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append(names[i]);
+            }
+            if (names.Count > shown) sb.Append($", … (+{names.Count - shown})");
+            return sb.ToString();
         }
 
         List<FPStaticCollider> Collect(out List<string> tags)

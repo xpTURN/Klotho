@@ -441,6 +441,10 @@ namespace xpTURN.Klotho.Network
             var msg = _playerReadyCache;
             msg.PlayerId = _localPlayerId;
             msg.IsReady = ready;
+            // Cached instance — every field must be re-stamped on each send or a stale value ships.
+            var engineForFp = _engine as KlothoEngine;
+            msg.LayoutFingerprint = engineForFp?.GetLocalLayoutFingerprint() ?? 0;
+            msg.EnvironmentFingerprint = engineForFp?.GetLocalEnvironmentFingerprint() ?? 0;
             SendToServer(msg, DeliveryMethod.Reliable);
             
             // Apply locally too — the server relays a ready change to other clients only (it excludes
@@ -926,6 +930,12 @@ namespace xpTURN.Klotho.Network
 
         private void HandlePlayerReadyMessage(PlayerReadyMessage msg)
         {
+            // Deliberately no fingerprint comparison here. The server relays other clients' ready
+            // verbatim, so this client holds THEIR fingerprints but never the server's (the server has no
+            // local player and sends no ready). Comparing client-to-client would either stay silent when
+            // both differ from the server but agree with each other, or make both sides report without
+            // anyone knowing which one matches the authority. The server is the judge; this client learns
+            // its own verdict from the reject reason, or later from the initial FullState comparison.
             var player = FindPlayerById(msg.PlayerId);
             if (player != null)
             {

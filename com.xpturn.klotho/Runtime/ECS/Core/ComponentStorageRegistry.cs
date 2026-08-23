@@ -28,6 +28,12 @@ namespace xpTURN.Klotho.ECS
     public delegate void ClearDelegate(
         byte[] heap, in StorageLayout layout);
 
+    // Fires ISignalOnComponentRemoved<T> for one entity without the caller knowing T. The destroy path
+    // walks typeIds, so it has no generic parameter to dispatch on; this closes over T at Register<T>
+    // time, the same shape as ClearDelegate. It is not a thin wrapper — reading the value has to happen
+    // before the removal, so the delegate does the presence check and the copy itself.
+    internal delegate void RemovedSignalDelegate(Frame frame, EntityRef entity);
+
     public static class ComponentStorageRegistry
     {
         // === Upper-bound constant ===
@@ -71,15 +77,29 @@ namespace xpTURN.Klotho.ECS
         private static int[] _registeredTypeIdsSorted = Array.Empty<int>();
         internal static ReadOnlySpan<int> RegisteredTypeIdsSorted => _registeredTypeIdsSorted;
 
+        // Cleanup targets, split by mode and built at freeze from _registeredTypeIdsSorted (ascending,
+        // pruned types already absent). DERIVED, so unlike _cleanupMode these are cleared by
+        // ResetForRecompute — keeping a stale list would let the pass touch a typeId with no layout.
+        // Empty array = no cleanup work, which the tick pass checks before doing anything.
+        private static int[] _cleanupClearTypeIds   = Array.Empty<int>();
+        private static int[] _cleanupDestroyTypeIds = Array.Empty<int>();
+        internal static ReadOnlySpan<int> CleanupClearTypeIds   => _cleanupClearTypeIds;
+        internal static ReadOnlySpan<int> CleanupDestroyTypeIds => _cleanupDestroyTypeIds;
+
         // === Dispatch tables (statically initialized at MAX_COMPONENT_TYPES size) ===
         private static readonly HashDelegate[]             _hashDispatch             = new HashDelegate[MAX_COMPONENT_TYPES];
         private static readonly SerializeDelegate[]        _serializeDispatch        = new SerializeDelegate[MAX_COMPONENT_TYPES];
         private static readonly SerializeAndHashDelegate[] _serializeAndHashDispatch = new SerializeAndHashDelegate[MAX_COMPONENT_TYPES];
         private static readonly DeserializeDelegate[]      _deserializeDispatch      = new DeserializeDelegate[MAX_COMPONENT_TYPES];
         private static readonly ClearDelegate[]            _clearDispatch            = new ClearDelegate[MAX_COMPONENT_TYPES];
+        private static readonly RemovedSignalDelegate[]   _removedSignalDispatch    = new RemovedSignalDelegate[MAX_COMPONENT_TYPES];
         public  static readonly int[]                      PerComponentSize          = new int[MAX_COMPONENT_TYPES];
         private static readonly bool[]                     _isSingleton              = new bool[MAX_COMPONENT_TYPES];
         private static readonly int[]                      _maxCount                 = new int[MAX_COMPONENT_TYPES];
+        // [KlothoCleanup] mode per typeId. Registration-derived like the dispatch tables, so it is
+        // RETAINED across ResetForRecompute — Register runs once per process from a [ModuleInitializer],
+        // and clearing it would lose the modes with no path to repopulate them.
+        private static readonly CleanupMode[]              _cleanupMode              = new CleanupMode[MAX_COMPONENT_TYPES];
 
         // === Editor-debug reflector dispatch ===
         private static readonly IStorageReflector[] _reflectors = new IStorageReflector[MAX_COMPONENT_TYPES];
@@ -110,7 +130,7 @@ namespace xpTURN.Klotho.ECS
         public static bool TryGetFixedArrayReader(Type componentType, string fieldName, out Func<object, int[]> reader)
             => _fixedArrayReaders.TryGetValue((componentType, fieldName), out reader);
 
-        public static bool Register<T>(int typeId, bool isSingleton = false, int maxCount = 0, bool core = false) where T : unmanaged, IComponent
+        public static bool Register<T>(int typeId, bool isSingleton = false, int maxCount = 0, bool core = false, CleanupMode cleanup = CleanupMode.None) where T : unmanaged, IComponent
         {
             if (_frozen)
                 throw new InvalidOperationException(
@@ -134,6 +154,7 @@ namespace xpTURN.Klotho.ECS
             _componentSizes[typeof(T)] = KUnsafe.SizeOf<T>();
             _isSingleton[typeId] = isSingleton;
             _maxCount[typeId] = maxCount;
+            _cleanupMode[typeId] = cleanup;
             if (core) _coreTypeIds.Add(typeId);   // self-declaring core base-set (never pruned)
             if (typeId > MaxTypeId) MaxTypeId = typeId;
 
@@ -144,6 +165,11 @@ namespace xpTURN.Klotho.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsSingleton(int typeId)
             => (uint)typeId < MAX_COMPONENT_TYPES && _isSingleton[typeId];
+
+        /// <summary>The [KlothoCleanup] mode declared for this typeId (None when unmarked).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static CleanupMode GetCleanupMode(int typeId)
+            => (uint)typeId < MAX_COMPONENT_TYPES ? _cleanupMode[typeId] : CleanupMode.None;
 
         // Registers the dispatch entry, reflector, and PerComponentSize for the given typeId in one go.
         private static void RegisterDispatch<T>(int typeId) where T : unmanaged, IComponent
@@ -231,6 +257,15 @@ namespace xpTURN.Klotho.ECS
                 var sparse = MemoryMarshal.Cast<byte, int>(heap.AsSpan(l.SparseOffset, l.Capacity * 4));
                 sparse.Fill(-1);
             };
+
+            _removedSignalDispatch[typeId] = (Frame frame, EntityRef entity) =>
+            {
+                var storage = frame.GetStorage<T>();
+                if (!storage.Has(entity.Index)) return;
+                T removed = storage.GetReadOnly(entity.Index);
+                var self = frame;   // Frame is a class: `ref this` does not exist
+                frame.SignalSink.OnComponentRemoved(ref self, entity, removed);
+            };
         }
 
         // === Dispatch accessor (used internally by Frame and others) ===
@@ -239,6 +274,7 @@ namespace xpTURN.Klotho.ECS
         internal static SerializeAndHashDelegate GetSerializeAndHashDispatch(int typeId) => _serializeAndHashDispatch[typeId];
         internal static DeserializeDelegate      GetDeserializeDispatch(int typeId)      => _deserializeDispatch[typeId];
         internal static ClearDelegate            GetClearDispatch(int typeId)            => _clearDispatch[typeId];
+        internal static RemovedSignalDelegate   GetRemovedSignalDispatch(int typeId)   => _removedSignalDispatch[typeId];
 
         public static bool TryGetReflector(Type componentType, out IStorageReflector reflector)
         {
@@ -259,6 +295,22 @@ namespace xpTURN.Klotho.ECS
             EnsureAllAssembliesScanned();
             return _typeToId[type];
         }
+
+        // Non-throwing variant. The component-signal mask build needs it: a system may declare
+        // ISignalOnComponentAdded<T> for a T that carries no [KlothoComponent] (test doubles do), and
+        // that must skip silently rather than fail registration.
+        internal static bool TryGetTypeId(Type type, out int id)
+        {
+            if (_typeToId.TryGetValue(type, out id))
+                return true;
+
+            EnsureAllAssembliesScanned();
+            return _typeToId.TryGetValue(type, out id);
+        }
+
+        // Bumped whenever the registered type set / layout is recomputed. Caches keyed on typeId are
+        // valid only within one generation (see TypeIdCache<T>.CachedGeneration).
+        internal static int Generation => _generation;
 
         // Generic static-cache path. Populates Id/Layout on the first call; subsequent calls are O(1).
         // When ResetForTesting bumps _generation, the CachedGeneration mismatch forces re-population.
@@ -409,6 +461,7 @@ namespace xpTURN.Klotho.ECS
             }
             _heapSize = offset;
             _registeredTypeIdsSorted = registeredList.ToArray();   // Guaranteed ascending typeId order (loop order)
+            BuildCleanupTypeIdCaches();
             _computedMaxEntities = maxEntities;
             _layoutFingerprint = ComputeLayoutFingerprint(maxEntities);
             _frozen = true;
@@ -439,6 +492,11 @@ namespace xpTURN.Klotho.ECS
         /// can never agree on a state hash even with an identical world.
         /// Compare this between peers before chasing a state-hash divergence.
         ///
+        /// Contents, despite the name: maxEntities + the registered type set's size, ids and IDENTITY
+        /// (full type name), each type's slot capacity and component size, and COMPONENT METADATA that
+        /// feeds per-tick state ([KlothoCleanup] mode). It is not a pure memory-layout hash — it is the
+        /// registry-derived determinism input, which is why a metadata-only difference has to change it.
+        ///
         /// Historical note: the chained hash fold that preceded the layered one did NOT have
         /// this property — an empty type contributed no bytes and was invisible, so a registry difference
         /// stayed harmless until the day it silently became fatal. That is why the fingerprint is logged
@@ -453,6 +511,13 @@ namespace xpTURN.Klotho.ECS
         /// </summary>
         public static int LayoutTypeCount => _registeredTypeIdsSorted?.Length ?? 0;
 
+        /// <summary>
+        /// Number of layout types declaring a <see cref="CleanupMode"/> other than None. Reported next
+        /// to <see cref="LayoutTypeCount"/> in fingerprint diagnostics: when the type counts match but
+        /// the fingerprints differ, this number tells a human whether component metadata is the cause.
+        /// </summary>
+        public static int CleanupTypeCount => _cleanupClearTypeIds.Length + _cleanupDestroyTypeIds.Length;
+
         private static long ComputeLayoutFingerprint(int maxEntities)
         {
             ulong h = FPHash.FNV_OFFSET;
@@ -466,6 +531,10 @@ namespace xpTURN.Klotho.ECS
                 h = FPHash.Hash(h, HashTypeName(_idToType[typeId].FullName));
                 h = FPHash.Hash(h, layout.SlotCapacity);
                 h = FPHash.Hash(h, layout.ComponentSize);
+                // Component metadata that changes per-tick state: two builds disagreeing on a cleanup
+                // mode diverge from tick 0, so the mode has to be part of this value (the Ready
+                // exchange compares it before the first tick).
+                h = FPHash.Hash(h, (int)_cleanupMode[typeId]);
             }
             return (long)h;
         }
@@ -547,8 +616,40 @@ namespace xpTURN.Klotho.ECS
             _prunedComponentTypeIds = null;   // next EnsureLayoutComputed re-supplies (same reason)
             _prunedSet = null;
             _registeredTypeIdsSorted = Array.Empty<int>();
+            _cleanupClearTypeIds = Array.Empty<int>();       // derived from the above; must not outlive it
+            _cleanupDestroyTypeIds = Array.Empty<int>();
             _generation++;   // Bulk-invalidate TypeIdCache<T>
             // _typeToId / _idToType / _componentSizes / dispatch tables / _coreTypeIds are retained (ModuleInitializer-based)
+        }
+
+        // Split the frozen type set by cleanup mode, preserving ascending typeId order so the tick
+        // pass has no registration-order dependency. Called from EnsureLayoutComputed right after
+        // _registeredTypeIdsSorted is built.
+        private static void BuildCleanupTypeIdCaches()
+        {
+            int clearCount = 0, destroyCount = 0;
+            for (int i = 0; i < _registeredTypeIdsSorted.Length; i++)
+            {
+                switch (_cleanupMode[_registeredTypeIdsSorted[i]])
+                {
+                    case CleanupMode.RemoveComponent: clearCount++; break;
+                    case CleanupMode.DestroyEntity:   destroyCount++; break;
+                }
+            }
+
+            _cleanupClearTypeIds   = clearCount   > 0 ? new int[clearCount]   : Array.Empty<int>();
+            _cleanupDestroyTypeIds = destroyCount > 0 ? new int[destroyCount] : Array.Empty<int>();
+
+            int c = 0, d = 0;
+            for (int i = 0; i < _registeredTypeIdsSorted.Length; i++)
+            {
+                int typeId = _registeredTypeIdsSorted[i];
+                switch (_cleanupMode[typeId])
+                {
+                    case CleanupMode.RemoveComponent: _cleanupClearTypeIds[c++]   = typeId; break;
+                    case CleanupMode.DestroyEntity:   _cleanupDestroyTypeIds[d++] = typeId; break;
+                }
+            }
         }
 
         // Pack=4 mandate → all storage and components are 4-byte aligned.

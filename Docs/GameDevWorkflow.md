@@ -2,7 +2,7 @@
 
 > Audience: game developers building gameplay logic on top of the xpTURN.Klotho framework.
 >
-> Related: [API Overview](GameDevAPI.md)
+> Related: [API Overview](GameDevAPI.md) (what to call) · [ECS.md](ECS.md) (the ECS in depth) · [Cookbook.md](Cookbook.md) ("I want to X" → where to look) · [DesyncDiagnostics.md](DesyncDiagnostics.md) (when the hashes disagree)
 
 ---
 
@@ -16,9 +16,9 @@ In xpTURN.Klotho, the area owned by the game developer is the **gameplay-logic l
 │                                                                    │
 │  1 Component definition  2 System impl       3 Callbacks (det.)    │
 │  [KlothoComponent(N)]    ISystem.Update()    ISimulationCallbacks  │
-│  partial struct MyComp   ICommandSystem       · RegisterSystems    │
-│                          IInitSystem          · OnInitializeWorld  │
-│                                               · OnPollInput        │
+│  [StructLayout] partial  ICommandSystem       · RegisterSystems    │
+│  [KlothoCleanup] opt.    IInitSystem          · OnInitializeWorld  │
+│  MaxCount = N   opt.     ISignalOnComponent*  · OnPollInput        │
 │                                                                    │
 │  4 Command definition    5 Event definition  6 View callbacks      │
 │  CommandBase subclass    SimulationEvent     IViewCallbacks        │
@@ -46,6 +46,7 @@ Use IDs of 100 or above to avoid colliding with the built-in component-ID range 
 
 ```csharp
 [KlothoComponent(100)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]   // REQUIRED — omitting it is a compile error
 public partial struct HeroComponent : IComponent
 {
     public int Level;
@@ -53,6 +54,32 @@ public partial struct HeroComponent : IComponent
     public int ClassId;
 }
 ```
+
+Three things the compiler enforces: the `[StructLayout]` above (`KLOTHO_STRUCT_LAYOUT_MISSING`, error — two
+runtimes must agree on the byte layout), `partial`, and `unmanaged` float-free fields (`FP64` / integer / bool /
+fixed buffers; `FixedString32`/`64` for text). One thing it cannot: **never renumber a shipped id** — it is what
+the state hash walks and what the layout fingerprint folds, so changing one breaks every peer at once.
+
+Two optional attributes are worth knowing before you write your first cleanup system:
+
+```csharp
+// A one-tick marker: the engine empties the storage at the end of every tick, so there is no
+// cleanup system to write — and no mutate-during-iteration trap to fall into.
+[KlothoComponent(101)]
+[KlothoCleanup(CleanupMode.RemoveComponent)]      // or CleanupMode.DestroyEntity for the carrier
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public partial struct HitMarkComponent : IComponent { public int Damage; }
+
+// A slot cap: reserve 32 slots instead of one per entity. Exceeding it throws rather than growing.
+[KlothoComponent(102, MaxCount = 32)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public partial struct DeadComponent : IComponent { public int DiedOnTick; }
+```
+
+Both are **determinism inputs** — they change the frame-heap layout, so every peer must agree and both are
+folded into the layout fingerprint compared before the first tick (Step 4). Full rules:
+[ECS.md §3](ECS.md#3-defining-a-component); sizing `MaxCount` against measurement:
+[ECSMemoryOptimization.md](ECSMemoryOptimization.md).
 
 ### Step 2: Define Commands
 
@@ -101,6 +128,15 @@ Callbacks are split into two interfaces.
 
 `RegisterSystems` is called immediately after `EcsSimulation` construction and before `KlothoEngine.Initialize()`. Construct `EventSystem` without arguments; it references `frame.EventRaiser` directly each tick.
 
+Ordering is phase first, then registration order within a phase — that is the whole model, and it is a design
+decision rather than a detail (a combat system registered after movement resolves hits against the positions
+movement already wrote this tick). The optional third `AddSystem` argument is a **perf-report label only**:
+`sim.AddSystem(new CombatSystem(events), SystemPhase.Update, group: "combat")` groups the row in the
+per-system report and affects nothing else — not execution order, not the frame, not the hash, not the layout
+fingerprint. Read the report with `sim.EnableSystemPerfMonitor(warmupExecutions: 4)` and
+`sim.AppendSystemPerfLog()`; it is off by default and hard-gated, so an unlabelled, unmonitored game pays
+nothing.
+
 ```csharp
 public class MySimulationCallbacks : ISimulationCallbacks
 {
@@ -143,26 +179,34 @@ public class MyViewCallbacks : IViewCallbacks
 }
 
 // Construct a KlothoSessionFlow once during startup and reuse it for every mode.
-// KlothoFlowSetup carries the long-lived dependencies — entry methods only take per-call params.
-_flow = new KlothoSessionFlow(new KlothoFlowSetup
-{
-    Logger            = logger,
-    Transport         = transport,
-    AssetRegistry     = dataAssetRegistry,
-    CredentialsStore  = credentialsStore,         // optional — warm-reconnect ticket persistence
-    AppVersion        = Application.version,        // Godot: ProjectSettings.GetSetting("application/config/version") or a literal
-    DeviceIdProvider  = new UnityDeviceIdProvider(), // Godot: new GodotDeviceIdProvider() (OS.GetUniqueId()); or use .WithGodotDefaults() on the builder (recommended)
-    LifecycleObserver = this,                     // bulk-subscribed IKlothoSessionObserver
-    CallbacksFactory  = (simCfg, sessionCfg) =>
-        new SessionCallbacks(new MySimulationCallbacks(), new MyViewCallbacks()),
+// KlothoFlowSetupBuilder is the recommended way to assemble the setup: the one dependency every
+// game must supply (CallbacksFactory) is a constructor argument, so a missing factory is a compile
+// error rather than a null at first join, and Build() validates feature coherence.
+var setup = new KlothoFlowSetupBuilder(
+        (simCfg, sessionCfg) => new SessionCallbacks(new MySimulationCallbacks(), new MyViewCallbacks()))
+    .WithLogger(logger)
+    .WithTransport(transport)                  // host / replay default transport
+    .WithAssetRegistry(dataAssetRegistry)
+    .WithLifecycleObserver(this)               // bulk-subscribed IKlothoSessionObserver
+    .WithUnityDefaults()                       // AppVersion + UnityDeviceIdProvider
+                                               // Godot: .WithGodotDefaults()
+    .WithReconnect(credentialsStore)           // optional — needs WithUnityDefaults / WithHandshake
+    .WithAutoPlayerConfig(() => new MyPlayerConfig { /* ... */ })   // optional: auto SendPlayerConfig
+                                               // on guest / reconnect; run per session, so it always
+                                               // observes the latest user selection
+    .WithSpectator(() => new LiteNetLibTransport(logger, connectionKey: ConnectionKey))  // optional
+    .WithReplaySave(replayPath, dumpJson: true)                     // optional
+    .Build();                                  // Build(strict: true) promotes advisories to throws
 
-    // Auto-send PlayerConfig on guest / reconnect paths (skipped on spectator / replay).
-    // The factory runs per-session so it always observes the latest user selection.
-    InitialPlayerConfigFactory = () => new MyPlayerConfig { /* ... */ },
+_flow = new KlothoSessionFlow(setup);
+```
 
-    // Spectator transport — library calls this from `SpectateAsync(host, port, roomId, ct)`.
-    SpectatorTransportFactory  = () => new LiteNetLibTransport(logger, connectionKey: ConnectionKey),
-});
+`Build()` throws `FlowSetupValidationException` when `WithReconnect` is set without handshake identity —
+reconnect credentials are minted by a prior normal join, which needs that identity. Building
+`KlothoFlowSetup` directly with an object initializer still works and is the escape hatch for custom
+validation or tests.
+
+```csharp
 
 // Session creation + state changes arrive through IKlothoSessionObserver
 // (KlothoFlowSetup.LifecycleObserver = this) — one callback set for all modes, no per-frame polling.
@@ -195,6 +239,34 @@ FaultInjectionRuntime.AttachToSession(_session, transport, logger, /* roleLabel 
 ```
 
 > **Escape hatch — `KlothoSession.Create(KlothoSessionSetup)`**: the direct factory is still available for games whose architecture does not fit the Flow pattern (custom retry orchestration, multi-session test harnesses, etc.). The Flow is a recommended thin wrapper, not a wall.
+
+#### The first thing that will refuse your join: a build mismatch
+
+Before the first tick, peers compare two **setup fingerprints** carried on the ready message. The one you will
+hit while developing is the **layout** fingerprint — it folds the registered component-type set, each type's
+`MaxCount`, and each type's `[KlothoCleanup]` mode (Step 1). All three are state-hash input, so peers that
+disagree would diverge from tick 0; the side holding transport control refuses with
+`JoinFailReason.LayoutMismatch` and a peer without it leaves via `AbortReason.LayoutMismatch`.
+
+The classic trigger is not a code change at all: **a Unity Editor session registers components from
+Editor-only test assemblies, and the player build or dedicated server does not.** The refusal message names the
+two sanctioned fixes — load the same assembly set on both sides, or prune the difference via
+`ISimulationConfig.SetRuntimePrunedComponentTypeIds` (an *authority-side* action, because the prune set is
+host/server authoritative and propagated over the wire). When the type *counts* match, the difference is
+component metadata rather than the type set, and the message says so by printing `cleanup=` next to `types=`.
+
+To keep iterating while you sort it out, set the per-peer dev gate — and never in a shipping build:
+
+```csharp
+// KlothoSessionSetup / SpectatorSessionSetup, default false. It lives on the setup and not in
+// ISimulationConfig on purpose: a guest runs the config it received over the wire, so a config-borne
+// flag would read its default on exactly the peer that needs it off.
+setup.AllowLayoutMismatch = true;   // downgrades the refusal to a log
+```
+
+The second fingerprint is the **environment** one (static colliders / navmesh / your own slot). It is outside
+the state hash, so a difference is only a warning, and it is compared only before the match runs — runtime
+navmesh rebakes move it legitimately.
 
 #### NetworkService handle (opt-in)
 
@@ -332,48 +404,46 @@ The decision API (`TryGetBindBehaviour` / `GetViewFlags`) and the view lifecycle
 **Unity:**
 
 ```csharp
-// 1. Factory subclass — author as a ScriptableObject and assign to the scene's EntityViewUpdater
+// 1. Factory subclass — author as a ScriptableObject and assign to the scene's EntityViewUpdater.
+//    TWO abstract members are all a normal game implements. The framework's TryGetBindBehaviour /
+//    GetViewFlags / CreateAsync / Destroy defaults already handle the rest.
 [CreateAssetMenu(menuName = "MyGame/HeroViewFactory", fileName = "HeroViewFactory")]
 public class HeroViewFactory : EntityViewFactory
 {
     [SerializeField] private GameObject _heroPrefab;
 
-    // Decide whether this entity is rendered as a view and which BindBehaviour to bind under.
-    // (false → spawn skipped). Engine queries are allowed only inside this method
-    // (and GetViewFlags / CreateAsync).
-    public override bool TryGetBindBehaviour(Frame frame, EntityRef entity, out BindBehaviour behaviour)
-    {
-        if (!frame.Has<HeroComponent>(entity)) { behaviour = BindBehaviour.Verified; return false; }
+    // Which entities get a view at all. Called per entity on every Reconcile pass — keep it cheap.
+    protected override bool ShouldRender(Frame frame, EntityRef entity)
+        => frame.Has<HeroComponent>(entity);
 
-        bool isLocal = frame.Has<OwnerComponent>(entity)
-                    && frame.GetReadOnly<OwnerComponent>(entity).OwnerId == Engine.LocalPlayerId;
-        // Local: predicted (NonVerified) / Remote: verified — trades responsiveness vs. accuracy
-        behaviour = isLocal ? BindBehaviour.NonVerified : BindBehaviour.Verified;
-        return true;
-    }
+    // Which prefab. Branch on component type when one factory serves several kinds of entity;
+    // return null to skip the spawn.
+    protected override GameObject ResolvePrefab(Frame frame, EntityRef entity)
+        => _heroPrefab;
 
-    // View options such as snapshot-interpolation on/off — local is immediate, remote is interpolated
-    public override ViewFlags GetViewFlags(Frame frame, EntityRef entity)
-    {
-        bool isLocal = frame.Has<OwnerComponent>(entity)
-                    && frame.GetReadOnly<OwnerComponent>(entity).OwnerId == Engine.LocalPlayerId;
-        return isLocal ? ViewFlags.None : ViewFlags.EnableSnapshotInterpolation;
-    }
-
-    // Prefab instantiation — Rent if a Pool is present, otherwise Instantiate directly
-    public override async UniTask<EntityView> CreateAsync(
-        Frame frame, EntityRef entity, BindBehaviour behaviour, ViewFlags flags)
-    {
-        if (Pool != null) return await Pool.Rent(_heroPrefab);
-
-        var go   = Object.Instantiate(_heroPrefab);
-        return go.GetComponent<EntityView>();
-    }
-
-    // Override if needed (default: Object.Destroy; auto-Return when a Pool is present)
-    // public override void Destroy(EntityView view) { ... }
+    // Nothing else is required. The base CreateAsync instantiates ResolvePrefab's result
+    // (Pool.Rent when a Pool is wired, Object.Instantiate otherwise), and the base Destroy
+    // returns to the Pool or destroys.
 }
+```
 
+**Override the decision methods only when the default is wrong for your game.** The base
+`TryGetBindBehaviour` resolves `BindBehaviour` from a 5-input matrix — mode, `IsServer`, `IsReplayMode`,
+`IsSpectatorMode`, and `OwnerId == LocalPlayerId` — and the base `GetViewFlags` turns snapshot interpolation
+on for the verified path and off for the predicted one. Hand-rolling `isLocal ? NonVerified : Verified` looks
+equivalent but silently drops the SD-client / spectator / replay cases the default gets right:
+
+```csharp
+// Inside the factory — only if you genuinely need different behaviour. Engine queries
+// (Engine.LocalPlayerId, IsServer, …) are valid inside TryGetBindBehaviour / GetViewFlags /
+// CreateAsync, and nowhere earlier — not in the constructor, not in OnEnable.
+public override ViewFlags GetViewFlags(Frame frame, EntityRef entity)
+    => frame.Has<GhostComponent>(entity)
+        ? ViewFlags.None                            // this one entity must never interpolate
+        : base.GetViewFlags(frame, entity);         // everything else keeps the default
+```
+
+```csharp
 // 2. Attach an EntityView subclass to the prefab — the Updater injects EntityRef/Engine and drives the lifecycle
 public class HeroView : EntityView
 {
@@ -462,4 +532,4 @@ The transform pipeline, Reconcile timing, hybrid dedup, and pooling (`DefaultGod
 
 ---
 
-Last updated: 2026-06-18 — IReliableCommand reliable command channel
+Last updated: 2026-08-23 — `[StructLayout]` / `MaxCount` / `[KlothoCleanup]` in Step 1, `KlothoFlowSetupBuilder` + the layout-fingerprint refusal in Step 4, and the Unity view-factory example corrected to the two abstract members it actually requires

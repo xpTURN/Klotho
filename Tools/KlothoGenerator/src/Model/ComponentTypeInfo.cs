@@ -11,6 +11,10 @@ namespace xpTURN.Klotho.Generator.Model
         public bool IsSingleton { get; set; }
         public bool IsCore { get; set; }
         public int MaxCount { get; set; }
+
+        /// <summary>[KlothoCleanup] mode as the enum MEMBER NAME (e.g. "RemoveComponent"), or null
+        /// when unmarked. A name, not an int, because the emitted registrar has to read as source.</summary>
+        public string Cleanup { get; set; }
         public List<ComponentFieldInfo> Fields { get; set; } = new List<ComponentFieldInfo>();
     }
 

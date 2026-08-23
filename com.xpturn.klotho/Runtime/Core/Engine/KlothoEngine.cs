@@ -1066,6 +1066,7 @@ namespace xpTURN.Klotho.Core
             // assemblies contribute components a player build does not have.
             _logger?.KInformation(
                 $"[KlothoEngine][Registry] boot: types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount} " +
+                $"cleanup={xpTURN.Klotho.ECS.ComponentStorageRegistry.CleanupTypeCount} " +
                 $"fp=0x{xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint:X16}");
 
             SaveSnapshot(0);

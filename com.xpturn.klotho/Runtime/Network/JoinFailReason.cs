@@ -49,6 +49,11 @@ namespace xpTURN.Klotho.Network
         IdentityRequired         = 16,
         /// <summary>Identity rejected: validation timed out or errored.</summary>
         IdentityValidationFailed = 17,
+
+        // Setup validation rejection. The peers' registered component-type sets differ, which is
+        // state-hash input — they would diverge from tick 0, so the authority refuses before the match.
+        /// <summary>Rejected: component-registry layout (registered type set) differs from the authority's.</summary>
+        LayoutMismatch           = 18,
     }
 
     public static class JoinFailReasonExtensions
@@ -86,6 +91,7 @@ namespace xpTURN.Klotho.Network
             (JoinFailReason.IdentityRejected,         9),
             (JoinFailReason.IdentityRequired,         10),
             (JoinFailReason.IdentityValidationFailed, 11),
+            (JoinFailReason.LayoutMismatch,           12),
         };
 
         /// <summary>

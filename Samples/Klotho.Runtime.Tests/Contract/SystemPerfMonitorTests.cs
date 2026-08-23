@@ -90,7 +90,11 @@ namespace xpTURN.Klotho.Core.Tests
             Assert.AreEqual(new[] { "A" }, log.ToArray()); // default path executed the system
         }
 
-        // ── T2: UpdateCount == #executions, count == M + builtin ──────
+        // Builtin perf slots: SavePrevTransforms + the two [KlothoCleanup] passes. Bound unconditionally
+        // (the indices are fixed consts), so every expected Stats length below is systems + this.
+        private const int BuiltinSlots = 3;
+
+        // ── T2: UpdateCount == #executions, count == M + builtins ─────
 
         [Test]
         public void On_UpdateCountEqualsExecutions_IncludesBuiltin()
@@ -105,7 +109,7 @@ namespace xpTURN.Klotho.Core.Tests
             for (int i = 0; i < K; i++) runner.RunUpdateSystems(ref frame);
 
             var m = runner.PerfMonitor;
-            Assert.AreEqual(3, m.Stats.Length);   // 2 systems + builtin
+            Assert.AreEqual(2 + BuiltinSlots, m.Stats.Length);
             foreach (var s in m.Stats)
                 Assert.AreEqual(K, s.UpdateCount);
         }
@@ -123,9 +127,13 @@ namespace xpTURN.Klotho.Core.Tests
             runner.RunUpdateSystems(ref frame);
 
             var m = runner.PerfMonitor;
-            Assert.AreEqual(2, m.Stats.Length);
+            Assert.AreEqual(1 + BuiltinSlots, m.Stats.Length);
             Assert.AreEqual("(builtin) SavePrevTransforms", m.Stats[0].Name);   // BuiltinPrevXformIndex
-            Assert.AreEqual(nameof(NoOpSystem), m.Stats[1].Name);               // FirstSystemPerfIndex
+            Assert.AreEqual("(builtin) CleanupClear", m.Stats[1].Name);         // BuiltinCleanupClearIndex
+            Assert.AreEqual("(builtin) CleanupDestroy", m.Stats[2].Name);       // BuiltinCleanupDestroyIndex
+            // The system list starts right after the builtins — this is the alignment that a
+            // mis-adjusted FirstSystemPerfIndex would shift.
+            Assert.AreEqual(nameof(NoOpSystem), m.Stats[BuiltinSlots].Name);    // FirstSystemPerfIndex
         }
 
         // ── T3: determinism — off/on final hash bit-identical ─────────
@@ -224,25 +232,29 @@ namespace xpTURN.Klotho.Core.Tests
 
             var frame = NewFrame();
             for (int i = 0; i < 3; i++) runner.RunUpdateSystems(ref frame);
-            Assert.AreEqual(2, runner.PerfMonitor.Stats.Length);   // builtin + 1
+            Assert.AreEqual(1 + BuiltinSlots, runner.PerfMonitor.Stats.Length);
 
             runner.AddSystem(new AllocSystem(), SystemPhase.Update);   // marks _dirty -> rebind next tick
             runner.RunUpdateSystems(ref frame);
 
             var m = runner.PerfMonitor;
-            Assert.AreEqual(3, m.Stats.Length);                    // builtin + 2 after rebind
+            Assert.AreEqual(2 + BuiltinSlots, m.Stats.Length);     // 2 systems after rebind
             foreach (var s in m.Stats)
                 Assert.AreEqual(1, s.UpdateCount);                 // counters reset on rebind
         }
 
         // ── T7: steady-state (post-warmup) records allocate nothing ────
 
+        // Group labels ride along here rather than in a second probe: the "allocated bytes" delta of
+        // the FIRST such measurement in a process carries a one-time ~24B cost (JIT/statics settling),
+        // so a duplicate zero-alloc test would just hand that cost to whichever of the two runs first
+        // (NUnit orders alphabetically). One measurement, covering the labelled path too.
         [Test]
         public void SteadyState_RecordPathZeroAlloc()
         {
             var runner = new SystemRunner();
-            runner.AddSystem(new NoOpSystem(), SystemPhase.Update);
-            runner.AddSystem(new NoOpSystem(), SystemPhase.Update);
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "combat");
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "world");
             runner.EnablePerfMonitor();
 
             var frame = NewFrame();
@@ -276,6 +288,161 @@ namespace xpTURN.Klotho.Core.Tests
             XAssert.Contains("(builtin) SavePrevTransforms", text);
             XAssert.Contains(nameof(NoOpSystem), text);
             XAssert.Contains(nameof(AllocSystem), text);
+        }
+
+        // ── T11..T16: group labels (IMP102 Plan-SystemGroupLabel) ────
+
+        // The label reaches the report as its OWN field, not encoded into the display name: the name
+        // stays the type name so every existing name-based assertion keeps working.
+        [Test]
+        public void Group_Label_LandsInStatField_NameUnchanged()
+        {
+            var runner = new SystemRunner();
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "combat");
+            runner.EnablePerfMonitor();
+
+            var frame = NewFrame();
+            runner.RunUpdateSystems(ref frame);
+
+            var stat = StatByName(runner.PerfMonitor, nameof(NoOpSystem));
+            Assert.AreEqual("combat", stat.Group);
+            Assert.AreEqual(nameof(NoOpSystem), stat.Name, "the name must not carry the group");
+
+            // ...but the report PREPENDS it for display, which is what makes two systems sharing a
+            // short type name (engine + game both ship a CombatSystem) tellable apart.
+            XAssert.Contains("combat/" + nameof(NoOpSystem), runner.PerfMonitor.ToText());
+        }
+
+        // Same type name registered twice under different groups: the rows must be distinguishable.
+        [Test]
+        public void Group_DisambiguatesRowsWithTheSameTypeName()
+        {
+            var runner = new SystemRunner();
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "engine");
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "combat");
+            runner.EnablePerfMonitor();
+
+            var frame = NewFrame();
+            runner.RunUpdateSystems(ref frame);
+
+            string text = runner.PerfMonitor.ToText();
+            XAssert.Contains("engine/NoOpSystem", text);
+            XAssert.Contains("combat/NoOpSystem", text);
+        }
+
+        // Unlabelled registration is byte-identical to before: null/empty/whitespace all mean "none".
+        [Test]
+        public void Group_Unspecified_IsNull_AndReportUnchanged()
+        {
+            var runner = new SystemRunner();
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update);
+            runner.AddSystem(new AllocSystem(), SystemPhase.Update, group: "   ");
+            runner.EnablePerfMonitor();
+
+            var frame = NewFrame();
+            runner.RunUpdateSystems(ref frame);
+
+            Assert.IsNull(StatByName(runner.PerfMonitor, nameof(NoOpSystem)).Group);
+            Assert.IsNull(StatByName(runner.PerfMonitor, nameof(AllocSystem)).Group,
+                "whitespace-only is 'no label'");
+            // No group anywhere -> no totals section at all.
+            Assert.IsFalse(runner.PerfMonitor.ToText().Contains("group totals"));
+        }
+
+        // The label must never become a sort key: execution order is (Phase, registration order) only.
+        [Test]
+        public void Group_DoesNotReorderSystems()
+        {
+            var runner = new SystemRunner();
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "zzz");
+            runner.AddSystem(new AllocSystem(), SystemPhase.Update, group: "aaa");
+            runner.EnablePerfMonitor();
+
+            var frame = NewFrame();
+            runner.RunUpdateSystems(ref frame);
+
+            var stats = runner.PerfMonitor.Stats;
+            Assert.AreEqual("(builtin) SavePrevTransforms", stats[0].Name);   // builtin block first
+            Assert.AreEqual(nameof(NoOpSystem), stats[BuiltinSlots].Name,     // registration order kept
+                "labels must not reorder systems");
+            Assert.AreEqual(nameof(AllocSystem), stats[BuiltinSlots + 1].Name);
+        }
+
+        // Builtin passes keep their exact names but DO get the implicit "(builtin)" group, so every
+        // measured row belongs to some group and the totals add up to the report's own total.
+        [Test]
+        public void Group_BuiltinSlots_KeepNames_AndFormImplicitGroup()
+        {
+            var runner = new SystemRunner();
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "combat");
+            runner.EnablePerfMonitor();
+
+            var frame = NewFrame();
+            runner.RunUpdateSystems(ref frame);
+
+            var stats = runner.PerfMonitor.Stats;
+            Assert.AreEqual("(builtin) SavePrevTransforms", stats[0].Name);
+            Assert.AreEqual("(builtin)", stats[0].Group);
+
+            long total = 0, grouped = 0;
+            foreach (var st in stats)
+            {
+                if (st.UpdateCount == 0) continue;
+                total += st.SumTicks;
+                if (st.Group != null) grouped += st.SumTicks;
+            }
+            Assert.AreEqual(total, grouped, "every measured row must belong to a group");
+        }
+
+        // Two spellings are two groups — deliberate (nothing beyond trimming is validated), fixed here
+        // so it is not later "fixed" as a normalization bug.
+        [Test]
+        public void Group_SpellingVariants_AreDistinctGroups()
+        {
+            var runner = new SystemRunner();
+            runner.AddSystem(new NoOpSystem(), SystemPhase.Update, group: "combat");
+            runner.AddSystem(new AllocSystem(), SystemPhase.Update, group: " Combat ");
+            runner.EnablePerfMonitor();
+
+            var frame = NewFrame();
+            runner.RunUpdateSystems(ref frame);
+
+            Assert.AreEqual("combat", StatByName(runner.PerfMonitor, nameof(NoOpSystem)).Group);
+            Assert.AreEqual("Combat", StatByName(runner.PerfMonitor, nameof(AllocSystem)).Group,
+                "trimmed, but not case-folded");
+
+            string text = runner.PerfMonitor.ToText();
+            XAssert.Contains("= combat", text);
+            XAssert.Contains("= Combat", text);
+        }
+
+        // Totals fill additive columns only. peak/updates are per-system and are left blank rather than
+        // reporting a number that does not exist.
+        [Test]
+        public void Group_Totals_FillAdditiveColumnsOnly()
+        {
+            var runner = new SystemRunner();
+            runner.AddSystem(new AllocSystem(), SystemPhase.Update, group: "combat");
+            runner.AddSystem(new AllocSystem(), SystemPhase.Update, group: "combat");
+            runner.EnablePerfMonitor();
+
+            var frame = NewFrame();
+            for (int i = 0; i < 5; i++) runner.RunUpdateSystems(ref frame);
+
+            string text = runner.PerfMonitor.ToText();
+            string totals = null;
+            foreach (var line in text.Split('\n'))
+                if (line.StartsWith("= combat")) totals = line;
+            Assert.IsNotNull(totals, "a totals row for 'combat' must exist");
+
+            // sum mem is additive -> equals the sum of the two systems' steady memory.
+            long expected = 0;
+            foreach (var st in runner.PerfMonitor.Stats)
+                if (st.Group == "combat") expected += st.SumMemory;
+            XAssert.Contains(expected.ToString(), totals);
+
+            // The caveat line has to be there: these totals are not the whole tick.
+            XAssert.Contains("not the whole tick", text);
         }
 
         // ── T10: warmup segregation — early allocation folds into Warmup*, not steady Sum* ──

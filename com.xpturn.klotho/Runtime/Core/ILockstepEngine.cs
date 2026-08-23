@@ -106,6 +106,8 @@ namespace xpTURN.Klotho.Core
         StateDivergence,
         /// <summary>Reconnect attempt exhausted retries or timed out.</summary>
         ReconnectFailed,
+        /// <summary>Setup validation: the authority's component-registry layout differs from this peer's.</summary>
+        LayoutMismatch,
     }
 
     /// <summary>

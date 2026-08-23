@@ -1,5 +1,6 @@
 using System;
 using System.Text;
+using xpTURN.Klotho.Core;
 
 namespace xpTURN.Klotho.ECS
 {
@@ -23,6 +24,10 @@ namespace xpTURN.Klotho.ECS
         }
     }
 
+    // [Primitive] is read only by the editor inspector: without it the window recurses into the
+    // public fields and shows "Bytes (fixed, no reader registered)" + Length instead of calling
+    // ToString(). It has no effect on serialization, hashing, or the wire.
+    [Primitive]
     public unsafe struct FixedString32 : IEquatable<FixedString32>
     {
         public fixed byte Bytes[30];
@@ -84,6 +89,10 @@ namespace xpTURN.Klotho.ECS
         public static bool operator !=(FixedString32 left, FixedString32 right) => !left.Equals(right);
     }
 
+    // [Primitive] is read only by the editor inspector: without it the window recurses into the
+    // public fields and shows "Bytes (fixed, no reader registered)" + Length instead of calling
+    // ToString(). It has no effect on serialization, hashing, or the wire.
+    [Primitive]
     public unsafe struct FixedString64 : IEquatable<FixedString64>
     {
         public fixed byte Bytes[62];

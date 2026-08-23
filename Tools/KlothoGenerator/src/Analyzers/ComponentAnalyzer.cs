@@ -24,6 +24,7 @@ namespace xpTURN.Klotho.Generator.Analyzers
         private const string StructLayoutAttribute = "System.Runtime.InteropServices.StructLayoutAttribute";
         private const string KlothoSingletonComponentAttribute = "xpTURN.Klotho.ECS.KlothoSingletonComponentAttribute";
         private const string KlothoCoreComponentAttribute = "xpTURN.Klotho.ECS.KlothoCoreComponentAttribute";
+        private const string KlothoCleanupAttribute = "xpTURN.Klotho.ECS.KlothoCleanupAttribute";
         private const string IntPtrType = "System.IntPtr";
         private const string UIntPtrType = "System.UIntPtr";
         private const string BoolType = "System.Boolean";
@@ -100,6 +101,57 @@ namespace xpTURN.Klotho.Generator.Analyzers
                 }
             }
 
+            // [KlothoCleanup(mode)] — a constructor argument, not a named one, so the TypedConstant
+            // comes from ConstructorArguments. Its Value is the enum's UNDERLYING integer, so the
+            // MaxCount `is int` pattern would not match: convert, then map back to the member name
+            // (same shape as TypeAnalyzer's MessageTypeId handling).
+            string cleanup = null;
+            foreach (var a in symbol.GetAttributes())
+            {
+                if (a.AttributeClass?.ToDisplayString() != KlothoCleanupAttribute) continue;
+                if (a.ConstructorArguments.Length == 0) break;
+
+                var tc = a.ConstructorArguments[0];
+                if (tc.Type is INamedTypeSymbol enumType && tc.Value != null)
+                {
+                    var memberName = FindEnumMemberName(enumType, tc.Value);
+                    if (memberName == null)
+                    {
+                        // A cast-in value like (CleanupMode)7 would emit as a raw cast and the runtime
+                        // would ignore it: the attribute is present, nothing is cleaned up, no warning.
+                        result.Diagnostics.Add(Diagnostic.Create(
+                            DiagnosticDescriptors.UndefinedCleanupMode, location, symbol.Name));
+                    }
+                    else if (memberName != "None")
+                    {
+                        cleanup = memberName;
+                    }
+                }
+                break;
+            }
+
+            // A singleton carrier is created as a dedicated entity by the engine, but a game may put its
+            // own singleton on a shared entity — then a per-tick destroy takes the neighbours with it,
+            // and entity creation order is state-hash input.
+            if (isSingleton && cleanup == "DestroyEntity")
+            {
+                result.Diagnostics.Add(Diagnostic.Create(
+                    DiagnosticDescriptors.SingletonCleanupDestroyEntity,
+                    location,
+                    symbol.Name));
+            }
+
+            // Core components are engine-owned persistent state; a per-tick wipe breaks engine
+            // invariants. Warning, not error: reservation-pruning exemption (core) and lifetime
+            // (cleanup) are orthogonal axes, so a future "never pruned + one tick" type stays possible.
+            if (isCore && cleanup != null)
+            {
+                result.Diagnostics.Add(Diagnostic.Create(
+                    DiagnosticDescriptors.CleanupOnCoreComponent,
+                    location,
+                    symbol.Name));
+            }
+
             // A singleton forces slotCapacity 1, so MaxCount is ignored — warn on the conflicting write.
             if (isSingleton && maxCount > 0)
             {
@@ -118,6 +170,10 @@ namespace xpTURN.Klotho.Generator.Analyzers
                 IsSingleton = isSingleton,
                 IsCore = isCore,
                 MaxCount = isSingleton ? 0 : maxCount,
+                // NOT normalized the way MaxCount is above: a cleaned-up singleton is meaningful
+                // (RemoveComponent empties the carrier every tick), so zeroing it here would silently
+                // disable a supported combination.
+                Cleanup = cleanup,
             };
 
             // Collect fields + field-level cross-runtime checks
@@ -422,6 +478,19 @@ namespace xpTURN.Klotho.Generator.Analyzers
                     field.Name));
                 return;
             }
+        }
+
+        // Enum member name for a TypedConstant's underlying value, or null when the value is not a
+        // defined member. Mirrors TypeAnalyzer's private helper of the same name (kept local so the
+        // component pipeline does not depend on the message pipeline).
+        private static string FindEnumMemberName(INamedTypeSymbol enumType, object value)
+        {
+            foreach (var member in enumType.GetMembers())
+            {
+                if (member is IFieldSymbol fs && fs.HasConstantValue && fs.ConstantValue.Equals(value))
+                    return fs.Name;
+            }
+            return null;
         }
     }
 }

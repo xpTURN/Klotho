@@ -1463,6 +1463,22 @@ namespace xpTURN.Klotho.Network
         {
             _logger?.KInformation($"[ServerNetworkService] Player ready: playerId={msg.PlayerId}, isReady={msg.IsReady}, fromPeerId={fromPeerId}");
 
+            // Setup check first: the registered component-type set is state-hash input, so a client whose
+            // layout differs would diverge from tick 0. Refusing costs this client only — same shape as
+            // RoomManager refusing one room instead of throwing (the server lives).
+            var setupEngine = _engine as KlothoEngine;
+            if (setupEngine != null)
+            {
+                var verdict = setupEngine.CheckReadyFingerprints(
+                    msg.PlayerId, msg.LayoutFingerprint, msg.EnvironmentFingerprint,
+                    compareEnvironment: Phase < SessionPhase.Playing);
+                if (verdict == ReadyFingerprintVerdict.LayoutMismatch && !setupEngine.AllowLayoutMismatch)
+                {
+                    DisconnectWithReason(fromPeerId, JoinFailReason.LayoutMismatch.ToWireCode());
+                    return;
+                }
+            }
+
             var player = FindPlayerById(msg.PlayerId);
             if (player != null)
             {

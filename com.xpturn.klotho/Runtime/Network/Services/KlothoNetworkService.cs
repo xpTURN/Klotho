@@ -827,10 +827,15 @@ namespace xpTURN.Klotho.Network
                 return;
 
             // Broadcast ready state
+            var engineForFp = _engine as KlothoEngine;
             var msg = new PlayerReadyMessage
             {
                 PlayerId = LocalPlayerId,
-                IsReady = ready
+                IsReady = ready,
+                // Setup fingerprints ride the ready exchange: it is the one pre-first-tick message every
+                // peer sends, and the host relays it verbatim, so a cold-start P2P match compares full mesh.
+                LayoutFingerprint = engineForFp?.GetLocalLayoutFingerprint() ?? 0,
+                EnvironmentFingerprint = engineForFp?.GetLocalEnvironmentFingerprint() ?? 0,
             };
             BroadcastMessagePooled(msg, DeliveryMethod.Reliable);
 
@@ -1659,6 +1664,12 @@ namespace xpTURN.Klotho.Network
         {
             _logger?.KInformation($"[KlothoNetworkService][HandlePlayerReadyMessage] Player ready: playerId={msg.PlayerId}, isReady={msg.IsReady}, fromPeerId={fromPeerId}");
 
+            // Setup check before anything else: a layout difference means the registered component-type
+            // set differs, which is state-hash input — these peers cannot share a match. Environment is
+            // only comparable before the match runs (runtime rebakes move it), hence the phase gate.
+            if (fromPeerId != -1 && !HandleReadySetupFingerprints(msg, fromPeerId))
+                return;
+
             var player = FindPlayerById(msg.PlayerId);
             if (player != null)
             {
@@ -1847,6 +1858,33 @@ namespace xpTURN.Klotho.Network
 
         // Reject a peer by disconnecting with the reason carried on the disconnect packet. The client
         // reads it via the transport's last-disconnect payload alongside the disconnect notification.
+        /// <summary>
+        /// Ready-path setup comparison. Returns false when the sender must be dropped (and this peer has
+        /// the transport control to do it) so the caller stops processing that ready. A guest cannot drop
+        /// anyone, so it leaves the match itself — ignoring the mismatch would mean desyncing from tick 0.
+        /// </summary>
+        private bool HandleReadySetupFingerprints(PlayerReadyMessage msg, int fromPeerId)
+        {
+            var engine = _engine as KlothoEngine;
+            if (engine == null) return true;
+
+            var verdict = engine.CheckReadyFingerprints(
+                msg.PlayerId, msg.LayoutFingerprint, msg.EnvironmentFingerprint,
+                compareEnvironment: Phase < SessionPhase.Playing);
+
+            if (verdict != ReadyFingerprintVerdict.LayoutMismatch || engine.AllowLayoutMismatch)
+                return true;
+
+            if (IsHost)
+            {
+                DisconnectWithReason(fromPeerId, JoinFailReason.LayoutMismatch.ToWireCode());
+                return false;
+            }
+
+            engine.AbortMatch(AbortReason.LayoutMismatch);
+            return false;
+        }
+
         private void DisconnectWithReason(int peerId, byte reason)
         {
             _disconnectReasonBuf[0] = reason;

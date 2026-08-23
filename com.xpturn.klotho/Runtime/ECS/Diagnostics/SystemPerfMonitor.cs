@@ -25,6 +25,8 @@ namespace xpTURN.Klotho.ECS.Diagnostics
         public struct SystemPerfStat
         {
             public string Name;          // system type name, set once at bind
+            public string Group;         // registration-time group label, or null; DIAGNOSTIC ONLY —
+                                         // never a sort key and never folded into any fingerprint
             public long   UpdateCount;   // total executions (incl. warmup + predicted/resim ticks)
             public long   SumTicks;      // steady (post-warmup) accumulated Stopwatch ticks
             public long   MaxTicks;      // steady worst single-execution Stopwatch ticks (peak)
@@ -33,6 +35,9 @@ namespace xpTURN.Klotho.ECS.Diagnostics
             public long   WarmupTicks;   // Stopwatch ticks accumulated during the warmup window
             public long   WarmupMemory;  // allocation bytes accumulated during the warmup window
         }
+
+        // Must match SystemRunner's implicit label for the builtin passes.
+        internal const string BuiltinGroup = "(builtin)";
 
         private SystemPerfStat[] _stats = Array.Empty<SystemPerfStat>();
         private int _count;
@@ -52,12 +57,19 @@ namespace xpTURN.Klotho.ECS.Diagnostics
         // misalign old counters anyway, so reset is the safe (and documented) choice.
         // (A double EnablePerfMonitor also rebinds -> resets; this cannot happen in a session
         // since ArmSystemPerfMonitor runs from exactly one Initialize body.)
-        public void Bind(ReadOnlySpan<string> systemNames)
+        // <paramref name="groups"/> is a PARALLEL array (same length/order as systemNames), not an
+        // encoding inside the name: the group is kept as its own field so the summary rows below can
+        // aggregate without parsing display strings back apart. Passing default() = no groups.
+        public void Bind(ReadOnlySpan<string> systemNames, ReadOnlySpan<string> groups = default)
         {
             if (_stats.Length < systemNames.Length)
                 _stats = new SystemPerfStat[systemNames.Length];
             for (int i = 0; i < systemNames.Length; i++)
-                _stats[i] = new SystemPerfStat { Name = systemNames[i] };
+                _stats[i] = new SystemPerfStat
+                {
+                    Name = systemNames[i],
+                    Group = i < groups.Length ? groups[i] : null,
+                };
             _count = systemNames.Length;
         }
 
@@ -87,9 +99,18 @@ namespace xpTURN.Klotho.ECS.Diagnostics
             double tickToMs = 1000.0 / Stopwatch.Frequency;
             double tickToUs = 1_000_000.0 / Stopwatch.Frequency;
 
+            // Rows that never executed are omitted (see the report loop below), so they must not widen
+            // the name column either.
             int nameWidth = 6; // "system"
             for (int i = 0; i < _count; i++)
-                if (_stats[i].Name.Length > nameWidth) nameWidth = _stats[i].Name.Length;
+            {
+                if (_stats[i].UpdateCount == 0) continue;
+                int display = DisplayName(in _stats[i]).Length;
+                if (display > nameWidth) nameWidth = display;
+                // The summary rows below print "= <group>", so they can be the widest line.
+                int groupRow = (_stats[i].Group?.Length ?? 0) + 2;
+                if (groupRow > nameWidth) nameWidth = groupRow;
+            }
 
             var sb = new StringBuilder();
             if (_warmup > 0)
@@ -109,10 +130,15 @@ namespace xpTURN.Klotho.ECS.Diagnostics
             for (int i = 0; i < _count; i++)
             {
                 ref var s = ref _stats[i];
+                // Never executed -> nothing to report. Keeps the builtin [KlothoCleanup] slots (and any
+                // registered-but-never-run system) out of the report instead of printing zero rows: the
+                // slot indices are fixed consts, so they cannot be bound conditionally.
+                if (s.UpdateCount == 0) continue;
+
                 long warmupCount = s.UpdateCount < _warmup ? s.UpdateCount : _warmup;
                 long steady = s.UpdateCount - warmupCount;
                 double avgUs = steady > 0 ? (double)s.SumTicks / steady * tickToUs : 0.0;
-                sb.Append(s.Name.PadRight(nameWidth))
+                sb.Append(DisplayName(in s).PadRight(nameWidth))
                   .Append(s.UpdateCount.ToString().PadLeft(10))
                   .Append(avgUs.ToString("F2").PadLeft(11))
                   .Append((s.MaxTicks * tickToUs).ToString("F2").PadLeft(11))
@@ -122,7 +148,82 @@ namespace xpTURN.Klotho.ECS.Diagnostics
                   .Append(s.WarmupMemory.ToString().PadLeft(13))
                   .AppendLine();
             }
+
+            AppendGroupTotals(sb, nameWidth, tickToMs, tickToUs);
             return sb.ToString();
+        }
+
+        // Display name for a row: the group is PREPENDED for display only — the stat's Name field stays
+        // the bare type name so name-based lookups keep working. Two systems can share a short type name
+        // (the engine and a game both ship a CombatSystem), and without this the two rows would be
+        // indistinguishable. Builtin rows keep their exact names, and an unlabelled row is unchanged, so
+        // a report from a project that uses no labels is byte-identical to before.
+        private static string DisplayName(in SystemPerfStat s)
+            => s.Group == null || s.Group == BuiltinGroup ? s.Name : s.Group + "/" + s.Name;
+
+        // Group totals, appended AFTER the per-system rows so the body keeps execution order (that
+        // ordering is the point of the report — the rows are a pipeline, not a ranking).
+        //
+        // Only additive columns are filled. peak us / peak mem are left blank on purpose: each system's
+        // peak happened on its OWN tick, so neither max nor sum of them is "what this group cost in one
+        // tick", and per-tick group figures are not recoverable from these aggregates. updates is blank
+        // for the same reason (summing it would just report systems × ticks). avg us is recomputed from
+        // the group's steady sums rather than averaged from per-system averages.
+        //
+        // Caveat printed with the totals: command systems (ICommandSystem) are not measured at all —
+        // instrumentation lives inside RunUpdateSystems — so these totals are not the whole tick.
+        private void AppendGroupTotals(StringBuilder sb, int nameWidth, double tickToMs, double tickToUs)
+        {
+            // Emitted only when the GAME labelled something. The builtin passes carry an implicit
+            // group so that totals add up once they exist, but on their own they must not conjure a
+            // totals section into a report that had none — an unlabelled project's output stays
+            // byte-identical to before this feature.
+            bool anyGameGroup = false;
+            for (int i = 0; i < _count; i++)
+                if (_stats[i].UpdateCount > 0 && _stats[i].Group != null && _stats[i].Group != BuiltinGroup)
+                { anyGameGroup = true; break; }
+            if (!anyGameGroup) return;
+
+            sb.Append('-', nameWidth + 80).AppendLine();
+
+            // O(groups × rows), and groups are few; this runs once at dump.
+            for (int i = 0; i < _count; i++)
+            {
+                string group = _stats[i].Group;
+                if (group == null || _stats[i].UpdateCount == 0) continue;
+
+                bool firstOfGroup = true;
+                for (int j = 0; j < i; j++)
+                    if (_stats[j].UpdateCount > 0 && _stats[j].Group == group) { firstOfGroup = false; break; }
+                if (!firstOfGroup) continue;
+
+                long sumTicks = 0, sumMem = 0, warmupMem = 0, steadyTotal = 0;
+                for (int j = 0; j < _count; j++)
+                {
+                    ref var g = ref _stats[j];
+                    if (g.UpdateCount == 0 || g.Group != group) continue;
+                    long warmupCount = g.UpdateCount < _warmup ? g.UpdateCount : _warmup;
+                    steadyTotal += g.UpdateCount - warmupCount;
+                    sumTicks    += g.SumTicks;
+                    sumMem      += g.SumMemory;
+                    warmupMem   += g.WarmupMemory;
+                }
+
+                double avgUs = steadyTotal > 0 ? (double)sumTicks / steadyTotal * tickToUs : 0.0;
+                sb.Append(("= " + group).PadRight(nameWidth))
+                  .Append("".PadLeft(10))                                    // updates: not additive
+                  .Append(avgUs.ToString("F2").PadLeft(11))
+                  .Append("".PadLeft(11))                                    // peak us: not derivable
+                  .Append((sumTicks * tickToMs).ToString("F3").PadLeft(11))
+                  .Append("".PadLeft(12))                                    // peak mem: not derivable
+                  .Append(sumMem.ToString().PadLeft(12))
+                  .Append(warmupMem.ToString().PadLeft(13))
+                  .AppendLine();
+            }
+
+            sb.Append("(group totals: additive columns only — peak/updates are per-system and do not aggregate. ")
+              .Append("Command systems are not measured, so these totals are not the whole tick.)")
+              .AppendLine();
         }
     }
 }

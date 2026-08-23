@@ -184,6 +184,20 @@ namespace Brawler
             }
         }
 
+        // Perf-report group labels (IMP102). Short on purpose: the longest name sets the report's
+        // whole first column. "engine" marks systems the ENGINE owns that this game registers into
+        // its own pipeline. Constants because the report groups by EXACT string — "combat" and
+        // "Combat" would be two groups (only trimming is applied). Diagnostic only: these never
+        // affect execution order, which is phase + registration order.
+        static class Groups
+        {
+            public const string Engine   = "engine";
+            public const string Movement = "move";
+            public const string Combat   = "combat";
+            public const string World    = "world";
+            public const string Nav      = "nav";
+        }
+
         public static void RegisterSystems(EcsSimulation simulation, IKLogger logger,
                                            List<IDataAsset> dataAssets = null,
                                            List<FPStaticCollider> staticColliders = null,
@@ -239,38 +253,38 @@ namespace Brawler
                 // lets the engine discover it (GetSystem<FPNavMeshRebakeDriver>), which is the seam
                 // through which the engine — rather than every game repeating it — can wire the
                 // frame heartbeat and the invariant corrections.
-                simulation.AddSystem(navMeshPlacementSeam.Driver, SystemPhase.PreUpdate);
-                simulation.AddSystem(botFSMSystem, SystemPhase.PreUpdate);
+                simulation.AddSystem(navMeshPlacementSeam.Driver, SystemPhase.PreUpdate, group: Groups.Engine);
+                simulation.AddSystem(botFSMSystem, SystemPhase.PreUpdate, group: Groups.Nav);
             }
-            simulation.AddSystem(platformerCommandSystem, SystemPhase.PreUpdate);
+            simulation.AddSystem(platformerCommandSystem, SystemPhase.PreUpdate);   // ICommandSystem: not measured, so no label
 
             // Update — simulation systems
-            simulation.AddSystem(new ObstacleMovementSystem(events), SystemPhase.Update);
-            simulation.AddSystem(new TopdownMovementSystem(events), SystemPhase.Update);
-            simulation.AddSystem(new ActionLockSystem(), SystemPhase.Update);
-            simulation.AddSystem(new KnockbackSystem(events), SystemPhase.Update);
+            simulation.AddSystem(new ObstacleMovementSystem(events), SystemPhase.Update, group: Groups.World);
+            simulation.AddSystem(new TopdownMovementSystem(events), SystemPhase.Update, group: Groups.Movement);
+            simulation.AddSystem(new ActionLockSystem(), SystemPhase.Update, group: Groups.Combat);
+            simulation.AddSystem(new KnockbackSystem(events), SystemPhase.Update, group: Groups.Combat);
             var physicsSystem = new PhysicsSystem(256, FPVector3.Zero);
             physicsSystem.SetSkipStaticGroundResponse(true);
             if (staticColliders != null)
                 physicsSystem.LoadStaticColliders($"Stage{stageId}", staticColliders);
-            simulation.AddSystem(physicsSystem, SystemPhase.Update);
+            simulation.AddSystem(physicsSystem, SystemPhase.Update, group: Groups.Engine);
             platformerCommandSystem.SetRayCaster(physicsSystem);
             if (botFSMSystem != null)
                 botFSMSystem.SetRayCaster(physicsSystem);
-            simulation.AddSystem(new TrapTriggerSystem(physicsSystem, events), SystemPhase.Update);
-            simulation.AddSystem(new SkillCooldownSystem(events), SystemPhase.Update);
-            simulation.AddSystem(new BoundaryCheckSystem(events), SystemPhase.Update);
-            simulation.AddSystem(new ItemSpawnSystem(events), SystemPhase.Update);
-            simulation.AddSystem(new CombatSystem(events), SystemPhase.Update);
-            simulation.AddSystem(new RespawnSystem(events), SystemPhase.Update);
-            simulation.AddSystem(new TimerSystem(events), SystemPhase.Update);
+            simulation.AddSystem(new TrapTriggerSystem(physicsSystem, events), SystemPhase.Update, group: Groups.World);
+            simulation.AddSystem(new SkillCooldownSystem(events), SystemPhase.Update, group: Groups.Combat);
+            simulation.AddSystem(new BoundaryCheckSystem(events), SystemPhase.Update, group: Groups.World);
+            simulation.AddSystem(new ItemSpawnSystem(events), SystemPhase.Update, group: Groups.World);
+            simulation.AddSystem(new CombatSystem(events), SystemPhase.Update, group: Groups.Combat);
+            simulation.AddSystem(new RespawnSystem(events), SystemPhase.Update, group: Groups.Combat);
+            simulation.AddSystem(new TimerSystem(events), SystemPhase.Update, group: Groups.World);
 
             // PostUpdate — landing clamp, then game-over detection
-            simulation.AddSystem(new GroundClampSystem(physicsSystem), SystemPhase.PostUpdate);
-            simulation.AddSystem(new GameOverSystem(events, stageId), SystemPhase.PostUpdate);
+            simulation.AddSystem(new GroundClampSystem(physicsSystem), SystemPhase.PostUpdate, group: Groups.Movement);
+            simulation.AddSystem(new GameOverSystem(events, stageId), SystemPhase.PostUpdate, group: Groups.World);
 
             // LateUpdate — event dispatch
-            simulation.AddSystem(events, SystemPhase.LateUpdate);
+            simulation.AddSystem(events, SystemPhase.LateUpdate, group: Groups.Engine);
         }
 
         /// <summary>

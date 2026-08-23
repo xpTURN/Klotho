@@ -11,6 +11,14 @@ namespace xpTURN.Klotho.Core
         // ── Dependencies ──
 
         public IKLogger Logger { get; set; }
+
+        /// <summary>
+        /// Dev escape hatch: when true a Ready-path component-layout mismatch is logged but the peer is
+        /// not refused. Default false (refuse). Deliberately here and not in ISimulationConfig — a guest
+        /// runs the config it received over the wire, so a config-borne flag would always read its default
+        /// on the very peer that needs to turn the check off (an Editor session against a dedicated server).
+        /// </summary>
+        public bool AllowLayoutMismatch { get; set; }
         public ISimulationCallbacks SimulationCallbacks { get; set; }
         public IViewCallbacks ViewCallbacks { get; set; }
 

@@ -138,9 +138,11 @@ namespace xpTURN.Klotho.ECS
         /// <summary>
         /// Registers a system. Adds the desired system from outside to match the Phase.
         /// </summary>
-        public void AddSystem(object system, SystemPhase phase)
+        /// <param name="group">Optional perf-report group label (diagnostic only — see
+        /// <see cref="SystemRunner.AddSystem"/>). Does not affect execution order or determinism.</param>
+        public void AddSystem(object system, SystemPhase phase, string group = null)
         {
-            _systemRunner.AddSystem(system, phase);
+            _systemRunner.AddSystem(system, phase, group);
             if (system is ISnapshotParticipant sp)
                 _snapshotParticipants.Add(sp);
         }
@@ -189,6 +191,9 @@ namespace xpTURN.Klotho.ECS
             _frame.DeltaTimeMs = _deltaTimeMs;
             _frame.OnEntityCreated   = entity => _systemRunner.OnEntityCreated(ref _frame, entity);
             _frame.OnEntityDestroyed = entity => _systemRunner.OnEntityDestroyed(ref _frame, entity);
+            // Component signals: only the executing frame gets these (ring slots stay silent).
+            _frame.SignalSink  = _systemRunner;
+            _frame.SignalMasks = _systemRunner.SignalMasks;
             _systemRunner.Init(ref _frame);
         }
 

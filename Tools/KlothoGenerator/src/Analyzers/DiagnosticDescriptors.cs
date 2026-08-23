@@ -110,6 +110,30 @@ namespace xpTURN.Klotho.Generator.Analyzers
             DiagnosticSeverity.Warning,
             isEnabledByDefault: true);
 
+        public static readonly DiagnosticDescriptor CleanupOnCoreComponent = new DiagnosticDescriptor(
+            "KLSG_ECS007",
+            "Cleanup on core component",
+            "[KlothoCleanup] on '{0}': it is a [KlothoCoreComponent], and the engine's core components are persistent state (a per-tick wipe breaks invariants such as the RNG seed and match-end state)",
+            "KlothoGenerator.ECS",
+            DiagnosticSeverity.Warning,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor SingletonCleanupDestroyEntity = new DiagnosticDescriptor(
+            "KLSG_ECS008",
+            "DestroyEntity cleanup on singleton",
+            "[KlothoCleanup(CleanupMode.DestroyEntity)] on '{0}': it is a [KlothoSingletonComponent], and its carrier entity may hold other components — destroying it every tick would take them with it and expose slot reuse to the state hash. Use CleanupMode.RemoveComponent instead.",
+            "KlothoGenerator.ECS",
+            DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor UndefinedCleanupMode = new DiagnosticDescriptor(
+            "KLSG_ECS009",
+            "Undefined CleanupMode value",
+            "[KlothoCleanup] on '{0}': the argument is not a defined CleanupMode member, so the runtime would ignore it and the component would never be cleaned up",
+            "KlothoGenerator.ECS",
+            DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
         // --- StructLayout + cross-runtime guard rules ---
 
         public static readonly DiagnosticDescriptor KlothoStructLayoutMissing = new DiagnosticDescriptor(

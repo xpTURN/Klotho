@@ -236,6 +236,12 @@ namespace xpTURN.Klotho.Network
                     }
                     // 2. State restore + ResetToTick (must be called after StartSpectator so CurrentTick is not overwritten)
                     OnFullStateReceived?.Invoke(stateMsg.Tick, stateMsg.StateData, stateMsg.StateHash, FullStateKind.Unicast);
+                    // 2b. Static environment check — AFTER the apply, BEFORE the buffer drain below. The drain
+                    // executes further ticks, and a command inside them can rebake the navmesh, which would push
+                    // this peer's fingerprint past the snapshot the sender measured and report a mismatch that is
+                    // not one. Same ordering as the player paths (KlothoNetworkService.FullStateResync /
+                    // ServerDrivenClientService.HandleFullStateResponse).
+                    (_engine as KlothoEngine)?.CheckStaticGeometryFingerprint(stateMsg.StaticFingerprint);
                     // 3. Buffer drain: discard ticks <= snapshot tick, apply only later ticks
                     // Case A: catch-up arrived before FullStateResponse → buffer then drain
                     while (_pendingInputs.Count > 0)
@@ -459,6 +465,23 @@ namespace xpTURN.Klotho.Network
             {
                 _logger?.KWarning($"[SpectatorService][HandlePlayerReady] Ignored from non-host peerId={peerId}");
                 return;
+            }
+
+            // A spectator sends no ready of its own, but it RECEIVES every player's — so the relayed
+            // layout fingerprint is a free check on this spectator's own build. Environment is left to the
+            // FullState path (that one carries the combined fold and lands after the state is applied).
+            var setupEngine = _engine as KlothoEngine;
+            if (setupEngine != null)
+            {
+                var verdict = setupEngine.CheckReadyFingerprints(
+                    msg.PlayerId, msg.LayoutFingerprint, msg.EnvironmentFingerprint,
+                    compareEnvironment: false);
+                if (verdict == ReadyFingerprintVerdict.LayoutMismatch && !setupEngine.AllowLayoutMismatch)
+                {
+                    // No transport control over players — leave instead.
+                    setupEngine.AbortMatch(AbortReason.LayoutMismatch);
+                    return;
+                }
             }
 
             for (int i = 0; i < _players.Count; i++)

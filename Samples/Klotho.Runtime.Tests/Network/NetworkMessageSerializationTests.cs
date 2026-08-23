@@ -42,11 +42,19 @@ namespace xpTURN.Klotho.Network.Tests
         [Test]
         public void PlayerReadyMessage_RoundTrip_PreservesData()
         {
-            var original = new PlayerReadyMessage { PlayerId = 3, IsReady = true };
+            var original = new PlayerReadyMessage
+            {
+                PlayerId = 3,
+                IsReady = true,
+                LayoutFingerprint = 0x0102030405060708,
+                EnvironmentFingerprint = -1,   // full-width negative: catches a truncating write
+            };
             var restored = RoundTrip<PlayerReadyMessage>(original);
 
             Assert.AreEqual(original.PlayerId, restored.PlayerId);
             Assert.AreEqual(original.IsReady, restored.IsReady);
+            Assert.AreEqual(original.LayoutFingerprint, restored.LayoutFingerprint);
+            Assert.AreEqual(original.EnvironmentFingerprint, restored.EnvironmentFingerprint);
         }
 
         #endregion

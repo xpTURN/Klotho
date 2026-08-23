@@ -579,6 +579,7 @@ namespace xpTURN.Klotho.Core
 
             // 6. Create Engine: inject both SimulationConfig and SessionConfig
             var engine = new KlothoEngine(simConfig, sessionConfig);
+            engine.AllowLayoutMismatch = setup.AllowLayoutMismatch;   // per-peer, not wire-borne (see setup doc)
             if (setup.IsReplay)
                 engine.Initialize(simulation, setup.Logger, setup.SimulationCallbacks, setup.ViewCallbacks);
             else
@@ -769,6 +770,7 @@ namespace xpTURN.Klotho.Core
             simulation.LockAssetRegistry();
 
             var engine = new KlothoEngine(simCfg, sessionCfg);
+            engine.AllowLayoutMismatch = _pendingSetup.AllowLayoutMismatch;
             engine.Initialize(simulation, _logger);
             engine.SetCommandFactory(CommandFactory);
 

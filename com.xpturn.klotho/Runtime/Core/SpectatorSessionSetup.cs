@@ -31,6 +31,9 @@ namespace xpTURN.Klotho.Core
     public class SpectatorSessionSetup
     {
         public IKLogger Logger { get; set; }
+
+        /// <summary>Dev escape hatch — see KlothoSessionSetup.AllowLayoutMismatch.</summary>
+        public bool AllowLayoutMismatch { get; set; }
         public IDataAssetRegistry AssetRegistry { get; set; }
         public Network.INetworkTransport Transport { get; set; }
 

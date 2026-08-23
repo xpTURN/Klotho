@@ -22,6 +22,12 @@ namespace xpTURN.Klotho.ECS
         public Action<EntityRef> OnEntityCreated;
         public Action<EntityRef> OnEntityDestroyed;
 
+        // Component signals. Both are set together by EcsSimulation.Initialize on the live frame only;
+        // every other Frame instance (ring slots, the sync-test buffer) is a state container that never
+        // runs systems, keeps these null, and therefore fires nothing.
+        internal IComponentSignalSink SignalSink;
+        internal ComponentSignalMasks SignalMasks;
+
         public EntityManager Entities { get; private set; }
         public EntityPrototypeRegistry Prototypes { get; } = new EntityPrototypeRegistry();
         public IDataAssetRegistry AssetRegistry { get; private set; }
@@ -175,10 +181,43 @@ namespace xpTURN.Klotho.ECS
                     t.PreviousInitialized = true;
                 }
             }
+
+            // ISignalOnComponentAdded<T>. Fires after the insert, with a ref into the storage slot, so a
+            // listener can adjust what was just added — which is also why a listener must not add/remove
+            // components itself (a swap-back would move the slot this ref points at).
+            var masks = SignalMasks;
+            if (masks != null && masks.Any)
+            {
+                int typeId = ComponentStorageRegistry.TypeIdCache<T>.Id;
+                if ((uint)typeId < (uint)masks.Added.Length && masks.Added[typeId])
+                {
+                    var self = this;   // Frame is a class: `ref this` does not exist
+                    SignalSink.OnComponentAdded(ref self, entity, ref Get<T>(entity));
+                }
+            }
         }
 
         public void Remove<T>(EntityRef entity) where T : unmanaged, IComponent
-            => GetStorage<T>().Remove(entity.Index);
+        {
+            var storage = GetStorage<T>();
+
+            // ISignalOnComponentRemoved<T>. Fires before the removal and by value — after Remove the slot
+            // is gone (and swap-back may have overwritten it), so the listener could not read it.
+            var masks = SignalMasks;
+            if (masks != null && masks.Any)
+            {
+                int typeId = ComponentStorageRegistry.TypeIdCache<T>.Id;
+                if ((uint)typeId < (uint)masks.Removed.Length && masks.Removed[typeId]
+                    && storage.Has(entity.Index))
+                {
+                    T removed = storage.GetReadOnly(entity.Index);
+                    var self = this;   // Frame is a class: `ref this` does not exist
+                    SignalSink.OnComponentRemoved(ref self, entity, removed);
+                }
+            }
+
+            storage.Remove(entity.Index);
+        }
 
         // Forces PreviousPosition / PreviousRotation to sync with the current Position / Rotation
         // and marks PreviousInitialized=true. Use after caller-side ref-set of Position to suppress
@@ -219,8 +258,18 @@ namespace xpTURN.Klotho.ECS
 
         public void DestroyEntity(EntityRef entity)
         {
+            // Component-removed signals first, then the entity-destroyed one: "these components are
+            // going away" before "this entity is going away" is the order that reads correctly (and the
+            // one Entitas uses). Entities.Destroy stays last, so IsAlive is true throughout — but Has/Get
+            // are not: each component is removed right after its own OnRemoved, so a listener reads only
+            // higher typeIds and IEntityDestroyedSystem reads none.
+            //
+            // A throwing listener propagates and leaves the entity half-destroyed. That is accepted, not
+            // handled: nothing in the engine or the server catches a tick exception (the only catch is
+            // the one protecting OnFrameBoundary subscribers), so there is no execution left to observe
+            // the partial state. A listener that throws is a bug and the match ends there.
+            RemoveAllComponents(entity);
             OnEntityDestroyed?.Invoke(entity);
-            RemoveAllComponents(entity.Index);
             Entities.Destroy(entity);
         }
 
@@ -328,6 +377,89 @@ namespace xpTURN.Klotho.ECS
 
         // --- Hash (via dispatch, iterating typeId in ascending order) ---
 
+        // === [KlothoCleanup] tick-end passes (engine-internal; called from SystemRunner) ===
+
+        /// <summary>
+        /// Clears every CleanupMode.RemoveComponent storage. No iteration: each type is emptied through
+        /// its type-erased ClearDelegate (count=0 + sparse fill), so cost is O(sparse) per type and
+        /// there is no registration-order dependency (the typeId list is ascending).
+        /// </summary>
+        internal void RunCleanupClear()
+        {
+            var typeIds = ComponentStorageRegistry.CleanupClearTypeIds;
+            var masks = SignalMasks;
+            bool anyRemovedListener = masks != null && masks.Any;
+
+            for (int i = 0; i < typeIds.Length; i++)
+            {
+                int typeId = typeIds[i];
+                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+
+                // A listener on a one-tick component has to see it go, otherwise the most natural pairing
+                // in the engine ([KlothoCleanup] + a reaction to it) is the one that silently does
+                // nothing. The cost lands only on types someone listens to: those walk dense (O(n)) and
+                // must fire BEFORE the clear, because afterwards the values are gone. Every other type
+                // keeps the single clear-dispatch call and stays O(sparse).
+                if (anyRemovedListener
+                    && (uint)typeId < (uint)masks.Removed.Length && masks.Removed[typeId])
+                {
+                    var dispatch = ComponentStorageRegistry.GetRemovedSignalDispatch(typeId);
+                    if (dispatch != null)
+                    {
+                        var dense = MemoryMarshal.Cast<byte, int>(
+                            _heap.AsSpan(layout.DenseOffset, layout.SlotCapacity * 4));
+                        int liveCount = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
+
+                        for (int d = 0; d < liveCount; d++)
+                        {
+                            int entityIndex = dense[d];
+                            if (Entities.IsAlive(entityIndex))
+                                dispatch(this, new EntityRef(entityIndex, Entities.GetVersion(entityIndex)));
+                        }
+                    }
+                }
+
+                ComponentStorageRegistry.GetClearDispatch(typeId)(_heap, in layout);
+            }
+        }
+
+        /// <summary>
+        /// Destroys every entity carrying a CleanupMode.DestroyEntity component. Two passes over a
+        /// caller-owned buffer (no allocation): collect in dense order, then destroy. Collect-then-apply
+        /// is mandatory — destroying mid-scan swap-backs the dense array under the cursor.
+        /// </summary>
+        /// <remarks>
+        /// The IsAlive check is load-bearing, not defensive: one entity may carry two cleanup markers,
+        /// and Frame.DestroyEntity only guards at its third step, so a second call would re-fire
+        /// OnEntityDestroyed and re-run RemoveAllComponents.
+        /// </remarks>
+        internal void RunCleanupDestroy(EntityRef[] buffer)
+        {
+            var typeIds = ComponentStorageRegistry.CleanupDestroyTypeIds;
+            int count = 0;
+            for (int i = 0; i < typeIds.Length; i++)
+            {
+                int typeId = typeIds[i];
+                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                var dense = MemoryMarshal.Cast<byte, int>(
+                    _heap.AsSpan(layout.DenseOffset, layout.SlotCapacity * 4));
+                int liveCount = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
+
+                for (int d = 0; d < liveCount && count < buffer.Length; d++)
+                {
+                    int entityIndex = dense[d];
+                    if (Entities.IsAlive(entityIndex))
+                        buffer[count++] = new EntityRef(entityIndex, Entities.GetVersion(entityIndex));
+                }
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                if (Entities.IsAlive(buffer[i]))
+                    DestroyEntity(buffer[i]);
+            }
+        }
+
         public ulong CalculateHash() => CalculateHash(null);
 
         // Layered fold. Each component type is hashed from a fresh FNV seed so its per-type value is
@@ -414,6 +546,7 @@ namespace xpTURN.Klotho.ECS
             // No sparse re-initialization — source's sparse (-1 or valid) is duplicated via BlockCopy
             Buffer.BlockCopy(source._heap, 0, _heap, 0, _heapSize);   // single memcpy
             // Not copied: EventRaiser / OnEntityCreated / OnEntityDestroyed (delegates, not shared across ring slots)
+            //             SignalSink / SignalMasks (only the executing frame has them — see ISignal.cs)
             //             AssetRegistry / Prototypes (session-wide shared readonly references)
         }
 
@@ -441,14 +574,28 @@ namespace xpTURN.Klotho.ECS
 
         // Removes all components of a specific entity — for the DestroyEntity path.
         // Performs swap-back at the heap byte level regardless of type (no T generic required).
-        internal void RemoveAllComponents(int entityIndex)
+        internal void RemoveAllComponents(EntityRef entity)
         {
             var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var masks = SignalMasks;
+            bool anyRemovedListener = masks != null && masks.Any;
+
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
+
+                // ISignalOnComponentRemoved<T> for the types someone listens to. Before the removal,
+                // because the delegate reads the value out of the slot. The gate keeps this to one array
+                // read per registered type when no listener exists — the loop itself is not new cost,
+                // it already walked every registered type.
+                if (anyRemovedListener
+                    && (uint)typeId < (uint)masks.Removed.Length && masks.Removed[typeId])
+                {
+                    ComponentStorageRegistry.GetRemovedSignalDispatch(typeId)?.Invoke(this, entity);
+                }
+
                 ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
-                RemoveFromStorage(_heap, in layout, entityIndex);
+                RemoveFromStorage(_heap, in layout, entity.Index);
             }
         }
 

@@ -1,6 +1,8 @@
 # Game Developer API Overview
 
-> Related: [Workflow](GameDevWorkflow.md)
+> Related: [Cookbook.md](Cookbook.md) ("I want to X" → where to look) · [Workflow](GameDevWorkflow.md) (step-by-step) · [ECS.md](ECS.md) (the ECS in depth — components, filters, systems, rollback) · [ECSMemoryOptimization.md](ECSMemoryOptimization.md) (`MaxCount` and pruning) · [DesyncDiagnostics.md](DesyncDiagnostics.md) (when the hashes disagree)
+>
+> This page is the **API surface**: what to call, what it is called, and what the compiler enforces. For the reasoning behind the ECS design — why one heap, why filters pick the smallest storage, what rollback actually restores — read [ECS.md](ECS.md).
 
 ---
 
@@ -8,7 +10,8 @@
 
 ```csharp
 // A component authored by the game developer
-[KlothoComponent(100)]  // Unique ID — 1–99 reserved for the framework, 100+ for game developers
+[KlothoComponent(100)]                          // Unique ID — 1–99 reserved for the framework, 100+ for games
+[StructLayout(LayoutKind.Sequential, Pack = 4)] // REQUIRED — omitting it is a compile error
 public partial struct HeroComponent : IComponent
 {
     public int Level;
@@ -18,19 +21,64 @@ public partial struct HeroComponent : IComponent
 
 The source generator emits `Serialize` / `Deserialize` / `GetSerializedSize` / `GetHash` automatically. Duplicate IDs are caught at compile time.
 
+Three things the compiler enforces, so you find out at build time rather than at the first desync:
+
+- **`[StructLayout(LayoutKind.Sequential, Pack = 4)]` is mandatory** on every `[KlothoComponent]` struct (`KLOTHO_STRUCT_LAYOUT_MISSING`, error). The heap lays components out by their declared field order, and two runtimes must agree on it byte for byte.
+- **`partial`** — required so the generator can complete the type.
+- **`unmanaged`, float-free fields** — `FP64` / integer / bool / fixed buffers. No `float`, `double`, `string`, array, or reference. For text use `FixedString32` / `FixedString64`.
+
+And one thing it cannot enforce: **never renumber a shipped component id.** The id is what the state hash walks in ascending order and what the layout fingerprint folds, so changing one is a hash-and-wire break for every peer. Append new ids; never reshuffle.
+
+**Slot cap (`MaxCount`)** — by default a component type reserves one heap slot per entity (`maxEntities`). A type only a handful of entities ever carry does not need that, and a *large* component left at full capacity is where frame memory usually goes:
+
+```csharp
+[KlothoComponent(104, MaxCount = 96)]           // 96 slots, not maxEntities slots
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public partial struct SkillCooldownComponent : IComponent { public int RemainingTicks; }
+```
+
+The effective count is `min(MaxCount, maxEntities)`, and adding one carrier past the cap **throws** rather than growing — size it for the worst case. It is a determinism input (every peer must agree), so it belongs in source, or in `ISimulationConfig.ComponentMaxCountOverrides` when you cannot touch the source. It is ignored on a singleton (`KLSG_ECS006`, warning). Measure before capping: [ECSMemoryOptimization.md](ECSMemoryOptimization.md).
+
+**One-tick components** — add `[KlothoCleanup(CleanupMode.RemoveComponent)]` (or `DestroyEntity`) and the engine disposes of the component (or its entity) at the end of every tick, so no cleanup system is needed:
+
+```csharp
+[KlothoComponent(101)]
+[KlothoCleanup(CleanupMode.RemoveComponent)]    // gone by the next tick
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public partial struct HitMarkComponent : IComponent { public int Damage; }
+```
+
+A component added in `Update` is visible to `PostUpdate`, `LateUpdate` and any `ISignalOnComponentAdded<T>` listener in the same tick, and gone on the next one. Like `MaxCount`, the mode is folded into the layout fingerprint, so two builds that disagree about it are refused before the first tick instead of desyncing from it. See [ECS.md §3](ECS.md#3-defining-a-component) for the full rules (a cleaned-up singleton must be read with `TryGetSingleton`; `DestroyEntity` on a singleton is a compile error).
+
+> You will also see **`[KlothoCoreComponent]`** on engine components. It marks a type as engine-essential so memory pruning can never drop it — you do not normally apply it to your own types, and it says nothing about lifetime (combining it with `[KlothoCleanup]` is a warning, `KLSG_ECS007`).
+
 ### Built-in Components
 
-| Component | Fields | Purpose |
+Two sets, and the difference matters: **engine components** are read or written by the engine itself, while
+**gameplay components** are optional reference implementations you can ignore entirely.
+
+**Engine components** (`Runtime/ECS/Components/`). All but `OwnerComponent` carry `[KlothoCoreComponent]`, so
+memory pruning can never drop them:
+
+| Component | Id | Fields | Purpose |
+|---|---|---|---|
+| `TransformComponent` | 1 | `Position`, `Rotation`, `Scale`, `PreviousPosition`, `PreviousRotation`, `PreviousInitialized`, `TeleportTick` | Position / rotation / scale + the view-interpolation prev-snapshot (see §4.1) |
+| `OwnerComponent` | 2 | `OwnerId` | Owning player. The usual key for "may this command touch this entity" |
+| `ErrorCorrectionTargetComponent` | 3 | *(marker)* | Marks an entity the engine may smooth toward a corrected state |
+| `SessionParticipantComponent` | 4 | `PlayerId` | Engine writes one per active player at `Start()`, as an all-participants-spawned gate |
+| `RandomSeedComponent` | 5 | `Seed` (ulong) | **Singleton.** Engine-injected at session start and restored via FullState on LateJoin / Reconnect / Spectator / Replay. Read `frame.GetReadOnlySingleton<RandomSeedComponent>().Seed` and combine with `DeterministicRandom.FromSeed(seed, featureKey, frame.Tick)` for rollback-stable RNG streams |
+| `MatchEndStateComponent` | 26 | `Ended`, `WinnerPlayerId` (`-1` = draw) | **Singleton.** Match-end bookkeeping the engine reads for the end-of-match ladder |
+
+**Optional gameplay components** (`Runtime/Gameplay/Components/`) — plain components with no engine privileges:
+
+| Component | Id | Fields |
 |---|---|---|
-| `TransformComponent` | `Position`, `Rotation`, `Scale`, `PreviousPosition`, `PreviousRotation`, `PreviousInitialized`, `TeleportTick` | Position / rotation / scale + view-interpolation prev-snapshot (see §4.1) |
-| `VelocityComponent` | — | Velocity |
-| `MovementComponent` | `TargetPosition`, `IsMoving` | Movement control |
-| `HealthComponent` | `CurrentHealth`, `MaxHealth` | Health |
-| `CombatComponent` | `AttackDamage`, `AttackRange` | Combat |
-| `OwnerComponent` | `OwnerId` | Owner (player) |
-| `PhysicsBodyComponent` | — | Physics body |
-| `NavAgentComponent` | — | Navigation agent |
-| `RandomSeedComponent` | `Seed` (ulong) | **Singleton** (`[KlothoSingletonComponent]`). Engine-injected at session start (and restored via FullState on LateJoin / Reconnect / Spectator / Replay). Read via `frame.GetReadOnlySingleton<RandomSeedComponent>().Seed`; combine with `DeterministicRandom.FromSeed(seed, featureKey, frame.Tick)` to derive rollback-stable RNG streams |
+| `HealthComponent` | 21 | `MaxHealth`, `CurrentHealth` |
+| `VelocityComponent` | 22 | `Velocity` (`FPVector3`) |
+| `MovementComponent` | 23 | `MoveSpeed`, `TargetPosition`, `IsMoving` |
+| `CombatComponent` | 24 | `AttackDamage`, `AttackRange` |
+| `PhysicsBodyComponent` | 25 | `RigidBody`, `Collider`, `ColliderOffset` |
+| `NavAgentComponent` | 11 | Navigation agent — tuning (`Speed`, `Radius`, `StoppingDistance`, …), live state (`Position`, `Velocity`, `DesiredVelocity`), and a fixed `Corridor[128]`. Owned by the navigation module; see [Navigation.Rebake.md](Navigation.Rebake.md) |
 
 ### Singleton Components
 
@@ -38,7 +86,8 @@ Mark a component type with `[KlothoSingletonComponent]` to enforce one-carrier-p
 
 ```csharp
 [KlothoComponent(106)]
-[KlothoSingletonComponent]   // exactly one entity may carry this component
+[KlothoSingletonComponent]                      // exactly one entity may carry this component
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 public partial struct GameTimerStateComponent : IComponent
 {
     public int  StartTick;
@@ -60,16 +109,26 @@ public partial struct GameTimerStateComponent : IComponent
 
 | Interface | Invocation | Purpose |
 |---|---|---|
-| `ISystem` | Phase.Update / PostUpdate / LateUpdate | General per-tick logic |
-| `ICommandSystem` | Phase.PreUpdate (on command receipt) | Command handling |
+| `ISystem` | Any phase — PreUpdate / Update / PostUpdate / LateUpdate | General per-tick logic. Phases run in enum order; within one phase, registration order |
+| `ICommandSystem` | Per received command, ahead of every `Update` | Command handling |
 | `IInitSystem` | Once at simulation init | Initialization |
 | `IDestroySystem` | Once at simulation shutdown | Cleanup |
 | `ISyncEventSystem` | When a Verified tick is finalized | Sync-event emission |
 | `IEntityCreatedSystem` | Right after entity creation | React to creation |
-| `IEntityDestroyedSystem` | Right before entity destruction | React to destruction |
-| `ISignalOnComponentAdded<T>` | On component add | Component reactions |
-| `ISignalOnComponentRemoved<T>` | On component remove | Component reactions |
-| `ISignal` (custom) | When `SystemRunner.Signal<T>()` is called | System-to-system signaling |
+| `IEntityDestroyedSystem` | Right before entity destruction, **after every component has been removed** | React to destruction. `IsAlive` is still true, but `Has<T>`/`Get<T>` no longer work — use `ISignalOnComponentRemoved<T>` if you need the component values — [ECS.md](ECS.md) §6 |
+| `ISignalOnComponentAdded<T>` | On `Frame.Add<T>` — the only path that adds | Component reactions. Fires **after** the insert with a `ref` into the slot (you may adjust what was just added). Fires again on every resim, and must not add/remove components — [ECS.md](ECS.md#6-writing-systems) §6 |
+| `ISignalOnComponentRemoved<T>` | On `Frame.Remove<T>`, per component on `DestroyEntity`, and per carrying entity on a `[KlothoCleanup]` clear | Same rules. Fires **before** the removal and receives the value **by value** — read what you need from that value, not back out of the frame — [ECS.md](ECS.md#6-writing-systems) §6 |
+| `ISignal` (custom) | When `SystemRunner.Signal<T>()` is called | System-to-system broadcast. Unrelated to the two component signals above (they deliberately do not derive from `ISignal`), and its invoker allocates per call — see §8 |
+
+**Tick order.** Knowing this answers most "will my system see that component this tick or next" questions:
+
+1. `ICommandSystem.OnCommand` — once per received command.
+2. The built-in previous-transform pass (feeds view interpolation, §4.1).
+3. `ISystem.Update` for every system, in phase then registration order.
+4. The built-in `[KlothoCleanup]` passes — `RemoveComponent` storages emptied, then `DestroyEntity` carriers destroyed (§1). Skipped entirely when nothing declares the attribute.
+5. `Tick++`.
+
+The snapshot and the state hash are taken **after** all of that, so what rolls back and what peers compare is the post-cleanup state.
 
 ### Implementation Examples
 
@@ -109,6 +168,32 @@ public class SpawnCommandSystem : ICommandSystem
 ## 3. System Registration & Engine Integration API
 
 Callbacks are split into the **deterministic side (`ISimulationCallbacks`)** and the **client-view side (`IViewCallbacks`)**. Place deterministic code that must run identically on every peer (server, client, replay) in `ISimulationCallbacks`; place non-deterministic client logic such as UI, animation, and spawn commands in `IViewCallbacks`.
+
+**System registration** — `AddSystem(system, phase)` runs systems in phase order, and within a phase in
+registration order. The optional third argument is a **perf-report label only**:
+
+```csharp
+simulation.AddSystem(new KnockbackSystem(events), SystemPhase.Update, group: "combat");
+```
+
+It groups the system in the per-system perf report and does nothing else — no effect on execution order,
+state, hashing, or the layout fingerprint, so peers that label their systems differently still play together.
+It is ignored on registrations that do not implement `ISystem` (only those are measured), `"combat"` and
+`"Combat"` are two different groups since nothing beyond trimming is validated — keep labels in a `const` —
+and short labels read better because the longest name widens the report's whole first column.
+
+The report itself is opt-in and hard-gated: with it off, no `Stopwatch` or GC call happens at all.
+
+```csharp
+sim.EnableSystemPerfMonitor(warmupExecutions: 4);   // exclude first-call JIT from steady-state figures
+// ... run the match ...
+logger.KInformation(sim.AppendSystemPerfLog());     // per-system time + per-tick allocation, plus group totals
+```
+
+Rows print as `combat/KnockbackSystem`, group totals as a trailing `= combat` row, and only additive columns
+are filled in the totals (per-system peaks happened on different ticks, so neither their max nor their sum is
+"what this group cost in one tick"). Two caveats the report states itself: rows that never executed are
+omitted, and `ICommandSystem` work is not measured at all — so the totals are not the whole tick.
 
 ### ISimulationCallbacks — Deterministic Common
 
@@ -204,9 +289,26 @@ var setup = new KlothoSessionSetup
     AppVersion          = Application.version,        // Godot: ProjectSettings.GetSetting("application/config/version") or a literal
     DeviceIdProvider    = new UnityDeviceIdProvider(), // Godot: new GodotDeviceIdProvider()  (OS.GetUniqueId())
     LifecycleObserver   = this,              // implements IKlothoSessionObserver (see §3.1)
+    AllowLayoutMismatch = false,             // dev escape hatch — see "Build-mismatch check" below
 };
 var session = KlothoSession.Create(setup);
 ```
+
+> **Build-mismatch check before the first tick.** Peers exchange two setup fingerprints on the ready message.
+> A **layout** difference means the registered component-type set (or a `MaxCount` / `[KlothoCleanup]` mode)
+> differs — that is state-hash input, so those peers would diverge from tick 0: the side with transport control
+> (dedicated server, P2P host) refuses the peer with `JoinFailReason.LayoutMismatch`, and a peer without it
+> leaves via `AbortReason.LayoutMismatch`. An **environment** difference (static colliders, navmesh, your own
+> fingerprint slot) is outside the state hash, so it is only a warning, and only compared before the match runs.
+>
+> The error message names the two sanctioned fixes: load the same assembly set on both sides — the usual cause
+> is a Unity Editor session registering Editor-only test assembly components against a player or dedicated-server
+> build — or prune the difference via `ISimulationConfig.SetRuntimePrunedComponentTypeIds`, which is an
+> **authority-side** action because the prune set is host/server authoritative.
+> `KlothoSessionSetup.AllowLayoutMismatch = true` (also on `SpectatorSessionSetup`) downgrades the refusal to a
+> log for development. It lives on the setup rather than in `ISimulationConfig` on purpose: a guest runs the
+> config it received over the wire, so a config-borne flag would read its default on exactly the peer that needs
+> it off. Set it per peer, and never in a shipping build.
 
 `SessionConfig` carries the 16 host-decided session fields (`RandomSeed`, `MaxPlayers` / `MinPlayers` / `MaxSpectators`, late-join/reconnect policy & tuning, chain-stall watchdog, countdown, match-end grace). Author it once as a `USessionConfig` ScriptableObject and reuse across scenes — `KlothoSession.Create()` copies the values into an internal `SessionConfig` (so editor assets are never mutated, and `RandomSeed = 0` is auto-replaced by `Environment.TickCount` on host). Passing `null` falls back to the runtime default `new SessionConfig()` — convenient for tests and replay paths.
 
@@ -678,6 +780,20 @@ IKlothoEngine event callbacks (view layer)
     └── OnSyncedEvent(tick, event)       — fired only on Verified ticks (EventMode.Synced)
 ```
 
+> **Which mechanism for "react when X happens"?** Three options, and picking wrong is the most common
+> determinism mistake:
+>
+> | You want | Use | Why |
+> |---|---|---|
+> | To change frame state in reaction to a component appearing / disappearing | `ISignalOnComponentAdded/Removed<T>` (§2) | Re-runs with the tick, so it is reproduced exactly. |
+> | Something to happen in the **real world** exactly once — a sound, a hit spark, an analytics counter | An event (this section), or `ISyncEventSystem` for the confirmed-only channel | A client re-executes a tick many times; only the verified channel fires once. |
+> | To read game state each frame for rendering | `engine.PredictedFrame.Frame` (§7) | No callback needed at all. |
+>
+> The trap is the middle row implemented with the top row. A component signal that increments a counter
+> *outside* the frame does not over-count by 2× — in a measured live server-driven match the dedicated server
+> executed each tick once while the client executed it **~10 times** on average, as inputs were confirmed. No
+> rollback, no hash mismatch, just normal operation.
+
 ### Game Event Definition Pattern
 
 ```csharp
@@ -830,7 +946,14 @@ frame.DestroyEntity(entity);  // all components removed automatically
 bool alive = frame.Entities.IsAlive(entity);
 ```
 
+A component declared `[KlothoCleanup(CleanupMode.DestroyEntity)]` (§1) destroys its carrier for you at the end of the tick — adding the marker is the whole "destroy this entity later" idiom, and two markers on one entity destroy it once.
+
 ### System-to-System Signal Pattern
+
+A general broadcast to every registered system implementing your own `ISignal`-derived interface. This is a
+**different mechanism** from the component signals in §2: `ISignalOnComponentAdded/Removed` deliberately do
+not derive from `ISignal`, so `Signal<TSignal>` cannot dispatch them — the engine calls those directly from
+`Frame.Add` / `Frame.Remove`.
 
 ```csharp
 // Define a Signal
@@ -850,6 +973,11 @@ public class EffectSystem : ISystem, ISignalOnDamage
     public void Update(ref Frame frame) { }
 }
 ```
+
+> **Not for per-tick paths.** The invoker lambda above captures `target` and `damage`, so each broadcast
+> allocates, and the dispatch walks the whole registered-system list. Fine for occasional, event-shaped calls;
+> for something that fires every tick, write a flag on a component and let a system read it. And as with any
+> in-simulation callback, it re-runs on every re-execution of the tick — keep it writing to the frame only.
 
 ---
 

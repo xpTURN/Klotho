@@ -306,6 +306,10 @@ config.SetRuntimePrunedComponentTypeIds(new[] {
   un-optimized state). null, an empty list, and a core-only list are **all no-pruning**, so they are safe.
 - Engine-essential types marked `[KlothoCoreComponent]` (Transform, etc.) are **force-excluded from the
   denylist** by the registry (listing one by mistake won't prune it).
+- Pruning exemption and *lifetime* are **orthogonal**: `[KlothoCoreComponent]` says "never pruned",
+  `[KlothoCleanup]` says "cleared every tick" (see [ECS.md](ECS.md) §3). Combining them is only a
+  warning, not an error, because the two axes are independent — today's core types happen to all be
+  persistent state, which is what makes the combination suspicious rather than illegal.
 - `SetRuntimePrunedComponentTypeIds` is common to every config implementation and is wire-propagated to
   joining peers (peer symmetry). Unity/Godot can also author it via the inspector / `.tres`
   `PrunedComponentTypeIds` array.
