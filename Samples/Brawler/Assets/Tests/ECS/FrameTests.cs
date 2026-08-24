@@ -115,6 +115,26 @@ namespace xpTURN.Klotho.ECS.Tests
         }
 
         [Test]
+        public void TryRead_ReturnsTrueAndValue_WhenCarried()
+        {
+            var entity = _frame.CreateEntity();
+            _frame.Add(entity, new HealthComponent { MaxHealth = 100, CurrentHealth = 80 });
+
+            Assert.IsTrue(_frame.TryRead<HealthComponent>(entity, out var health));
+            Assert.AreEqual(80, health.CurrentHealth);
+            Assert.AreEqual(100, health.MaxHealth);
+        }
+
+        [Test]
+        public void TryRead_ReturnsFalseAndDefault_WhenNotCarried()
+        {
+            var entity = _frame.CreateEntity();
+
+            Assert.IsFalse(_frame.TryRead<HealthComponent>(entity, out var health));
+            Assert.AreEqual(default(HealthComponent), health);
+        }
+
+        [Test]
         public void Remove_SetsHasFalse()
         {
             var entity = _frame.CreateEntity();

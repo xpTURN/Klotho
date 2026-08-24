@@ -106,6 +106,47 @@ namespace xpTURN.Klotho.ECS
         public bool Has<T>(EntityRef entity) where T : unmanaged, IComponent
             => GetStorage<T>().Has(entity.Index);
 
+        /// <summary>
+        /// Reads a component by value when the entity carries it — <see cref="Has{T}"/> plus
+        /// <see cref="GetReadOnly{T}"/> folded into a single storage lookup.
+        /// </summary>
+        /// <param name="entity">Entity to read. Only its <c>Index</c> is used — see remarks.</param>
+        /// <param name="component">The component on success, <c>default</c> on failure. Unlike the
+        /// reference-typed TryGet APIs on this class, reading it after <c>false</c> is safe:
+        /// <typeparamref name="T"/> is <c>unmanaged</c>, so there is no null to dereference.</param>
+        /// <returns><c>true</c> if the entity carries <typeparamref name="T"/>, otherwise <c>false</c></returns>
+        /// <remarks>
+        /// Follows the TryGet convention, with the out parameter guaranteed rather than merely
+        /// unspecified on failure (see the <paramref name="component"/> note).
+        ///
+        /// <para><b>Copies out by value.</b> For a large component — a fixed-buffer struct such as an
+        /// HFSM host, or <c>TransformComponent</c> at 96 bytes — prefer <c>Has</c> +
+        /// <see cref="GetReadOnly{T}"/>, which hands back a <c>ref readonly</c> and copies nothing.
+        /// There is deliberately no <c>ref</c>-returning variant: the large-component case keeps the
+        /// two-call idiom rather than growing a second shape of this API.</para>
+        ///
+        /// <para><b>Not a liveness check.</b> Like <see cref="Has{T}"/> this forwards
+        /// <c>entity.Index</c> alone and never reads <c>entity.Version</c>, so a stale handle whose
+        /// slot was recycled answers about the NEW occupant and returns <c>true</c>. Call
+        /// <c>Entities.IsAlive(entity)</c> BEFORE this method for any handle that did not come from
+        /// the current tick — <c>StaleEntityRefGuardTests</c> records the bug that shape prevents.
+        /// Folding two calls into one removes the gap the guard used to sit in, so the ordering has
+        /// to be remembered rather than seen. A garbage index is rejected, however: out of range
+        /// (negative included) returns <c>false</c> instead of faulting, which bare
+        /// <see cref="GetReadOnly{T}"/> does not.</para>
+        /// </remarks>
+        public bool TryRead<T>(EntityRef entity, out T component) where T : unmanaged, IComponent
+        {
+            var storage = GetStorage<T>();
+            if (!storage.Has(entity.Index))
+            {
+                component = default;
+                return false;
+            }
+            component = storage.GetReadOnly(entity.Index);
+            return true;
+        }
+
         // Reads the live entity count for a component type by typeId, without a generic parameter.
         // Reads the same bytes as ComponentStorageFlat<T>.Count (same CountOffset). Used by the
         // component-memory diagnostics to tally every type in a typeId loop. Read-only.

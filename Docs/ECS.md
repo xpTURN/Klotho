@@ -238,13 +238,14 @@ frame.Remove<HealthComponent>(e);
 there is no write-back call and no copy. `GetReadOnly<T>` is the same reference with the compiler stopping you
 from writing through it, which is what you want for the components a system only reads.
 
-Three sharp edges worth knowing before you hit them:
+Four sharp edges worth knowing before you hit them:
 
 | Call | If the precondition does not hold |
 | ---- | ---- |
 | `Get<T>` / `GetReadOnly<T>` | **Unchecked.** The lookup is `ComponentsSpan[SparseSpan[index]]`, and a missing component leaves `-1` in the sparse slot — so reading a component an entity does not have indexes a span with `-1`. Guard with `Has<T>`, or reach the entity through a `Filter` that already required the component. |
+| `TryRead<T>` | **The guard, in the signature.** `frame.TryRead<T>(e, out var c)` is `Has<T>` + `GetReadOnly<T>` in one lookup, so the unchecked read above is not reachable through it — and an out-of-range index returns `false` rather than faulting. `out` is `default` when it returns `false`. It **copies out by value**: for a large component (a fixed-buffer struct, or `TransformComponent` at 96 bytes) keep `Has<T>` + `GetReadOnly<T>`, which copies nothing. It is not a liveness check either — see the row below. |
 | `Add<T>` | Throws if the entity already carries that component, if the type's slots are exhausted (`MaxCount`, §9), or if the type is a singleton and someone already carries it. Adding is not "set" — use `Get<T>` to overwrite. |
-| a stale `EntityRef` | Safe by design. `EntityRef` is a *generational* handle: recycling a slot bumps its `Version`, so a handle you kept from before the recycle fails `frame.Entities.IsAlive(...)` and never resolves to the new occupant. |
+| a stale `EntityRef` | Safe by design **only if you ask**. `EntityRef` is a *generational* handle: recycling a slot bumps its `Version`, so a handle you kept from before the recycle fails `frame.Entities.IsAlive(...)` and never resolves to the new occupant. But the component calls do not ask — `Has<T>`, `Get<T>`, `GetReadOnly<T>` and `TryRead<T>` all forward `entity.Index` alone, so a stale handle answers about whatever now owns the slot. Call `IsAlive` **first** for any handle that did not come from the current tick. |
 
 ```csharp
 // The generational handle in practice — this is why you can keep an EntityRef in a component.

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.2] - 2026-08-24
+
+### `Frame.TryRead<T>` — the `Has` guard, moved into the signature
+
+- **`if (frame.Has<T>(e)) { var c = frame.GetReadOnly<T>(e); … }` is now `if (frame.TryRead<T>(e, out var c))`.** The point is not the line count and not the saved lookup: `Get<T>`/`GetReadOnly<T>` are unchecked, and `Docs/ECS.md` §4 has always had to teach "guard with `Has<T>`" as something the caller remembers. `TryRead<T>` makes the guard part of the call, so the unchecked read is not reachable through it. An out-of-range index — a decoded, untrusted id, say — returns `false` instead of faulting, which bare `GetReadOnly<T>` does not.
+- **`out` is `default` on `false`, and that is a promise.** The other `TryGet*` members on `Frame` deliberately leave it unspecified because reading `default(ReflectableView)` throws. `T` here is `unmanaged`, so there is nothing to dereference and no reason to withhold the guarantee; `TryRead(…) ? x : default` is a legitimate shape.
+- **It copies out by value, so it is not the right call for every component.** A large component — a fixed-buffer struct such as an HFSM host, or `TransformComponent` at 96 bytes — is cheaper through `Has<T>` + `GetReadOnly<T>`, which hands back a `ref readonly` and copies nothing. In this repository that is not a corner case: of the 64 adjacent `Has`→`GetReadOnly` sites, 28 are on components of 64 bytes or more, `TransformComponent` in the view-interpolation path among them. There is deliberately no `ref`-returning variant — that case keeps the two-call idiom.
+- **It is not a liveness check, and folding the two calls makes that easier to forget.** Like `Has<T>` it forwards `entity.Index` alone and never reads `entity.Version`, so a stale handle answers about whatever now occupies the slot. The `IsAlive` guard used to sit visibly between two lines; there is no longer a gap for it. `StaleEntityRefGuardTests` now pins `TryRead`'s version-blindness alongside `Has`'s, so the day either becomes version-aware the assert fails and the guards get revisited rather than silently kept. The `Docs/ECS.md` row for stale handles no longer says "safe by design" without saying what you have to call.
+- **Existing call sites are left alone.** The API lands first; conversions happen when a file is touched for another reason, and only for the small components — the 28 large ones stay on `ref`.
+- **Attribution.** The idea is [`xhocquet/Klotho@f2ca837c`](https://github.com/xhocquet/Klotho/commit/f2ca837cea870adef63ad2a8ffd5774f83a4a3f7) (both repositories are Apache-2.0). This implementation is written here rather than cherry-picked — the name, the `out` guarantee, the documentation and the tests are ours — so it is credited as **based on** that commit, not as a contribution carried across with its authorship.
+
 ## [0.9.1] - 2026-08-24
 
 ### The loop-mutation trap is now caught at runtime, in development builds

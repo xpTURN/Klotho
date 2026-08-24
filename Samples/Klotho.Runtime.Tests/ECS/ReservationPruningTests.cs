@@ -161,6 +161,12 @@ namespace xpTURN.Klotho.ECS.Tests
             Assert.DoesNotThrow(() => frame.GetStorage<PruneGameAComponent>(), "non-denylisted access OK");
             Assert.Throws<System.InvalidOperationException>(
                 () => frame.GetStorage<PruneGameBComponent>(), "pruned access throws (not DivideByZero)");
+            // Frame.TryRead reaches the storage through the same chokepoint, so a pruned type still
+            // fails fast there. It does NOT report a pruned type as "absent" — the try shape covers
+            // "this entity does not carry it", not "this simulation does not have it".
+            Assert.Throws<System.InvalidOperationException>(
+                () => frame.TryRead<PruneGameBComponent>(frame.CreateEntity(), out _),
+                "TryRead does not turn a pruned type into a false return");
         }
 
         // Guard covers the GetSingleton path — a pruned singleton's default layout has CountOffset=0 that

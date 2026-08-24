@@ -70,6 +70,22 @@ namespace xpTURN.Klotho.ECS.Tests
         }
 
         [Test]
+        public void TryRead_IgnoresVersionToo_SoItHandsBackTheNewOccupantsComponent()
+        {
+            // Frame.TryRead folds Has + GetReadOnly, so it inherits the trap above verbatim — and
+            // makes it easier to walk into: the folded call has no gap between two lines for an
+            // IsAlive guard to sit in, so the ordering has to be remembered rather than seen. The
+            // XML docs on TryRead say so; this pins the behaviour those docs describe.
+            Assert.IsTrue(_frame.TryRead<StaleRefProbeComponent>(_stale, out var viaStale),
+                "TryRead forwards entity.Index alone, exactly as Has does. " +
+                "If this now fails, the lookup has become version-aware; see the fixture remarks.");
+
+            ref readonly var live = ref _frame.GetReadOnly<StaleRefProbeComponent>(_live);
+            Assert.AreEqual(live.Value, viaStale.Value,
+                "and the value it hands back belongs to the new occupant, not the named entity");
+        }
+
+        [Test]
         public void IsAlive_ReadsVersion_SoItRejectsTheStaleRef()
         {
             Assert.IsFalse(_frame.Entities.IsAlive(_stale), "stale ref must not read as alive");
@@ -118,6 +134,12 @@ namespace xpTURN.Klotho.ECS.Tests
                 EntityRef garbage = EntityRef.FromId(id);
                 Assert.IsFalse(_frame.Has<StaleRefProbeComponent>(garbage), $"id {id}");
                 Assert.IsFalse(_frame.Entities.IsAlive(garbage), $"id {id}");
+                // TryRead inherits the same bounds check, and this is the one place it is strictly
+                // safer than the pair it replaces: bare GetReadOnly indexes ComponentsSpan with
+                // SparseSpan[index] and has no bounds check of its own.
+                Assert.IsFalse(_frame.TryRead<StaleRefProbeComponent>(garbage, out var probe),
+                    $"id {id}");
+                Assert.AreEqual(default(StaleRefProbeComponent), probe, $"id {id}");
             }
         }
     }
