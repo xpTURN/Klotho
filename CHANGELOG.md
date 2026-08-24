@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.1] - 2026-08-24
+
+### The loop-mutation trap is now caught at runtime, in development builds
+
+- **`Filter` watches the storage it walks.** Removing a component — or destroying an entity — from anything other than the entity `Next()` just handed out now throws `InvalidOperationException` on the following `Next()`, with the mechanism and the fix in the message. 0.9.0 said of this trap that *"`Docs/ECS.md` §5 has always warned about it and left it to the game"*; for the conditional case that is no longer true. The unconditional case is still better served by `[KlothoCleanup]`, which does not iterate at all.
+- **Worth being precise about what the bug was, because it is not what it looks like.** The double visit is *not* a desync. Dense order is hash input — the per-type hash walks the dense array in dense order — and it is serialised raw, so every peer and every re-execution after a rollback restore reproduces exactly the same double visit. What you get is an effect applied twice, with no exception, no hash mismatch and no desync log. That is precisely why it needed a runtime check: nothing else in the engine was in a position to ask.
+- **Release builds are untouched, structurally rather than by measurement.** `Check`/`Record` carry `[Conditional]` for `DEBUG`/`DEVELOPMENT_BUILD`/`UNITY_EDITOR`, so the C# compiler removes those call sites and their arguments. Construction goes through a generic factory whose body is empty outside those symbols, so the release build never materialises the watch handle either — there is no dead expression left for the JIT or IL2CPP to eliminate. The guard struct has no fields in release, which a test asserts in every configuration.
+- **What it deliberately does not catch.** The check is count-based, so removals that a same-pass addition cancels out go unreported, and so does removing the current entity's component and re-adding it (which skips the entity swapped into the vacated slot and visits the current one twice). Counting is still the right signal: it is the only one that is not itself hashed state, where a version counter would have to live in the heap and would move `StorageLayout`, the state hash and the layout fingerprint. And because a multi-type filter walks whichever storage is smallest at construction, a quiet run means *this run* was clean, never that the code is. `Docs/ECS.md` §5 lists all four limits and the per-configuration coverage.
+- **Attribution.** The guard was contributed as [`xhocquet/Klotho@7fae2083`](https://github.com/xhocquet/Klotho/commit/7fae20838ccc51456eb1f708837b44cb74d9f197) and is cherry-picked here with the original authorship intact (both repositories are Apache-2.0). Our follow-up commit reshapes the call sites, adds the storage/span pairing assert, and corrects two statements in the imported documentation — the desync claim above, and the description of the single-type `Filter<T1>` symptom, which raises `IndexOutOfRangeException` rather than reading a stale component.
+
 ## [0.9.0] - 2026-08-24
 
 ### Component signals fire now — the interfaces had everything except a caller

@@ -879,6 +879,12 @@ private void OnTickExecuted(int tick)
 | `frame.FilterWithout<T1, T2, T3, T4, TExclude>()` | ✅ |
 | `frame.FilterWithout<T1, T2, T3, T4, T5, TExclude>()` | ✅ |
 
+Every one of them carries a **development-build check** on the storage it walks: removing a component (or
+destroying an entity) mid-iteration throws `InvalidOperationException` on the next `Next()` unless the
+target was the entity that `Next()` had just handed out. Release players are unaffected — the check
+compiles away and the guard occupies no fields. `Docs/ECS.md` §5 has the mechanism, the four limits, and
+the per-configuration table.
+
 ### View transform pipeline
 
 The view base class (`EntityView` on Unity, `EntityViewNode` on Godot) handles lerp + `_errorVisual` composition + `VerifiedFrameInterpolator` branching as the

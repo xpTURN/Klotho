@@ -376,6 +376,60 @@ Two ways to avoid needing the pattern at all:
   the tick, in one pass, outside any iteration. A "destroy me" tag becomes
   `[KlothoCleanup(CleanupMode.DestroyEntity)]` and the loop above disappears entirely.
 
+### The development build now catches it
+
+Development builds carry a runtime check. `Filter` watches the storage it walks and throws
+`InvalidOperationException` from the *next* `Next()` if that storage shrank for any reason other than the
+entity `Next()` had just handed out. The message names the mechanism and the fix, so the common form of
+this bug stops being something you have to reason about. It is compiled out of release players — the entry
+points carry `[Conditional("DEBUG")]`, `[Conditional("DEVELOPMENT_BUILD")]` and
+`[Conditional("UNITY_EDITOR")]`, and the guard struct is left with no fields at all.
+
+Which configurations have it:
+
+| Configuration | Guard |
+| --- | --- |
+| `dotnet test -c Debug` | ✅ (`DEBUG`) |
+| Unity Editor / EditMode tests | ✅ (`UNITY_EDITOR`) |
+| Unity development player | ✅ (`DEVELOPMENT_BUILD`) |
+| `dotnet` Release, Unity release player | ❌ |
+| **Godot, in every configuration** | ❌ — see below |
+
+Godot is the one that does not follow from the symbols. The addon ships the core as a **prebuilt Release
+DLL** (`addons/klotho/lib/xpTURN.Klotho.Runtime.dll`, referenced by `Klotho.props`), and `[Conditional]`
+strips the call site in the assembly that *contains* it — which was compiled at packaging time, in Release.
+A Godot project building in Debug therefore still gets no guard: its own `DEBUG` cannot put the calls back.
+Unity is unaffected because the package ships source and the consumer compiles it.
+
+**Four things it does not do**, and the first two matter most:
+
+1. **It is not a completeness proof.** The check is count-based, so a body that removes one entity's
+   component and adds another's in the same pass nets out and goes unreported. So does removing the
+   current entity's component and re-adding it — which is worse than it sounds: the re-add appends over
+   the stale dense tail, so the entity swapped into the vacated slot is *skipped* and the current one is
+   visited *twice*. Counting is nonetheless the right signal, because it is the only one that is not
+   itself hashed state: a version counter would have to live in the heap, and that moves `StorageLayout`,
+   the state hash and the layout fingerprint.
+2. **A silent run does not mean safe code.** A multi-type filter walks whichever storage is smallest *at
+   the moment it is constructed* — the same fact that makes "I'm removing a different component" a
+   non-argument. So the same code is caught on a tick where the mutated storage happens to be the
+   smallest and stays quiet on every other tick. The guard tells you this *run* was clean, never that the
+   code is.
+3. **The stack is not the violation.** The check runs at the top of `Next()`, so the throw points at the
+   iteration that came after the offending body. With nested filters over one storage it is further away
+   still: removing the inner loop's current entity is legal for the inner walk and a violation for the
+   outer one, so the exception surfaces in the outer loop — sometimes in another system entirely. The
+   message says so.
+4. **Release players are unguarded**, which is also where the one remaining `Filter<T1>` symptom lives.
+   Single-type filters skip the `Has` re-check (they have no storage field), so a pass can hand out an
+   entity whose component is gone; `Get<T>` then indexes through a sparse slot of `-1` and throws
+   `IndexOutOfRangeException`. Reaching that requires removing the entity at the dense tail, which the
+   guard throws on first, so in a development build you never see it.
+
+One thing the guard is *not* reporting on purpose: a `while (filter.Next(...))` loop is covered end to
+end, because the pass that ends the loop runs the check too. A `break` or a single `if (filter.Next(...))`
+skips it, and that is correct — nothing is iterated afterwards, so nothing can be visited twice.
+
 ---
 
 ## 6. Writing Systems

@@ -74,6 +74,21 @@ jobs:
               --logger "trx;LogFileName=dotnet-${name}.trx" || overall=1
             echo "::endgroup::"
           done
+
+          # Second pass, Debug, for the one project that has build-gated tests. The dev-only
+          # detectors (FilterMutationGuard, the ApplyFullState leak checks) hang off
+          # DEBUG/DEVELOPMENT_BUILD/UNITY_EDITOR, and [Conditional] removes the CALL, not the
+          # method — so a Release-only run compiles their call sites away and asserts nothing
+          # about them. Their fixtures are #if-gated to match, which keeps Release green but
+          # also silent; this run is what actually exercises them. Scoped to one project on
+          # purpose: doing it for all three would double the job for no extra coverage.
+          echo "::group::Klotho.Runtime.Tests (Debug)"
+          dotnet test "Samples/Klotho.Runtime.Tests/Klotho.Runtime.Tests.csproj" \
+            -c Debug \
+            --results-directory "${results}" \
+            --logger "trx;LogFileName=dotnet-Klotho.Runtime.Tests-Debug.trx" || overall=1
+          echo "::endgroup::"
+
           exit ${overall}
 
       # Job logs need repo admin rights to download, so surface the failed test

@@ -568,6 +568,16 @@ namespace Brawler
             _commandSystem.OnCommand(ref frame, _inputCmd);
         }
 
+        // The Deinit+Init pair at the end is remove-then-re-add of HFSMComponent on one entity, and the
+        // caller iterates a filter that LISTS HFSMComponent (Pass 1). FilterMutationGuard cannot see
+        // this shape — the count nets back to where it started — so the only thing keeping it safe is
+        // the storage the filter picked: BotComponent and HFSMComponent are always 1:1 (Init adds the
+        // host for every BotComponent holder), and the smallest-storage selection uses a strict `<`, so
+        // a tie goes to the earlier type argument. BotComponent is listed first, so BotComponent is
+        // walked and this storage is not.
+        //
+        // Reorder those type arguments and this silently starts skipping one bot and processing another
+        // twice, with no exception and no hash mismatch. Docs/ECS.md §5 has the mechanism.
         static void ResetBotState(ref Frame frame, EntityRef entity, ref BotComponent bot)
         {
             bot.HasDestination = false;
