@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using NUnit.Framework;
 using xpTURN.Klotho.ECS;
 
@@ -22,6 +23,7 @@ namespace xpTURN.Klotho.Core.Tests
         private const int MaxEntities = 256;   // Brawler's SimulationConfig value
         private const int Warmup      = 200;
         private const int Iterations  = 2000;
+        private const int Rounds      = 5;
 
         [Test]
         public void CopyFrom_AllocatesNothing()
@@ -34,13 +36,21 @@ namespace xpTURN.Klotho.Core.Tests
 
             for (int i = 0; i < Warmup; i++) target.CopyFrom(source);
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < Iterations; i++) target.CopyFrom(source);
-            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            // A GC anywhere inside a measurement window charges this thread's unused allocation-context
+            // remainder (up to ~8 KB) to the delta, so a single window is not a reliable zero. A real
+            // per-call allocation shows up in every round; noise shows up in one, so the minimum decides.
+            var rounds = new long[Rounds];
+            for (int r = 0; r < Rounds; r++)
+            {
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                for (int i = 0; i < Iterations; i++) target.CopyFrom(source);
+                rounds[r] = GC.GetAllocatedBytesForCurrentThread() - before;
+            }
 
+            long allocated = rounds.Min();
             Assert.That(allocated, Is.Zero,
-                $"CopyFrom allocated {allocated} bytes over {Iterations} calls — a regression here means the "
-                + "heap or the entity manager grew per call");
+                $"CopyFrom allocated {allocated} bytes over {Iterations} calls (rounds: {string.Join(", ", rounds)}) "
+                + "— a regression here means the heap or the entity manager grew per call");
         }
     }
 }
