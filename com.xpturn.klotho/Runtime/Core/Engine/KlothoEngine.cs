@@ -361,7 +361,7 @@ namespace xpTURN.Klotho.Core
         private EventCollector _eventCollector;
         private EventDispatcher _dispatcher;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
         private long _lastTickWallMs;
 
         // Diagnostic — throttled chain-stall log.
@@ -391,7 +391,17 @@ namespace xpTURN.Klotho.Core
         // Render time used to smoothly track the Verified timeline.
         // _lastVerifiedTick jumps discontinuously per network batch, so using it directly for alpha causes
         // misalignment between interpolation source frame swaps and alpha reset timing, producing jitter.
-        // Advance a separate render time by wall-clock and clamp it with an upper bound based on _lastVerifiedTick.
+        // Advance a separate render time by wall-clock and clamp it with an upper bound based on _lastVerifiedTick:
+        // VerifiedBaseTick <= max(0, _lastVerifiedTick - 1), so the interpolator's two endpoints
+        // (base, base + 1) are both Verified. See the clamp at the end of AdvanceVerifiedRenderTime.
+        //
+        // Deliberately NOT reset by Stop(), even though Stop() clears _initialized and so allows the same
+        // engine instance to run a second session. The seeding branch is skipped on that session's first
+        // frame (Initialized is still true) and drift is computed against the previous session's render
+        // time — but the >10-tick snap guard fires inside the SAME AdvanceVerifiedRenderTime call, ahead of
+        // any RenderClock read, so VerifiedBaseTick is never wrong for even one frame. The only residue is
+        // that frame's _verifiedRenderTimescale, computed before the snap and clamped to [0.5, 2.0]. A
+        // reset would therefore add a state-clearing path for no observable gain (IMP103 별건 #8).
         private double _verifiedRenderTimeMs;
         private bool   _verifiedRenderTimeInitialized;
         // Drift-proportional render timescale computed by AdvanceVerifiedRenderTime, exposed via
@@ -479,7 +489,9 @@ namespace xpTURN.Klotho.Core
             else if (timescale > 2.0f) timescale = 2.0f;
 
             // Expose the smooth-converge multiplier. NOTE: this is the per-frame
-            // [0.5,2.0] convergence rate; it does NOT reflect the >10-tick instant snap below.
+            // [0.5,2.0] convergence rate; it is the requested rate, not the effective one -- it reflects
+            // neither the >10-tick instant snap nor the verified-boundary clamp below, both of which can
+            // discard part or all of this frame's advance.
             _verifiedRenderTimescale = timescale;
 
             _verifiedRenderTimeMs += deltaTime * 1000.0 * timescale;
@@ -491,7 +503,94 @@ namespace xpTURN.Klotho.Core
             {
                 _verifiedRenderTimeMs = targetTimeMs;
             }
+
+            // Verified-boundary clamp, enforcing VerifiedBaseTick <= max(0, _lastVerifiedTick - 1).
+            // The -1 is derived, not a fudge factor: the snapshot interpolator lerps frame `base` against
+            // frame `base + 1`, so both endpoints are Verified only while base + 1 <= _lastVerifiedTick.
+            // Without this, a positive drift of >= InterpolationDelayTicks (target sits delay ticks behind
+            // _lastVerifiedTick, so that is exactly when base reaches it) pushes base past the verified
+            // boundary and FrameRingBuffer.HasFrame hands back predicted, rollback-mutable snapshots
+            // without complaint -- it has no notion of verified. The view then renders prediction on the
+            // path that exists precisely to avoid it, and silently: the frames are present, so the
+            // interpolator's missing-frame fallback never engages.
+            //
+            // Clamping this scalar rather than the derived base is what keeps base and alpha coherent:
+            // the RenderClock getter reads them as the quotient and remainder of this one value, so
+            // clamping base alone would leave alpha describing a different instant.
+            //
+            // Placed AFTER the snap deliberately. The snap's result (targetTimeMs) is always within this
+            // bound because InterpolationDelayTicks >= 1 is validated (SimulationConfigExtensions), so the
+            // clamp never undoes it -- while the snap stays reachable for frame hitches long enough to
+            // overshoot by >10 ticks in one step. Snap = disaster recovery, clamp = steady-state invariant.
+            //
+            // At _lastVerifiedTick == 0 the max(0, ...) floor breaks the derivation: only one Verified
+            // frame exists, so base + 1 cannot be Verified either way. That one-tick session-start
+            // exposure is accepted; closing it needs an interpolator-side check, not a clock change.
+            double verifiedBoundMs = (double)Math.Max(0, _lastVerifiedTick - 1) * tickMs;
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+            // Before the write, so the trace sees how far past the bound this frame actually reached.
+            TraceVerifiedClamp(_verifiedRenderTimeMs, verifiedBoundMs, targetTimeMs, tickMs);
+#endif
+            if (_verifiedRenderTimeMs > verifiedBoundMs)
+            {
+                _verifiedRenderTimeMs = verifiedBoundMs;
+            }
         }
+
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+        // Verified-boundary clamp instrumentation.
+        //
+        // The clamp is silent by design: it discards part of a frame's advance and leaves no trace, so
+        // a session log can tell you the match never desynced while saying nothing about whether the
+        // render clock spent it pinned to the bound. That is the one measurement that decides
+        // InterpolationDelayTicks, because the slack the clamp works against is exactly (delay - 1) ticks.
+        //
+        // Reported cumulatively, so the newest line IS the running total -- no window arithmetic, and a
+        // session that ends between lines still leaves a usable summary. peakDrift is the number to read
+        // against slack: it is how far drift got past the target, so a peak below the slack means the
+        // clamp never had to engage and a peak above it says how much more delay would have absorbed.
+        private long   _clampFrames;
+        private long   _clampEngagedFrames;
+        private long   _clampLastLogFrame;
+        private double _clampHeldMs;
+        private double _clampWorstOvershootMs;
+        private double _clampPeakDriftTicks;
+
+        // ~10s at 60fps. Frequent enough to show a trend across a match, sparse enough not to drown the log.
+        private const int ClampTraceIntervalFrames = 600;
+
+        private void TraceVerifiedClamp(double renderTimeMs, double boundMs, double targetTimeMs, int tickMs)
+        {
+            // Only the SD client and the spectator actually consume VerifiedBaseTick (EntityViewFactory
+            // hands EnableSnapshotInterpolation to nobody else), so measuring anywhere else is noise in
+            // a log someone has to read. The server in particular keeps _lastVerifiedTick at CurrentTick,
+            // which makes its render clock meaningless rather than merely uninteresting.
+            if (IsServer || _isReplayMode) return;
+
+            _clampFrames++;
+
+            double driftTicks = (renderTimeMs - targetTimeMs) / tickMs;
+            if (driftTicks > _clampPeakDriftTicks) _clampPeakDriftTicks = driftTicks;
+
+            double overshootMs = renderTimeMs - boundMs;
+            if (overshootMs > 0)
+            {
+                _clampEngagedFrames++;
+                _clampHeldMs += overshootMs;
+                if (overshootMs > _clampWorstOvershootMs) _clampWorstOvershootMs = overshootMs;
+            }
+
+            if (_clampFrames - _clampLastLogFrame < ClampTraceIntervalFrames) return;
+            _clampLastLogFrame = _clampFrames;
+
+            double engagedPct = (double)_clampEngagedFrames / _clampFrames * 100.0;
+            _logger?.KInformation(
+                $"[RenderClock][Clamp] frames={_clampFrames} engaged={_clampEngagedFrames} ({engagedPct:F1}%) " +
+                $"held={_clampHeldMs:F0}ms worst={_clampWorstOvershootMs:F1}ms " +
+                $"peakDrift={_clampPeakDriftTicks:F2}tk slack={_simConfig.InterpolationDelayTicks - 1}tk " +
+                $"tick={tickMs}ms");
+        }
+#endif
 
         public FrameRef VerifiedFrame
         {
@@ -728,6 +827,8 @@ namespace xpTURN.Klotho.Core
 
             // Authoritative callers (server / P2P host) fail fast on invalid config;
             // non-authoritative callers (SD client / P2P guest) log and proceed to tolerate cross-version skew.
+            // IsHost is not yet true for a P2P host here (CreateRoom sets it), so the host's own fail-fast
+            // lives in KlothoSessionFlow.StartHost — this branch only catches an already-hosting caller.
             bool isAuthoritative = networkService.IsHost
                 || (networkService is IServerDrivenNetworkService sdn && sdn.IsServer);
             if (isAuthoritative)
@@ -761,7 +862,7 @@ namespace xpTURN.Klotho.Core
             for (int i = 0; i < networkService.Players.Count; i++)
                 _activePlayerIds.Add(networkService.Players[i].PlayerId);
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             // Diagnostic — roster snapshot at Initialize.
             {
                 var sb = new System.Text.StringBuilder();
@@ -1171,6 +1272,19 @@ namespace xpTURN.Klotho.Core
             // would hide the one path that is supposed to be exception-free.
             _navRebakeDriver?.AdvanceSlice(deltaTime);
 
+            // Drop last frame's rollback deltas. Same placement rule as the calls above — once per Update,
+            // ahead of every per-mode early return — and here that rule is load-bearing rather than tidy:
+            // the views that consume these read them in LateUpdate, which runs whether or not the engine
+            // reached its tick loop. Left below the early returns, a frame that returns at Paused, at the
+            // late-join catch-up, or before the transport exists keeps publishing the previous frame's
+            // delta, and ErrorVisualState.Tick adds it to the accumulator again every frame until the
+            // total crosses the teleport threshold and snaps — a drift-then-snap loop for as long as the
+            // stall lasts. The catch-up window is the long one (seconds), not Paused (IMP105 C-3).
+            //
+            // Only the clear moves up. PublishPendingResyncDeltas stays behind the transport pump, and the
+            // two must NOT be fused into one call: see the publish site below.
+            ClearErrorDeltas();
+
             // Spectator mode: skip ordinary tick processing and update only the spectator system.
             if (_isSpectatorMode)
             {
@@ -1220,6 +1334,17 @@ namespace xpTURN.Klotho.Core
                 return;
             }
 
+            // Publish the resync deltas parked by a FullState that arrived in this frame's poll. This must
+            // stay AFTER _networkService.Update() above, which is the pump — it calls transport.PollEvents
+            // itself. Where the handler actually runs differs by adapter: Unity's driver polls only while
+            // no session is attached, so the FullState lands inside this Update a few lines up, while
+            // Godot's driver polls unconditionally before it calls Session.Update, so there it has already
+            // landed. Publishing after the pump is correct for both; moving this call up to sit with the
+            // clear would, on the Unity ordering, run it before the parking and delay every resync
+            // correction by a whole frame — the one frame the view renders the jump raw, which is the
+            // exact symptom the parking exists to remove (IMP105 C-3/C-6). The pair is not fused.
+            PublishPendingResyncDeltas();
+
             // During Resync, halt tick progression and only check the timeout.
             if (_resyncState == ResyncState.Requested)
             {
@@ -1229,7 +1354,7 @@ namespace xpTURN.Klotho.Core
 
             _accumulator += deltaTime * 1000f; // accumulate in ms
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             if (_simConfig.TickDriftWarnMultiplier > 0)
             {
                 float maxAccumulator = _simConfig.TickIntervalMs * MAX_TICKS_PER_UPDATE;
@@ -1290,7 +1415,7 @@ namespace xpTURN.Klotho.Core
             {
                 _accumulator -= _simConfig.TickIntervalMs;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 if (_simConfig.TickDriftWarnMultiplier > 0)
                 {
                     long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -1371,9 +1496,14 @@ namespace xpTURN.Klotho.Core
             _networkService.FlushSendQueue();
 
             // Apply any rollback request deferred during the tick loop here.
+            // Capture must sit after the tick loop: the pose this frame advanced to is what "before the
+            // rollback" means, and capturing ahead of the loop would fold this frame's forward motion
+            // into the delta. Mirrors the SD client, which wraps ProcessVerifiedBatch the same way.
+            CapturePreRollbackTransforms(_hasPendingRollback);
             FlushPendingRollback();
+            ComputeErrorDeltas();
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             // Chain-stall warning (throttled 1s).
             // After CleanupOldData cap on _lastVerifiedTick, wipe is prevented when lag is high,
             // but the stall itself still indicates a network/sim issue worth surfacing.
@@ -1550,7 +1680,7 @@ namespace xpTURN.Klotho.Core
                 // ("same-tick multiple cmds are legal"). Inert (0) except on a late-join guest.
                 if (targetTick < _lateJoinCommandFloorTick)
                 {
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                     _logger?.KDebug($"[KlothoEngine][LateJoin] cmd.Tick joinTick floor: computed={targetTick}, floored={_lateJoinCommandFloorTick}");
 #endif
                     targetTick = _lateJoinCommandFloorTick;
@@ -1563,7 +1693,7 @@ namespace xpTURN.Klotho.Core
                 if (clampEngaged)
                 {
                     int clamped = _lastSentCmdTick;
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                     _logger?.KDebug($"[KlothoEngine] cmd.Tick monotonic clamp: computed={targetTick}, clamped={clamped}");
 #endif
                     targetTick = clamped;
@@ -1588,7 +1718,7 @@ namespace xpTURN.Klotho.Core
                             _networkService.SendCommand(fillEmpty);
                             _lastSentCmdTick = t;
                         }
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                         _logger?.KInformation($"[KlothoEngine][GapFill] Forward gap filled: [{fillStart}, {fillEnd}], count={fillEnd - fillStart + 1}");
 #endif
                     }
@@ -1780,6 +1910,14 @@ namespace xpTURN.Klotho.Core
                 _simulation.OnPlayerJoinedNotification -= HandlePlayerJoinedNotification;
             if (_replaySystem != null)
                 _replaySystem.OnInitialStateSnapshotSet -= HandleInitialStateSnapshotSet;
+
+            // The engine instance may be reused for a second session, and none of this describes the next
+            // world: entity indices are reassigned from zero, so a surviving delta lands on a stranger.
+            ResetErrorCorrectionState();
+
+            // Same reason, one value further: a stale tick-0 hash would be compared against the NEXT
+            // session's bootstrap broadcast and report a divergence that never happened (IMP105 C-8).
+            _bootstrapStateHash = 0;
 
             _initialized = false;
         }
@@ -2141,7 +2279,7 @@ namespace xpTURN.Klotho.Core
                 // Only request rollback when the prediction differs from the actual input.
                 if (!match)
                 {
-                    _logger?.KWarning($"[KlothoEngine] PredictionMismatch: Prediction mismatch tick={command.Tick}, player={command.PlayerId}, predicted={predicted.CommandTypeId}, actual={command.CommandTypeId}");
+                    LogPredictionMismatch(predicted, command);
                     RequestRollbackOrResync(command.Tick, resyncOnDeepRollback);
                 }
             }
@@ -2160,6 +2298,62 @@ namespace xpTURN.Klotho.Core
 
             if (storeResult == CommandStoreResult.DroppedSealed)
                 CommandPool.Return(command);
+        }
+
+        /// <summary>
+        /// Says what actually differed.
+        ///
+        /// The decision above is byte equality of the serialized payloads, but the line used to print
+        /// <c>CommandTypeId</c> alone — and a type difference is the trivial case, so every interesting
+        /// mismatch printed the same number twice and named nothing. Measured on a live P2P host: 19 of
+        /// 50 mismatch lines read "predicted=113, actual=113". The message drifted when the accuracy
+        /// judgment moved from type-only to byte equality; the log stayed on the old field.
+        ///
+        /// Re-serialises instead of sharing <see cref="CommandDataEquals"/>'s buffers, which are
+        /// stackalloc'd inside it. This runs only on a mismatch, which is already paying for a rollback.
+        /// </summary>
+        private void LogPredictionMismatch(ICommand predicted, ICommand actual)
+        {
+            // Everything below exists to build one line, and the serialisation is a statement rather
+            // than an interpolation hole — so the handler's own level gate does not cover it. Ask first.
+            if (_logger == null || !_logger.IsEnabled(KLogLevel.Warning)) return;
+
+            if (predicted.CommandTypeId != actual.CommandTypeId)
+            {
+                _logger?.KWarning($"[KlothoEngine] PredictionMismatch: tick={actual.Tick}, player={actual.PlayerId}, reason=type, predicted={predicted.CommandTypeId}, actual={actual.CommandTypeId}");
+                return;
+            }
+
+            int sizeP = predicted.GetSerializedSize();
+            int sizeA = actual.GetSerializedSize();
+            if (sizeP != sizeA)
+            {
+                _logger?.KWarning($"[KlothoEngine] PredictionMismatch: tick={actual.Tick}, player={actual.PlayerId}, reason=size, type={actual.CommandTypeId}, bytes={sizeP} vs {sizeA}");
+                return;
+            }
+
+            Span<byte> bufP = stackalloc byte[sizeP];
+            Span<byte> bufA = stackalloc byte[sizeA];
+            var writerP = new SpanWriter(bufP);
+            var writerA = new SpanWriter(bufA);
+            predicted.Serialize(ref writerP);
+            actual.Serialize(ref writerA);
+
+            int len = writerP.Position < writerA.Position ? writerP.Position : writerA.Position;
+            int firstDiff = -1;
+            for (int i = 0; i < len; i++)
+            {
+                if (bufP[i] != bufA[i]) { firstDiff = i; break; }
+            }
+
+            if (firstDiff < 0)
+            {
+                // Same prefix, different written length — the sizes agreed but the writers did not.
+                _logger?.KWarning($"[KlothoEngine] PredictionMismatch: tick={actual.Tick}, player={actual.PlayerId}, reason=written, type={actual.CommandTypeId}, written={writerP.Position} vs {writerA.Position}");
+                return;
+            }
+
+            _logger?.KWarning($"[KlothoEngine] PredictionMismatch: tick={actual.Tick}, player={actual.PlayerId}, reason=payload, type={actual.CommandTypeId}, bytes={sizeP}, firstDiff@{firstDiff}: predicted=0x{bufP[firstDiff]:X2} actual=0x{bufA[firstDiff]:X2}");
         }
 
         private bool CommandDataEquals(ICommand a, ICommand b)
@@ -2214,6 +2408,23 @@ namespace xpTURN.Klotho.Core
             // OnGameStart subscribers (custom snapshot path, other handlers) still fire here.
             OnGameStart?.Invoke();
 
+            // Local tick-0 hash for the bootstrap-FullState check in HandleFullStateReceived. Taken here,
+            // unconditionally, right after Start() has run OnInitializeWorld + SaveSnapshot(0).
+            //
+            // It used to be piggy-backed on the replay-recording branch below, which left it 0 — and the
+            // check skipped — for every game that does not record, i.e. the default. The one failure this
+            // check can attribute (the peers disagreed BEFORE tick 0) was therefore invisible exactly
+            // where it is hardest to diagnose otherwise. Worse, the engine instance may be reused for a
+            // second session (Stop clears _initialized), so a hash from a recorded match survived into a
+            // non-recorded one and reported a divergence that never happened (IMP105 C-8).
+            //
+            // GetStateHash rather than SerializeFullStateWithHash: the two are kept equal on purpose —
+            // snapshot participants are folded one at a time to match (EcsSimulation.GetStateHash) — and
+            // this needs the hash, not the bytes. That equality is load-bearing here: if the two ever
+            // diverge in how they fold, this check starts reporting false divergences instead of real
+            // ones. Reset in Stop().
+            _bootstrapStateHash = _simulation.GetStateHash();
+
             // Replay InitialStateSnapshot auto-inject — non-replay + recording + (P2P / SD-Server) only.
             // SD-Client receives the snapshot via server FullState broadcast (ServerDrivenClient.cs HandleInitialFullStateReceived).
             if (!_isReplayMode
@@ -2243,10 +2454,13 @@ namespace xpTURN.Klotho.Core
                     _cachedFullStateHash = hash;
                     _cachedFullStateTick = 0;
                 }
+                // Stamped InitialState, not the default Unicast. The receiver needs to tell "the bootstrap
+                // copy of a state I already built myself" from "a FullState I asked for" — without the kind
+                // it can only see an unexpected arrival and count it as an anomaly (IMP103).
                 if (isSdServer)
-                    _serverDrivenNetwork.BroadcastFullState(0, _cachedFullState, _cachedFullStateHash);
+                    _serverDrivenNetwork.BroadcastFullState(0, _cachedFullState, _cachedFullStateHash, FullStateKind.InitialState);
                 else
-                    _networkService.BroadcastFullState(0, _cachedFullState, _cachedFullStateHash);
+                    _networkService.BroadcastFullState(0, _cachedFullState, _cachedFullStateHash, FullStateKind.InitialState);
                 _logger?.KInformation($"[KlothoEngine][Bootstrap] Initial FullState broadcast: mode={(isSdServer ? "SD" : "P2P")}, size={_cachedFullState.Length}, hash=0x{_cachedFullStateHash:X16}");
 
                 // Diagnostic — per-component hash breakdown for desync root-cause analysis.
@@ -2289,7 +2503,7 @@ namespace xpTURN.Klotho.Core
             int cleanupTick = System.Math.Min(rawCleanupTick, _lastVerifiedTick);
             if (cleanupTick > 0)
             {
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 // Diagnostic — log InputBuffer entries about to be wiped while still beyond
                 // chain advance reach (t > _lastVerifiedTick). Surfaces host self-wipe during
                 // P2P quorum stall — wiped player commands are unrecoverable.

@@ -2,6 +2,7 @@
     "name": "xpTURN.Klotho.Tests",
     "rootNamespace": "",
     "references": [
+        "UniTask",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner",
         "Unity.PerformanceTesting",
@@ -15,7 +16,8 @@
         "xpTURN.Klotho.Identity.SdRef",
         "Brawler.ECS",
         "Brawler.DataAssets",
-        "Brawler.Manager"
+        "Brawler.Manager",
+        "Brawler.View"
     ],
     "includePlatforms": [
         "Editor"

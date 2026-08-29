@@ -15,6 +15,7 @@ point is to skip the reading you do not need.
 | ---- | ---- | ---- |
 | `hash check: … match=False` in a log | a genuine divergence — the funnel already narrowed it | §3.1 (classification line) → §3.5 (verdict) |
 | **Divergent from tick 0**, on every component | the two peers do not have the same registered component-type set (a test/editor-only assembly is loaded on one side) | §7.5 — and compare the boot line `[KlothoEngine][Registry] boot: types=… cleanup=… fp=…` on both peers |
+| `the peers diverged before tick 0` in a log | the two peers built **different tick-0 worlds** — `OnInitializeWorld` read something non-deterministic, or the registered system set differs | §7.5 (bootstrap row) — this fires before any tick runs, so nothing in the funnel below applies |
 | A peer is **refused at join** with a fingerprint error | same cause as above, caught before the match instead of during it | §7.5 |
 | Characters fall through the floor, or a wall does nothing | static geometry differs, or a collider was never exported — a `Collider` tagged neither `FPStatic` nor `FPTrigger`, **or** one that carries a tag but sits on an inactive GameObject, is silently skipped | §7.5 · the exporter window's `Excluded` row and its warning list |
 | Only **one component type** diverges | a system writing that component reads something non-deterministic | §3.2 (layered breakdown) → [ECS.md](ECS.md) §11 |
@@ -200,10 +201,21 @@ as an error rather than as a desync storm.
 | **Ready exchange** (cold start) | **layout** fingerprint | `PlayerReadyMessage.LayoutFingerprint` | **refuse the peer** — `JoinFailReason.LayoutMismatch` (authority) / leave with `AbortReason.LayoutMismatch` (guest, spectator) |
 | **Ready exchange** (cold start, `Phase < Playing`) | **environment** fingerprint | `PlayerReadyMessage.EnvironmentFingerprint` | warn |
 | Initial FullState / late-join / reconnect / resync / **spectator** | layout ⊕ environment (combined) | `FullStateResponseMessage.StaticFingerprint` | warn |
+| **Bootstrap FullState** (a peer that already built tick 0) | **tick-0 state hash** — the state itself, not a fingerprint | the broadcast payload's hash vs the local `GetStateHash()` | **error** — `the peers diverged before tick 0` |
 
 Notes that decide how to read a report:
 
 - **`0` means "not provided"** on every one of these fields. An unwired or older peer is never refused.
+- **The bootstrap row is the only one that compares state rather than a fingerprint.** The host broadcasts the
+  tick-0 state to everyone; a peer that was present at game start built the identical snapshot itself and drops
+  the copy (`Bootstrap FullState ignored — already held locally`, Debug). That drop is the one free chance to
+  compare tick-0 *state* across peers, so a hash difference there is escalated: it means the two sides disagreed
+  **before the first tick**, which no later desync report can attribute to a tick. The local side of the
+  comparison is taken once per session at game start and cleared by `Stop()`, so it does not depend on replay
+  recording being on and a reused engine instance cannot carry one match's hash into the next. A local hash of
+  `0` means this peer never built a tick-0 world of its own — a replay, or a late joiner, neither of which runs
+  the game-start path — and the comparison is then skipped rather than guessed. (A late joiner arrives with the
+  full state expected, so it takes a different branch regardless.)
 - **The environment half moves with runtime rebakes** (buildings), so it is compared only before the
   match starts. A mid-match ready (late join, reconnect) compares the layout half only — otherwise a
   joining peer's base navmesh would be reported against an in-progress, already-rebaked one.

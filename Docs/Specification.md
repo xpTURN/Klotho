@@ -237,8 +237,12 @@ The lobby→session credential handoff that crosses this boundary (ticket carria
     ├── PhysicsDeterminismProbe/ cross-platform FP determinism probe
     ├── gen.sh                   generator build script
     ├── pack-godot-addon.sh      packs com.xpturn.klotho into dist/addons/klotho
-    ├── deploy-addon-to-samples.sh  syncs the packed addon into the Godot samples
-    └── run-all-tests.sh         full-suite runner
+    │                            ([OUT_DIR] [CONFIG]; CONFIG = Release (default) | Debug — a Release
+    │                             addon compiles the dev-only diagnostics out)
+    ├── deploy-addon-to-samples.sh  syncs the packed addon into the Godot samples ([CONFIG], forwarded)
+    └── run-all-tests.sh         full-suite runner (dotnet Debug + Release by default — `--debug`
+                                 restores Debug-only; a suite that produced no result file is
+                                 reported as missing and fails the run)
 ```
 
 ---
@@ -306,8 +310,8 @@ Configuration is split into two layers.
 | MaxUnackedInputs | 30 | count | (SD) Cap on accumulated unacknowledged inputs (warning emitted on overflow) |
 | ServerSnapshotRetentionTicks | 0 | ticks | (SD) Server snapshot ring-buffer slots. **0 = auto** (TickRate × 10). Independent of MaxRollbackTicks — used for FullStateRequest replies |
 | SDInputLeadTicks | 0 | ticks | (SD) Initial client lead ticks at game start. **0 = auto (default 10)**. Reused on LateJoin/Reconnect. Additive with InputDelayTicks |
-| EnableErrorCorrection | false | bool | Enable Error Correction (default off). Enable selectively in high-latency / multiplayer scenarios |
-| InterpolationDelayTicks | 3 | ticks | View-layer snapshot interpolation delay (used by RenderClock.VerifiedBaseTick = LastVerifiedTick - InterpolationDelayTicks). Recommended [1, 3]. Fixed value — applied as-is by the live render clock, no dynamic adjustment |
+| EnableErrorCorrection | false | bool | Arms the view-side rollback smoother (default off). Enable selectively in high-latency / multiplayer scenarios. **The flag alone does nothing** — the engine produces deltas only for entities the game marks with `ErrorCorrectionTargetComponent`, and only views on the predicted (CSP) render path apply them. See SimulationConfigGuide §1.1 |
+| InterpolationDelayTicks | 3 | ticks | View-layer snapshot interpolation delay. **Validated range [1, 4]** — `LastVerifiedTick - InterpolationDelayTicks` is the tick the render clock *converges on*, not a value it holds: the clock is additionally capped at `max(0, LastVerifiedTick - 1)` so both interpolation endpoints stay Verified, and a ±10-tick catch-up snap handles large hitches. A clamp-free render needs `frameMs ≤ (delay − 2) × TickIntervalMs`, which is why 1 and 2 clamp at any tick rate and a 16ms tick needs 4. Fixed value — no dynamic adjustment. See SimulationConfigGuide §1 |
 | LateJoinDelaySafety | 2 | ticks | Safety margin added to RTT-based extra-delay computation on Sync / LateJoin / Reconnect. Also used as the standalone fallback when avgRtt is invalid / out of the sane range |
 | RttSanityMaxMs | 240 | ms | Upper bound for accepting avgRtt as a sane measurement. Samples exceeding this fall back to `LateJoinDelaySafety` only |
 | QuorumMissDropTicks | 20 | ticks | (P2P) Quorum-miss watchdog threshold. If a remote peer's input is missing at `_lastVerifiedTick + 1` for at least this many ticks, the peer is presumed-dropped and reactive empty-fill activates before the transport-level DisconnectTimeout. 0 disables. Safe range 10~80 |
@@ -503,7 +507,7 @@ KlothoSession.Create(KlothoSessionSetup) → KlothoSession
   AllPlayersReadyChanged : event Action<bool>
 
 KlothoSessionFlow (recommended construction layer)
-  StartHost(simCfg, sessionCfg)                                              → P2P host (sync)
+  StartHost(simCfg, sessionCfg)                                              → P2P host (sync; calls simCfg.Validate() first — an out-of-range config throws here instead of logging and running)
   JoinP2PAsync(transport, host, port, sessionCfg, ct)                        → P2P guest
   JoinServerDrivenAsync(transport, host, port, roomId, sessionCfg, ct)       → SD client
   ReconnectAsync(transport, creds, sessionConfigSeed, ct)                    → cold-start reconnect (creds: PersistedReconnectCredentials)
@@ -1379,7 +1383,7 @@ PlayerReady (own fields + LayoutFingerprint + EnvironmentFingerprint)
 | OnFrameAdvantageReceived | `Action<int, int>` | Remote frame-advantage received (peerId, advantageTicks) |
 | OnLocalPlayerIdAssigned | `Action<int>` | Local player ID assignment completed |
 | OnFullStateRequested | `Action<int, int>` | Full-state request received (peerId, requestTick) |
-| OnFullStateReceived | `Action<int, byte[], long, FullStateKind>` | Full state received (tick, data, hash, kind). `kind` distinguishes `Unicast` (resync / late-join reply), `CorrectiveReset` (P2P host-broadcast on hash divergence), `InitialState` (SD session-start broadcast) |
+| OnFullStateReceived | `Action<int, byte[], long, FullStateKind>` | Full state received (tick, data, hash, kind). `kind` distinguishes `Unicast` (resync / late-join reply), `CorrectiveReset` (P2P host-broadcast on hash divergence), `InitialState` (the authority's tick-0 bootstrap broadcast — SD server or P2P host). A peer that was present at game start built the identical tick-0 state itself and drops the `InitialState` copy quietly, without counting it as an anomaly; the two hashes are compared on the way past, and a mismatch is reported as an error because it means the peers diverged before the first tick. Late joiners, which need the payload, are unaffected |
 | OnPlayerDisconnected | `Action<IPlayerInfo>` | Player disconnected (awaiting reconnect) |
 | OnPlayerReconnected | `Action<IPlayerInfo>` | Player reconnected (Host) |
 | OnReconnecting | `Action` | Reconnect in progress (Guest) |

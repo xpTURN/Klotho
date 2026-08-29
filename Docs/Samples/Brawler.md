@@ -511,8 +511,16 @@ CharacterView / ItemView / PlatformView : EntityView (prefab)
 | SD-Client local player | `NonVerified` | `None` |
 | SD-Client remote player / NPC | `Verified` | `EnableSnapshotInterpolation` |
 | Spectator-mode entire world | `Verified` | `EnableSnapshotInterpolation` |
+| Moving platform (`PlatformComponent`), any mode | `NonVerified` | `None` |
 
 For entities without `OwnerComponent` (items, etc.), use `UseVerifiedPath()` for a global decision.
+
+The platform row overrides **both** decision methods on purpose: EVU evaluates `TryGetBindBehaviour` and
+`GetViewFlags` independently, so changing only one would give a view whose lifetime follows the predicted
+frame while its rendering follows the verified window. A platform the local player stands on belongs on the
+predicted timeline, the same one the character is rendered from. Its view is also **adopted from the scene**
+rather than instantiated — `CreateAsync` returns the placed `PlatformView` and `Destroy` deactivates it — so
+`MovingPlatform.prefab` has to be present in the stage scene for the platform to appear at all.
 
 ### 12-3. EntityView Subclass
 

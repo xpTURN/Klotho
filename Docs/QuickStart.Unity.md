@@ -191,7 +191,7 @@ public sealed class PaddleViewFactory : EntityViewFactory
 }
 ```
 
-Wire the factory + (optional) `DefaultEntityViewPool` onto the scene's `EntityViewUpdater` and call `evu.Initialize(session.Engine)` at bootstrap. Full walkthrough: [GameDevWorkflow.md → Step 7](GameDevWorkflow.md).
+Wire the factory + (optional) `DefaultEntityViewPool` onto the scene's `EntityViewUpdater` and call `evu.Initialize(session.Engine)` at bootstrap — or hand either in from code with `evu.Initialize(session.Engine, factory, pool)` (`null` = keep what the Inspector holds), which is also how a custom `IEntityViewPool` is supplied, since Unity cannot serialize an interface. Full walkthrough: [GameDevWorkflow.md → Step 7](GameDevWorkflow.md).
 
 ---
 

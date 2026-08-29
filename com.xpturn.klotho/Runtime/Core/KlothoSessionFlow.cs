@@ -30,6 +30,12 @@ namespace xpTURN.Klotho.Core
             if (simulationConfig == null) throw new ArgumentNullException(nameof(simulationConfig));
             if (sessionConfig == null)    throw new ArgumentNullException(nameof(sessionConfig));
 
+            // The host authors this config and every guest ends up running it, so an invalid one stops here.
+            // KlothoEngine.Initialize cannot catch it: its authoritative-caller test reads IsHost, which only
+            // becomes true in HostGame -> CreateRoom, i.e. after Initialize — a P2P host therefore took the
+            // guest's log-and-proceed branch. This entry point knows it is hosting without having to ask.
+            simulationConfig.Validate();
+
             var callbacks = _setup.CallbacksFactory(simulationConfig, sessionConfig);
             var session = KlothoSession.Create(new KlothoSessionSetup
             {

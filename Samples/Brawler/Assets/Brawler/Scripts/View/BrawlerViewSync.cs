@@ -10,7 +10,8 @@ namespace Brawler
 {
     public class BrawlerViewSync : MonoBehaviour
     {
-        [SerializeField] private PlatformView[] _movingPlatforms;
+        private PlatformView[] _movingPlatforms;
+        
         [SerializeField] private GameHUD _gameHUD;
         [SerializeField] private ResultScreen _resultScreen;
 
@@ -28,17 +29,35 @@ namespace Brawler
         private EcsSimulation _simulation;
         private EntityViewUpdater _evu;
 
-        private bool _platformsAssigned;
-
         public void Initialize(IKlothoEngine engine, EcsSimulation simulation, EntityViewUpdater evu)
         {
             _engine = engine;
             _simulation = simulation;
             _evu = evu;
 
-            _platformsAssigned = false;
+            // Inactive must be included: the factory deactivates an adopted platform in Destroy,
+            // so from the second session on this would find nothing and the platform never returns.
+            _movingPlatforms = FindObjectsByType<PlatformView>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 
-            engine.OnTickExecuted += OnTickExecuted;
+            // FindObjectsByType promises no order, and the factory hands instances out from the tail
+            // against entities walked in dense index order — so WHICH scene object adopts WHICH platform
+            // entity could differ between runs and between peers. Nothing desyncs (this is view-only),
+            // but the moment platforms carry their own authoring — a mesh, a scale, a VFX — the visual
+            // and the collision geometry stop agreeing. Sorting by name fixes the pairing to something
+            // the scene author controls; descending, because the factory pops from the tail, so the
+            // first entity gets the first name (IMP105 C-12).
+            //
+            // Note the scan is process-wide: an additively loaded scene that also holds PlatformViews
+            // contributes here too. That is intended for the stage view scene, which is exactly how the
+            // platforms arrive, and there is no cheap way to tell the two cases apart from here.
+            System.Array.Sort(_movingPlatforms, (a, b) => string.CompareOrdinal(b.name, a.name));
+
+            // Hand the scene-placed platforms to the factory before the first Reconcile. The factory is
+            // a ScriptableObject and cannot hold scene references itself, so this runs every session —
+            // a reloaded scene leaves the previous array pointing at destroyed objects.
+            if (_evu != null && _evu.Factory is BrawlerEntityViewFactory factory)
+                factory.BindPlacedPlatforms(_movingPlatforms);
+
             engine.OnSyncedEvent  += OnSyncedEvent;
 
             if (_evu != null && _evu.PlayerViews != null)
@@ -55,10 +74,7 @@ namespace Brawler
         public void Cleanup()
         {
             if (_engine != null)
-            {
-                _engine.OnTickExecuted -= OnTickExecuted;
-                _engine.OnSyncedEvent  -= OnSyncedEvent;
-            }
+                _engine.OnSyncedEvent -= OnSyncedEvent;
 
             if (_evu != null && _evu.PlayerViews != null)
             {
@@ -67,7 +83,6 @@ namespace Brawler
                 _evu.PlayerViews.OnLocalViewUnregistered -= HandleLocalViewUnregistered;
             }
 
-            _platformsAssigned = false;
             _engine = null;
             _simulation = null;
             _evu = null;
@@ -92,32 +107,6 @@ namespace Brawler
         {
             _cameraController?.ClearFollowTarget();
             OnLocalCharacterDespawned?.Invoke();
-        }
-
-        private void OnTickExecuted(int tick)
-        {
-            TryAssignPlatformEntities();
-        }
-
-        private void TryAssignPlatformEntities()
-        {
-            if (_platformsAssigned) return;
-            if (_movingPlatforms == null || _movingPlatforms.Length == 0) return;
-            if (_simulation == null) return;
-
-            var frame = _simulation.Frame;
-
-            int idx    = 0;
-            var filter = frame.Filter<PlatformComponent, TransformComponent>();
-            while (filter.Next(out var entity) && idx < _movingPlatforms.Length)
-            {
-                _movingPlatforms[idx]?.Initialize(_simulation, _engine);
-                _movingPlatforms[idx]?.Assign(entity);
-                idx++;
-            }
-
-            if (idx >= _movingPlatforms.Length)
-                _platformsAssigned = true;
         }
 
         // ── Synced event: fires exactly once at the verified point ──

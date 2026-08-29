@@ -133,7 +133,11 @@ namespace Brawler
         private int _resolvedStageId;
         private string _desiredStageScene;   // scene we want loaded (null = none)
         private string _currentStageScene;   // scene actually loaded (set on load-complete, cleared on unload-complete)
-        private bool _stageSceneBusy;         // an async load/unload is in flight
+        private bool _stageSceneBusy;         // an async load/unload chain is in flight
+        private UniTask _stageSceneTask;      // that chain, Preserve()d so several callers can await it
+        // Bumped on every created session and on stop. An awaited stage-scene load spans frames, so the
+        // continuation checks this before touching the session it was started for.
+        private int _sessionGeneration;
         private IDataAssetRegistry _assetRegistry;
 
         private IKlothoSession _session;
@@ -825,47 +829,69 @@ namespace Brawler
         // Requests the stage's additive view scene (visual only — no sim state; determinism lives in the
         // baked geometry). Sets the desired target and reconciles; the target is null when the stage has no
         // view scene configured (e.g. headless).
-        private void LoadStageView(int stageId)
+        private UniTask LoadStageView(int stageId)
         {
             var s = ResolveStage(stageId);
             _desiredStageScene = (s != null && !string.IsNullOrEmpty(s._sceneName)) ? s._sceneName : null;
-            ReconcileStageView();
+            return ReconcileStageView();
         }
 
-        private void UnloadStageView()
+        private UniTask UnloadStageView()
         {
             _desiredStageScene = null;
-            ReconcileStageView();
+            return ReconcileStageView();
         }
 
         // Drives _currentStageScene toward _desiredStageScene one SceneManager async op at a time, gating on
         // our own state rather than Scene.isLoaded — that flag is false mid-load and true mid-unload, so
         // reading it races the in-flight op (stop-during-load leaks the scene; rejoin-during-unload drops the
-        // view). Re-invoked from each op's completed callback so a target change during a load/unload settles
-        // correctly. Main-thread only (session observer callbacks + AsyncOperation.completed), so no locking.
-        private void ReconcileStageView()
+        // view). Returns a task that completes when the view has settled on the CURRENT target, so a caller
+        // that has to see the scene (view init) can await it; a target change mid-flight is picked up by the
+        // running loop, and the same task then completes on the new target. Main-thread only (session
+        // observer callbacks + UniTask PlayerLoop), so no locking.
+        private UniTask ReconcileStageView()
         {
-            if (_stageSceneBusy) return;                          // in flight — the completed callback re-invokes
-            if (_desiredStageScene == _currentStageScene) return; // settled
+            if (_stageSceneBusy) return _stageSceneTask;                    // in flight — it settles on the latest target
+            if (_desiredStageScene == _currentStageScene) return UniTask.CompletedTask; // settled
 
-            if (_currentStageScene != null)
+            _stageSceneBusy = true;
+            _stageSceneTask = ReconcileStageViewAsync().Preserve();         // Preserve: awaited by more than one caller
+            return _stageSceneTask;
+        }
+
+        private async UniTask ReconcileStageViewAsync()
+        {
+            try
             {
-                // Unload the current scene first (target is a different scene or none).
-                _stageSceneBusy = true;
-                var op = SceneManager.UnloadSceneAsync(_currentStageScene);
-                if (op != null)
-                    op.completed += _ => { _currentStageScene = null; _stageSceneBusy = false; ReconcileStageView(); };
-                else { _currentStageScene = null; _stageSceneBusy = false; ReconcileStageView(); } // not loaded → settled
+                while (_desiredStageScene != _currentStageScene)
+                {
+                    if (_currentStageScene != null)
+                    {
+                        // Unload the current scene first (target is a different scene or none).
+                        var op = SceneManager.UnloadSceneAsync(_currentStageScene);
+                        if (op != null)
+                            await op;                             // null → not loaded, already settled
+                        _currentStageScene = null;
+                    }
+                    else
+                    {
+                        // Nothing loaded — load the desired scene additively.
+                        string toLoad = _desiredStageScene;
+                        var op = SceneManager.LoadSceneAsync(toLoad, LoadSceneMode.Additive);
+                        if (op == null)
+                        {
+                            _desiredStageScene = null;            // don't retry-loop
+                            _logger?.KError($"[Brawler] Stage view scene '{toLoad}' failed to load (in Build Settings?)");
+                            break;
+                        }
+                        await op;
+                        _currentStageScene = toLoad;
+                    }
+                }
             }
-            else
+            finally
             {
-                // Nothing loaded — load the desired scene additively.
-                _stageSceneBusy = true;
-                string toLoad = _desiredStageScene;
-                var op = SceneManager.LoadSceneAsync(toLoad, LoadSceneMode.Additive);
-                if (op != null)
-                    op.completed += _ => { _currentStageScene = toLoad; _stageSceneBusy = false; ReconcileStageView(); };
-                else { _stageSceneBusy = false; _desiredStageScene = null; _logger?.KError($"[Brawler] Stage view scene '{toLoad}' failed to load (in Build Settings?)"); } // don't retry-loop
+                _stageSceneBusy = false;
             }
         }
 
@@ -900,7 +926,20 @@ namespace Brawler
             // Load the stage's additive view scene (visual only) for the resolved stage. All entry kinds
             // resolve a stage in BuildCallbacks (host/guest/spectator/replay), so this is NOT gated by kind —
             // otherwise a stage-2 spectator/replay would render the default environment over stage-2 geometry.
-            LoadStageView(_resolvedStageId);
+            // View init waits for that load: BrawlerViewSync.Initialize collects the scene's PlatformViews
+            // with FindObjectsByType, so a scene still loading would hand the factory an empty set. With no
+            // stage view scene the reconcile is already settled and the await completes synchronously — the
+            // whole callback then runs exactly as before.
+            InitializeViewSyncAfterStageAsync(session, ++_sessionGeneration).Forget();
+        }
+
+        private async UniTaskVoid InitializeViewSyncAfterStageAsync(KlothoSession session, int generation)
+        {
+            await LoadStageView(_resolvedStageId);
+
+            // A stop straddling the load already tore this session down (and started unloading the scene) —
+            // initializing its view sync now would resurrect it against a dead Engine.
+            if (generation != _sessionGeneration) return;
 
             InitializeViewSync(session.Engine, session.Simulation);
         }
@@ -1047,13 +1086,15 @@ namespace Brawler
         // by the framework (ConfigureReplaySave). No re-entry guard needed.
         public void OnSessionStopped()
         {
+            _sessionGeneration++;   // cancels a pending view init awaiting this session's stage load
+
             // Process-exit: TeardownAll already owns terminal cleanup and _gameMenu may have been
             // destroyed first in OnDestroy ordering — skip UI to avoid MissingReferenceException.
             if (_teardownInvoked) { _session = null; return; }
 
             _logger?.KInformation($"[Brawler] Game stopped");
             _session = null;
-            UnloadStageView();
+            UnloadStageView().Forget();
             ResetToInitialUi();
         }
 

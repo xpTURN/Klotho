@@ -27,12 +27,12 @@ How to run: see [`<repo>/Samples/GodotP2pSample/README.md`](../../Samples/GodotP
 
 ## 2. Relationship to P2pSample (what's shared, what's new)
 
-The deterministic game logic is **identical** to P2pSample — same components, commands, events, systems, data asset, and rules. Only the engine-facing layer is rewritten for Godot.
+The deterministic game logic is **the same** as P2pSample — same components, commands, events, systems, data asset, and rules — apart from one deliberate addition, the error-correction marker noted in the table below. Only the engine-facing layer is rewritten for Godot.
 
 | Layer | P2pSample (Unity) | GodotP2pSample |
 |---|---|---|
 | Sim (`PlayerComponent`/`MoveCommand`/`MovementSystem`/`ScoreSystem`/`RespawnSystem`/`GameOverEvent`/`PlayerStatsAsset`) | `Sim/` asmdef | **Copied verbatim** into `Sim/` |
-| `P2pSimulationCallbacks` | `View/` | **Copied verbatim** into `Game/` (its only non-core dependency is the input capture) |
+| `P2pSimulationCallbacks` | `View/` | Copied into `Game/` (its only non-core dependency is the input capture), with one addition — it adds `ErrorCorrectionTargetComponent` to each spawned player, because this sample runs with error correction on |
 | Data asset (`P2pAssets.bytes`) | baked in-project | **Copied** into `Data/`, loaded via Godot `FileAccess` |
 | Bootstrap | `P2pGameController : MonoBehaviour` + `KlothoSessionDriver` | `P2pGameNode : Node` + `GodotSessionDriver` (transport+session pump) |
 | View pooling | `DefaultEntityViewPool` | `DefaultGodotEntityViewPool` (Prewarm `MaxPlayers`) |
@@ -82,6 +82,7 @@ Identical to P2pSample — see [P2pSample.md §4](P2pSample.md) for the componen
 - `PlayerStatsAsset` (`AssetId=100`): MoveSpeed / MatchDuration / FallThresholdY / SpawnPoint / InitialSpawnOffsetX / PlayerMass / PlayerHalfExtent.
 - `MovementSystem` (`velocity.x = H`, `velocity.z = V`), `RespawnSystem`, `ScoreSystem` (`GameOverEvent` at `matchEndTick`).
 - `P2pSimulationCallbacks.OnInitializeWorld` spawns `MaxPlayers` players (±`InitialSpawnOffsetX`) and registers a 10×0.2×10 ground collider (top face at y=0).
+- **Error correction is on here**, which takes two things and not one: `P2pGameNode` builds its `SimulationConfig` with `EnableErrorCorrection = true`, *and* the spawn adds `ErrorCorrectionTargetComponent` — the flag only arms the view-side smoother, while the deltas it smooths are produced only for marked entities. Under P2P every view renders on the predicted (CSP) path, so every player entity is a valid target. This is the one place the sim differs from P2pSample (Unity), which ships with the flag off. See [SimulationConfigGuide §1.1](../SimulationConfigGuide.md#11-enabling-error-correction--three-touches).
 
 Because this is pure core/ECS code, it compiles and runs under Godot's .NET with **no engine reference** — the whole point of the port.
 

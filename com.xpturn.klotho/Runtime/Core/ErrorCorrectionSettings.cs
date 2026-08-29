@@ -1,68 +1,40 @@
 namespace xpTURN.Klotho.Core
 {
     /// <summary>
-    /// Error Correction pipeline settings. Holds the thresholds/decay parameters used by the engine to compute deltas.
-    /// View-side accumulation/decay/interpolation parameters are managed separately in <c>ErrorVisualState</c>.
-    /// The engine computes the position/rotation difference before and after rollback; if it is below the threshold, the delta is ignored,
-    /// and otherwise this delta is exposed to the view via GetPositionDelta / GetYawDelta / HasEntityTeleported.
+    /// The engine's rollback-delta filter — the two thresholds below which a correction is not worth
+    /// reporting to the view at all.
+    ///
+    /// After a rollback the engine compares each entity's pre- and post-rollback render-space transform;
+    /// a difference below the matching threshold is dropped, and anything above it is exposed through
+    /// <c>GetPositionDelta</c> / <c>GetYawDelta</c> / <c>HasEntityTeleported</c>.
+    ///
+    /// <b>Nothing about how that delta is then damped lives here.</b> Accumulation, variable-rate decay,
+    /// zero-snap, teleport-snap and smoothing are the view's, in <c>ErrorVisualState</c>, and they are
+    /// tuned per view (Inspector / prefab) rather than per engine.
+    ///
+    /// This type used to carry seven more fields — MinRate, MaxRate, PosBlendStart, PosBlendEnd,
+    /// PosTeleportDistance, RotTeleportDeg, SmoothingRate — that the engine never read. All seven existed
+    /// verbatim on <c>ErrorVisualState</c>, so raising one here did nothing while an identically named
+    /// knob did the work elsewhere; they were removed for that reason (IMP103). The two that remain are
+    /// deliberately NOT duplicated on the view side, which is why the deletion boundary was simply "the
+    /// names that collide" — IMP24 drew it that way on purpose when it split the view parameters out.
     /// </summary>
     public struct ErrorCorrectionSettings
     {
-        /// <summary>Lower bound of the decay rate. Applied when the error is at or below PosBlendStart.</summary>
-        public float MinRate;
-
-        /// <summary>Upper bound of the decay rate. Applied when the error is at or above PosBlendEnd.</summary>
-        public float MaxRate;
-
-        /// <summary>Decay-rate interpolation start error magnitude (m). Below this, MinRate is held constant.</summary>
-        public float PosBlendStart;
-
-        /// <summary>Decay-rate interpolation end error magnitude (m). At or above this, MaxRate is held constant.</summary>
-        public float PosBlendEnd;
-
         /// <summary>
-        /// Minimum position correction threshold (m).
-        /// Engine: rollback deltas below this value are ignored.
-        /// Smoother: when the accumulated error decays at or below this value, snaps to zero.
+        /// Minimum position correction threshold (m). Rollback deltas below this value are ignored.
         /// </summary>
         public float PosMinCorrection;
 
         /// <summary>
-        /// Position teleport distance (m).
-        /// Smoother: if the accumulated error is at or above this value, resets immediately instead of decaying (snap).
-        /// </summary>
-        public float PosTeleportDistance;
-
-        /// <summary>
-        /// Minimum rotation correction threshold (degrees).
-        /// Engine: rollback yaw deltas below this value are ignored.
-        /// Smoother: when the accumulated yaw error decays at or below this value, snaps to zero.
+        /// Minimum rotation correction threshold (degrees). Rollback yaw deltas below this value are ignored.
         /// </summary>
         public float RotMinCorrectionDeg;
 
-        /// <summary>
-        /// Rotation teleport threshold (degrees).
-        /// Smoother: if the accumulated yaw error is at or above this value, resets immediately.
-        /// </summary>
-        public float RotTeleportDeg;
-
-        /// <summary>
-        /// View interpolation rate. blend = 1 - exp(-SmoothingRate * dt).
-        /// Higher values cause _smoothed to track _accumulated more aggressively.
-        /// </summary>
-        public float SmoothingRate;
-
         public static ErrorCorrectionSettings Default => new()
         {
-            MinRate             = 3f,
-            MaxRate             = 10f,
-            PosBlendStart       = 0.01f,
-            PosBlendEnd         = 0.2f,
             PosMinCorrection    = 0.001f,
-            PosTeleportDistance  = 1f,
             RotMinCorrectionDeg = 0.05f,
-            RotTeleportDeg      = 90f,
-            SmoothingRate       = 200f,
         };
     }
 }

@@ -472,25 +472,134 @@ public class HeroView : EntityView
 // 3. Scene wiring — bind the Factory asset and (optionally) DefaultEntityViewPool to EntityViewUpdater.
 //    Call Initialize during session bootstrap.
 evu.Initialize(session.Engine);
+//    Code can supply either instead of the Inspector — DI, a runtime CreateInstance factory, a test
+//    harness, or a custom IEntityViewPool. Null means "keep what is already set", not "use the field".
+evu.Initialize(session.Engine, factory, pool);
 
 // 4. On session shutdown — return active views, unsubscribe OnTickExecuted
 //    (GameObjects are preserved for reuse).
 evu.Cleanup();
+//    Initialize re-entry reclaims for you: it begins with Cleanup(), so a second Initialize returns
+//    the still-active views through the factory before attaching the new engine. Call Cleanup() at
+//    session end anyway — that is where the game controls WHEN its views go away.
 ```
 
-**Transform pipeline (base-delegated)** — Do **not** override `ApplyTransform` / `LateUpdate` / hand-roll a lerp in subclasses. The base `EntityView` performs lerp + `ApplyTransform` + `UpdatePositionParameter` populate inside `InternalLateUpdateView` (fused with `_errorVisual.Tick`) so that tick-rate < frame-rate environments reflect every per-frame `PredictedAlpha` change without stale-lerp stutter. `UpdatePositionParameter` zeros `ErrorVisualVector` / `ErrorVisualQuaternion` when `EnableSnapshotInterpolation` is set so the verified-frame interpolation path doesn't double-correct the rollback delta. Game subclasses override `OnUpdateView` / `OnLateUpdateView` for game-data cache + visual-feedback toggles only.
+**`ViewFlags` is merged with the prefab, not assigned over it.** The two enums are handled differently on
+purpose: `TryGetBindBehaviour` returns a value that covers the whole enum, so the factory's answer replaces
+whatever the prefab serialized — but `ViewFlags` is a bitfield the factory only has an opinion about part of.
+Composition is `(prefab & ~owned) | (factory & owned)`, where `owned` is the factory's virtual
+`FactoryOwnedFlags` (default: `EnableSnapshotInterpolation`). So:
+
+- Prefab-authored view-local behaviour (`DisableUpdate`, `DisablePositionUpdate`) survives the spawn.
+- `EnableSnapshotInterpolation` is the **factory's** call — it follows from mode and ownership, and setting
+  it in the Inspector has no effect. Forcing it onto a local player's entity would render that entity from
+  the verified window instead of the predicted frame — several ticks in the past (under SD, the client lead
+  plus `InterpolationDelayTicks`) — and cost exactly that much input response.
+- If your `GetViewFlags` override decides a *further* bit, widen the mask by overriding `FactoryOwnedFlags`
+  as well — otherwise the merge keeps the prefab's value for it and your decision is dropped.
+
+**Transform pipeline (base-delegated)** — Do **not** override `ApplyTransform` / `LateUpdate` / hand-roll a lerp in subclasses. The base `EntityView` performs lerp + `ApplyTransform` + `UpdatePositionParameter` populate inside `InternalLateUpdateView` (fused with `_errorVisual.Tick`) so that tick-rate < frame-rate environments reflect every per-frame `PredictedAlpha` change without stale-lerp stutter. `UpdatePositionParameter` zeros `ErrorVisualVector` / `ErrorVisualQuaternion` when `EnableSnapshotInterpolation` is set so the verified-frame interpolation path doesn't double-correct the rollback delta — and the whole error-visual stage is skipped when `EnableErrorCorrection` is off, so a game that never turns it on pays nothing per view per frame. Game subclasses override `OnUpdateView` / `OnLateUpdateView` for game-data cache + visual-feedback toggles only. Error correction is opt-in and takes more than the config flag — the deltas `_errorVisual` smooths exist only for entities your simulation marks, see [SimulationConfigGuide §1.1](./SimulationConfigGuide.md#11-enabling-error-correction--three-touches).
 
 **How it works**
 - **Reconcile timing** — runs each tick on the `IKlothoEngine.OnTickExecuted` hook
   1. Scans `VerifiedFrame` / `PredictedFrame` and collects entities whose `TryGetBindBehaviour` matches the corresponding path
   2. New entities → asynchronous spawn via `CreateAsync` (a spawn-sequence counter + `EntityRef.Version` prevent duplicate / stale calls)
-  3. Disappeared entities → `OnDeactivate`, then `Factory.Destroy` (auto-return when a Pool is present)
+  3. Disappeared entities → `OnDeactivate`, then `Factory.Destroy` (auto-return when a Pool is present). A **snapshot-interpolated** view is held back until the render clock reaches the tick its entity left on — its render trails the Verified frame by `InterpolationDelayTicks`, so destroying it on disappearance would drop the last `delay` ticks of motion. During that grace it keeps receiving per-frame interpolation but **not** `OnUpdateView` (the entity can no longer be looked up); see [GameDevAPI §7](./GameDevAPI.md). CSP views are destroyed immediately — their lifetime tick and their render tick are the same
 - **Hybrid dedup (`EntityRef.Version` + Owner)** — on every Reconcile, EVU compares the live view against the current frame on two axes:
   - `EntityRef.Version` mismatch → entity slot was reused after destroy / rollback → **Rebind** (destroy old view, spawn new) and emit `[ViewLife][Rebind]` (Debug)
-  - For entities with `OwnerComponent`, EVU also calls `EntityView.OwnerMatches(currentOwnerId)`. Mismatch → stale destroy. Owner-bearing views **must** override `OwnerMatches`; the default returns `false` to fail loudly.
+  - For entities with `OwnerComponent`, EVU also calls `EntityView.OwnerMatches(currentOwnerId)`. Mismatch → stale destroy. Owner-bearing views **must** override `OwnerMatches`; the default returns `false` to fail loudly. A view whose entity has no `OwnerComponent` is never asked — the helper short-circuits — so overriding it there is dead code that later gets copied as if it were required.
 - **Async safety** — if an entity disappears mid-spawn (or its slot is reused) before `CreateAsync` resolves, the result is discarded automatically via the spawn-counter + version mismatch.
 - **Factory init constraint** — do not query `Engine.LocalPlayerId` / `IsServer` from the constructor or `OnEnable`. Those values are only guaranteed inside `TryGetBindBehaviour` / `GetViewFlags` / `CreateAsync`.
-- **Pool** — wiring `DefaultEntityViewPool` to the `EntityViewUpdater._pool` field enables prefab reuse via `Rent` / `Return` (optional).
+- **Pool** — wiring `DefaultEntityViewPool` to the `EntityViewUpdater._pool` field enables prefab reuse via `Rent` / `Return` (optional). That field is a concrete type because Unity cannot serialize an interface, so a custom `IEntityViewPool` (async load, Addressables warmup) is handed in through `Initialize` instead.
+
+**Adopting a scene-placed (pre-placed) object as a View**
+
+Sometimes the visual already exists in the scene — a moving platform, an elevator, a level prop the artist positioned by hand — and the simulation entity for it is spawned by game code. Do **not** drive such an object with your own `LateUpdate` + lerp: nothing outside EVU can run the base transform pipeline (`InternalLateUpdateView` is `internal`, and `EntityView` has no `LateUpdate` of its own), so hand-rolling means re-deriving interpolation, teleport handling and version-safe frame lookups yourself. Instead let the Factory *adopt* the existing instance — `CreateAsync` returns it instead of instantiating, and `Destroy` deactivates it instead of destroying:
+
+```csharp
+public class StageViewFactory : EntityViewFactory
+{
+    // ScriptableObjects cannot hold scene references, so a scene component hands the
+    // instances over at session start (and again on every re-init — a reloaded scene
+    // invalidates the old ones).
+    // TryTakePlaced pops from this; Destroy pushes back into it. A plain array cannot express that,
+    // so the live state is a list rebuilt from scratch on every bind.
+    private readonly List<PlatformView> _placedPool = new();
+    private bool _hasPlaced;        // fixed at bind time — see TryGetBindBehaviour
+    public void BindPlacedViews(PlatformView[] placed)
+    {
+        _placedPool.Clear();
+        if (placed != null)
+            foreach (var v in placed) if (v != null) _placedPool.Add(v);
+        _hasPlaced = _placedPool.Count > 0;
+    }
+
+    protected override bool ShouldRender(Frame frame, EntityRef e)
+        => frame.Has<PlatformComponent>(e) || /* … */;
+
+    // Adoption can FAIL — fewer placed instances than entities, or none at all. CreateAsync then falls
+    // through to the base path, which asks ResolvePrefab; returning null there makes EVU discard the
+    // spawn and try again on the very next tick, forever and silently. Decide which you want:
+    // refuse the entity in TryGetBindBehaviour (below), or give ResolvePrefab a real fallback prefab.
+    protected override GameObject ResolvePrefab(Frame frame, EntityRef e) => /* … */;
+
+    public override UniTask<EntityView> CreateAsync(
+        Frame frame, EntityRef e, BindBehaviour b, ViewFlags f)
+    {
+        if (frame.Has<PlatformComponent>(e) && TryTakePlaced(out var view))
+        {
+            view.gameObject.SetActive(true);          // ← see pitfall 4
+            return UniTask.FromResult<EntityView>(view);
+        }
+        return base.CreateAsync(frame, e, b, f);
+    }
+
+    public override void Destroy(EntityView view)
+    {
+        if (view is PlatformView placed)                                         // ← pitfall 1
+        {
+            // Deactivating is only half of it: hand the instance back, or the next CreateAsync finds
+            // nothing to adopt and the platform is gone for the rest of the session (← pitfall 5).
+            // The null check is Unity's — a reloaded scene leaves destroyed objects in the array.
+            if (placed != null)
+            {
+                placed.gameObject.SetActive(false);
+                if (!_placedPool.Contains(placed)) _placedPool.Add(placed);
+            }
+            return;
+        }
+        base.Destroy(view);
+    }
+
+    // Keep the adopted entity on the same timeline as the local player (see pitfall 2).
+    public override bool TryGetBindBehaviour(Frame frame, EntityRef e, out BindBehaviour b)
+    {
+        if (frame.Has<PlatformComponent>(e))
+        {
+            // Nothing placed this session ⇒ not a render candidate, which is what stops the retry loop
+            // pitfall 5 describes. Gate on a value fixed at bind time, NOT on _placedPool.Count: a
+            // decision that flips when the last instance is adopted makes EVU destroy the live view and
+            // respawn it on alternating ticks.
+            if (!_hasPlaced) { b = BindBehaviour.Verified; return false; }
+            b = BindBehaviour.NonVerified; return true;
+        }
+        return base.TryGetBindBehaviour(frame, e, out b);
+    }
+
+    public override ViewFlags GetViewFlags(Frame frame, EntityRef e)
+        => frame.Has<PlatformComponent>(e) ? ViewFlags.None : base.GetViewFlags(frame, e);
+}
+```
+
+The adopted view then gets everything a spawned one gets: `EntityRef` / `Engine` injection, flag composition, `InternalActivate`, interpolation, error-visual, the despawn grace, and lifecycle callbacks (`OnActivate` / `OnUpdateView` / `OnDeactivate`) — including teardown on `EntityViewUpdater.Cleanup()`.
+
+Five pitfalls, in the order they bite:
+
+1. **`Destroy` must be overridden — it is not optional.** The default returns the view to the Pool when one is wired, and `DefaultEntityViewPool.Return` treats a view it never handed out as "created outside the pool" and calls `Object.Destroy` on it. A scene object adopted this way is never in the pool's registry, so with a Pool wired the *first* rebind / stale-despawn / `Cleanup` **destroys the scene object permanently**.
+2. **Decide the timeline once, in both places.** `TryGetBindBehaviour` and `GetViewFlags` evaluate the predicate *independently*: overriding only the first yields a view whose lifetime follows the Predicted frame while its rendering follows the Verified window. Pick one answer and return it from both. Which answer is right is a game decision — an object the local player stands on or collides with belongs on the **predicted** timeline (`NonVerified` + `ViewFlags.None`) so it matches the locally-predicted character; a purely decorative one can stay on the default verified/snapshot path.
+3. **Scene references reach the Factory at runtime, not through the Inspector.** A `ScriptableObject` cannot serialize scene objects, so a scene component must hand the list over during bootstrap (before or right after `evu.Initialize`) and re-hand it whenever the scene is reloaded — a stale array points at destroyed objects.
+4. **Re-activation is yours — and so is the pose.** EVU never touches `SetActive`; activation was always the Pool's or `Instantiate`'s job, so if your `Destroy` override deactivates, your `CreateAsync` override must re-activate on the next session. The same applies to placement: every other spawn path puts the view at its entity before returning it, and an override that returns without calling base skips that. Use `TryGetSpawnPose` (`protected static`, both adapters) — `if (TryGetSpawnPose(frame, entity, out var pos, out var rot)) view.transform.SetPositionAndRotation(pos, rot);`. It returns false for an entity with no transform; leave the pose alone then. A view that runs the position line corrects itself on the first frame anyway, but one with `DisableUpdate` / `DisablePositionUpdate` stays where the scene left it forever.
+5. **Adoption can fail, and the retry does not stop on its own.** With no instance left to adopt, `CreateAsync` falls through to `base.CreateAsync` → `ResolvePrefab` → `null`, and EVU discards the spawn *and re-dispatches it on the next tick*, indefinitely. EVU warns once per updater when a factory returns no view (`[ViewLife] Factory returned no view for entity=…`), so the loop is no longer silent — but the warning is a symptom report, not a fix, and it fires once while the retry continues every tick. Decide the answer explicitly: refuse the entity in `TryGetBindBehaviour` (as above) when nothing was placed, or give `ResolvePrefab` a fallback prefab. Note the gate must read a value fixed at bind time — see the comment in `TryGetBindBehaviour`.
 
 **Godot:**
 

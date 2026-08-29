@@ -189,6 +189,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 multiFloorYThreshold, null, out _);
         }
 
+        // The five lines below are Trace, not Debug. This runs per agent per move step, so at Debug it
+        // emitted three lines for every ordinary step — 96-98% of a Brawler session log, which buries
+        // every other diagnostic the level exists to show. Trace keeps them one level away for when the
+        // walk itself is what you are debugging (IMP105 follow-up).
         public (FPVector3 resultPos, int resultTri) MoveAlongSurfaceWithVisited(
             FPVector3 startPos, FPVector3 endPos, int startTri, FP64 multiFloorYThreshold,
             int[] outVisited, out int visitedCount)
@@ -197,7 +201,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             if (startTri < 0)
             {
-                _logger?.KDebug($"[MoveAlongSurface] startTri<0, skip. startPos={startPos}");
+                _logger?.KTrace($"[MoveAlongSurface] startTri<0, skip. startPos={startPos}");
                 return (startPos, startTri);
             }
 
@@ -205,7 +209,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FPVector2 endXZ = endPos.ToXZ();
             FP64 startCenterY = _navMesh.Triangles[startTri].centerY;
 
-            _logger?.KDebug($"[MoveAlongSurface] start={startPos} end={endPos} startTri={startTri} startCenterY={startCenterY}");
+            _logger?.KTrace($"[MoveAlongSurface] start={startPos} end={endPos} startTri={startTri} startCenterY={startCenterY}");
 
             // BFS initialization
             FPVector2 bestPos = startXZ;
@@ -241,7 +245,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     bestPos = endXZ;
                     bestTri = curTri;
                     reachedEnd = true;
-                    _logger?.KDebug($"[MoveAlongSurface] endPos inside tri={curTri}, reached destination");
+                    _logger?.KTrace($"[MoveAlongSurface] endPos inside tri={curTri}, reached destination");
                     break;
                 }
 
@@ -271,7 +275,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                         }
                         else
                         {
-                            _logger?.KDebug($"[MoveAlongSurface] tri={curTri} e={e} neighbor={neighbor} yStep={yStep} > threshold={multiFloorYThreshold} → wall");
+                            _logger?.KTrace($"[MoveAlongSurface] tri={curTri} e={e} neighbor={neighbor} yStep={yStep} > threshold={multiFloorYThreshold} → wall");
                         }
                     }
 
@@ -308,7 +312,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // Height correction
             FP64 height = SampleHeight(bestPos, bestTri);
             FPVector3 result = new FPVector3(bestPos.x, height, bestPos.y);
-            _logger?.KDebug($"[MoveAlongSurface] result={result} resultTri={bestTri} reached={reachedEnd} visited={visitedCount} bestDist={bestDist}");
+            _logger?.KTrace($"[MoveAlongSurface] result={result} resultTri={bestTri} reached={reachedEnd} visited={visitedCount} bestDist={bestDist}");
             return (result, bestTri);
         }
 

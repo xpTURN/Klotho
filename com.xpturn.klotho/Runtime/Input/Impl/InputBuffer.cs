@@ -289,7 +289,7 @@ namespace xpTURN.Klotho.Input
             return _commands.ContainsKey(tick) && _commands[tick].Count > 0;
         }
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
         public void DumpTickRange(int fromTick, int toTick)
         {
             if (_logger == null)
@@ -351,7 +351,7 @@ namespace xpTURN.Klotho.Input
             return false;
         }
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
         public (int lo, int hi) GetBufferedTickRange(int playerId)
         {
             int lo = int.MaxValue;

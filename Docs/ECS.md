@@ -709,7 +709,7 @@ Klotho ships two clearly separated sets. Knowing which is which tells you what y
 | ---- | ---- | :--: | ---- |
 | `TransformComponent` | 1 | ✔ | Position / rotation / scale, plus the `Previous*` fields the view interpolates from. |
 | `OwnerComponent` | 2 |  | Which player owns the entity. The usual key for "is this command allowed to touch it". |
-| `ErrorCorrectionTargetComponent` | 3 | ✔ | Marks an entity the engine may smooth toward a corrected state. |
+| `ErrorCorrectionTargetComponent` | 3 | ✔ | Marks an entity the engine may smooth toward a corrected state. The game adds it — `EnableErrorCorrection` on its own produces no deltas, and only entities carrying this marker get any. See [SimulationConfigGuide §1.1](SimulationConfigGuide.md#11-enabling-error-correction--three-touches). |
 | `SessionParticipantComponent` | 4 | ✔ | The engine writes one per active player at `Start()`, as an all-participants-spawned gate. |
 | `RandomSeedComponent` | 5 | ✔ | Singleton. Engine-injected at session start and restored on late-join / reconnect / spectator / replay — the source for `DeterministicRandom`. |
 | `MatchEndStateComponent` | 26 | ✔ | Singleton. Match-end bookkeeping the engine reads for the end-of-match ladder. |

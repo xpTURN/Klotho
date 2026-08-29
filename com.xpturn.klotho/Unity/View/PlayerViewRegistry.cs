@@ -10,6 +10,13 @@ namespace xpTURN.Klotho
     /// Maps playerId to EntityView for Owner-bearing views. EVU populates this from OwnerComponent
     /// on spawn / despawn — game code typically only subscribes to the events.
     ///
+    /// <b>This maps a player to the view ON SCREEN, not to a live entity.</b> A snapshot-bound view
+    /// outlives its entity by the despawn grace (up to InterpolationDelayTicks of render time), and it
+    /// stays registered for that whole window: it is still interpolating and still the thing a camera
+    /// should follow. So Get(playerId) can return a view whose entity has already left the Verified
+    /// frame, and OnLocalViewUnregistered fires when the view is destroyed — not when the entity dies.
+    /// Do not read this map as a liveness oracle; ask the frame for that.
+    ///
     /// Spectator mode reports LocalPlayerId=0 (KlothoEngine.LocalPlayerId fallback when networkService is null),
     /// which collides with the real host playerId=0. IsActuallyLocal disambiguates via IsSpectatorMode.
     /// </summary>

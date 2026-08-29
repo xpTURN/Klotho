@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
@@ -9,9 +10,11 @@ namespace xpTURN.Klotho.Generator.Emitters
     {
         public static string Emit(ImmutableArray<SerializableTypeInfo> types)
         {
-            var commands = types.Where(t => t.Category == TypeCategory.Command && t.TypeId.HasValue).ToList();
-            var events   = types.Where(t => t.Category == TypeCategory.Event).ToList();
-            var messages = types.Where(t => t.Category == TypeCategory.Message).ToList();
+            // Sorted for the same reason as FactoryEmitter: Collect() order is per-project, so an
+            // unsorted emit drifts between the client and server copies.
+            var commands = types.Where(t => t.Category == TypeCategory.Command && t.TypeId.HasValue).OrderBy(t => t.FullTypeName, StringComparer.Ordinal).ToList();
+            var events   = types.Where(t => t.Category == TypeCategory.Event).OrderBy(t => t.FullTypeName, StringComparer.Ordinal).ToList();
+            var messages = types.Where(t => t.Category == TypeCategory.Message).OrderBy(t => t.FullTypeName, StringComparer.Ordinal).ToList();
 
             if (commands.Count == 0 && events.Count == 0 && messages.Count == 0)
                 return null;

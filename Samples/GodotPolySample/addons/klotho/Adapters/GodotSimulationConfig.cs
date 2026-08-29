@@ -36,7 +36,7 @@ namespace xpTURN.Klotho.Godot
         [Export] public bool EnableErrorCorrection { get; set; } = false;
 
         // View Interpolation
-        [Export(PropertyHint.Range, "1,3")] public int InterpolationDelayTicks { get; set; } = 3;
+        [Export(PropertyHint.Range, "1,4")] public int InterpolationDelayTicks { get; set; } = 3;
 
         // P2P Quorum-Miss Watchdog
         [Export] public int QuorumMissDropTicks { get; set; } = 20;

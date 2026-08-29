@@ -2,7 +2,13 @@ namespace xpTURN.Klotho
 {
     /// <summary>
     /// Policy that determines which frame source to bind against when creating a view.
-    /// The prefab Inspector value is the default; Factory can override it at runtime.
+    ///
+    /// <b>On the EVU spawn path the Factory decides this outright.</b>
+    /// <c>EntityViewFactory.TryGetBindBehaviour</c>'s answer is assigned wholesale, which is safe because
+    /// it covers the whole enum — nothing is lost by overwriting. The consequence is that a value
+    /// serialized on a prefab is <b>discarded there</b>; it only takes effect on creation paths that
+    /// bypass EVU (a view wired directly, see <c>EntityView</c>). Contrast <see cref="ViewFlags"/>: a
+    /// bitfield the Factory only partly decides, and therefore merges instead of replacing (IMP104 W-6).
     /// </summary>
     public enum BindBehaviour
     {

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -11,12 +12,15 @@ namespace xpTURN.Klotho.Generator.Emitters
         public static string Emit(ImmutableArray<SerializableTypeInfo> types,
             bool hasEntityFactory, bool hasCommandFactory, bool hasMessageSerializer)
         {
+            // Sorted by type name: Collect() preserves the compilation's syntax tree order, which
+            // differs per project even for the same sources, so an unsorted emit makes the client and
+            // server copies drift in registration order alone.
             var entities = hasEntityFactory
-                ? types.Where(t => t.Category == TypeCategory.Entity && t.TypeId.HasValue).ToList()
+                ? types.Where(t => t.Category == TypeCategory.Entity && t.TypeId.HasValue).OrderBy(t => t.FullTypeName, StringComparer.Ordinal).ToList()
                 : new List<SerializableTypeInfo>();
-            var commands = types.Where(t => t.Category == TypeCategory.Command && t.TypeId.HasValue).ToList();
+            var commands = types.Where(t => t.Category == TypeCategory.Command && t.TypeId.HasValue).OrderBy(t => t.FullTypeName, StringComparer.Ordinal).ToList();
             var messages = types.Where(t => t.Category == TypeCategory.Message
-                                         && (t.MessageTypeEnum != null || t.MessageTypeRawValue.HasValue)).ToList();
+                                         && (t.MessageTypeEnum != null || t.MessageTypeRawValue.HasValue)).OrderBy(t => t.FullTypeName, StringComparer.Ordinal).ToList();
 
             if (entities.Count == 0 && commands.Count == 0 && messages.Count == 0)
                 return null;

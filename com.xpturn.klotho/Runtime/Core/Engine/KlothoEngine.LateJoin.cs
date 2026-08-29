@@ -20,7 +20,7 @@ namespace xpTURN.Klotho.Core
         // Same pattern as _consumePendingDeltaTime.
         private bool _pendingLateJoinActivation;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
         // Diagnostic — catch-up duration measurement.
         private long _catchupStartWallMs;
         private int _catchupStartTick;
@@ -32,7 +32,7 @@ namespace xpTURN.Klotho.Core
             _catchupLastConfirmedTick = CurrentTick - 1;
             _pendingLateJoinActivation = false; // reset for reconnect/consecutive Late Join
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             _catchupStartWallMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _catchupStartTick = CurrentTick;
             _logger?.KInformation($"[KlothoEngine][LateJoin] Catchup START: tick={CurrentTick}, lastConfirmed={_catchupLastConfirmedTick}");
@@ -97,7 +97,7 @@ namespace xpTURN.Klotho.Core
             {
                 _isCatchingUp = false;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 long catchupDurationMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _catchupStartWallMs;
                 int ticksAdvanced = CurrentTick - _catchupStartTick;
                 _logger?.KInformation($"[KlothoEngine][LateJoin] Catchup COMPLETE: durationMs={catchupDurationMs}, ticksAdvanced={ticksAdvanced}, finalTick={CurrentTick}");
@@ -189,7 +189,7 @@ namespace xpTURN.Klotho.Core
                 _simulationCallbacks?.OnPlayerJoinedWorld(this, frame, joinedPlayerId);
             }
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             var sb = new System.Text.StringBuilder();
             for (int i = 0; i < _activePlayerIds.Count; i++)
             {

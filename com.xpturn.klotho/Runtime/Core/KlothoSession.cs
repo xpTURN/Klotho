@@ -261,7 +261,7 @@ namespace xpTURN.Klotho.Core
             {
                 // Defer Stop to next Update tick — avoid re-entrancy during OnMatchEnded dispatch.
                 _clientShutdownEndMs = 1;
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 _logger?.KDebug($"[KlothoSession] Auto-shutdown scheduled in 0ms (deferred to next Update tick)");
 #endif
                 return;
@@ -269,7 +269,7 @@ namespace xpTURN.Klotho.Core
 
             long nowMs = System.DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _clientShutdownEndMs = nowMs + graceMs;
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             _logger?.KDebug($"[KlothoSession] Auto-shutdown scheduled in {graceMs}ms");
 #endif
         }

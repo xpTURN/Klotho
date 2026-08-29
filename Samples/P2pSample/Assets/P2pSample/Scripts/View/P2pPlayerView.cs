@@ -13,8 +13,6 @@ namespace xpTURN.Samples.P2pSample
 
         public int PlayerId { get; private set; } = -1;
 
-        public override bool OwnerMatches(int ownerId) => PlayerId == ownerId;
-
         public override void OnActivate(FrameRef frame)
         {
             base.OnActivate(frame);

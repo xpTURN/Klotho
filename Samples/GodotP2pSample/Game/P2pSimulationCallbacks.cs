@@ -75,6 +75,7 @@ namespace xpTURN.Samples.P2pSample
                     LastInputH = FP64.Zero,
                     LastInputV = FP64.Zero,
                 });
+                frame.Add(entity, new ErrorCorrectionTargetComponent());
             }
         }
 

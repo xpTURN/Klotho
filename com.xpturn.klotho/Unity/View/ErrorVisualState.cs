@@ -16,6 +16,20 @@ namespace xpTURN.Klotho
     ///   3. Snap to zero if below the Zero-snap lower bound (PosZeroSnapThreshold / RotZeroSnapThresholdDeg)
     ///   4. Apply variable decay rate proportional to accumulated magnitude (pos/rot independent)
     ///   5. Exp-blend smoothing based on SmoothingRate
+    ///
+    /// Stages 4 and 5 are not equal partners at the default tuning, and the split is deliberate. Stage 4
+    /// does the visible work: at MaxRate the accumulated error has a 100ms time constant, but the rate
+    /// falls toward MinRate below PosBlendEnd, so a 0.3m correction takes roughly 1.5s to reach the
+    /// zero-snap threshold (framerate-independent). Stage 5 is a first-order lag with
+    /// a time constant of 1/SmoothingRate — 5ms at the default 200, well under one frame — so it mostly
+    /// passes the accumulator straight through. It is framerate-coupled rather than inert: blend is
+    /// 1 - exp(-SmoothingRate * dt), which is 0.999 at 30fps, 0.964 at 60fps, and 0.751 at 144fps.
+    ///
+    /// A high SmoothingRate is what the pipeline wants, not a mistuning. The smoothed value IS the offset
+    /// that hides the rollback jump: the view renders (corrected position + smoothed), so it only stays
+    /// where the player last saw it while smoothed tracks the accumulated delta closely. Lowering the
+    /// rate makes the offset shallower on arrival and exposes more of the jump — at 20 a 0.3m correction
+    /// would show 0.23m of it immediately (IMP103 D-5).
     /// </summary>
     [Serializable]
     public struct ErrorVisualState
@@ -75,10 +89,6 @@ namespace xpTURN.Klotho
         [NonSerialized] private Vector3 _smoothedPosError;
         [NonSerialized] private float   _smoothedYawError;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-        [NonSerialized] private bool _everReceivedDelta;
-        [NonSerialized] private int  _framesSinceNonZeroDelta;
-#endif
 
         /// <summary>Default values. Uses the same initial thresholds as the engine filter.</summary>
         public static ErrorVisualState Default => new()
@@ -102,7 +112,7 @@ namespace xpTURN.Klotho
         /// <summary>Final view output — Y-axis radians. Used after conversion via Quaternion.Euler.</summary>
         public float SmoothedYawError => _smoothedYawError;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
         public float AccumulatedPosMagnitude => _accumulatedPosError.magnitude;
 #endif
 
@@ -122,6 +132,7 @@ namespace xpTURN.Klotho
             // Engine-confirmed teleport — highest priority
             if (teleported)
             {
+                LogDiscarded(logger, entityIndex, "teleport", rollbackDelta, rollbackYawDelta, 0f);
                 Reset();
                 return;
             }
@@ -134,12 +145,14 @@ namespace xpTURN.Klotho
             float posMag = _accumulatedPosError.magnitude;
             if (posMag >= PosTeleportDistance)
             {
+                LogDiscarded(logger, entityIndex, "pos-snap", rollbackDelta, rollbackYawDelta, PosTeleportDistance);
                 Reset();
                 return;
             }
             float yawAbs = Mathf.Abs(_accumulatedYawError);
             if (yawAbs >= RotTeleportDeg * Mathf.Deg2Rad)
             {
+                LogDiscarded(logger, entityIndex, "yaw-snap", rollbackDelta, rollbackYawDelta, RotTeleportDeg);
                 Reset();
                 return;
             }
@@ -173,27 +186,49 @@ namespace xpTURN.Klotho
             _smoothedPosError = Vector3.Lerp(_smoothedPosError, _accumulatedPosError, blend);
             _smoothedYawError = Mathf.Lerp(_smoothedYawError, _accumulatedYawError, blend);
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-            // If the rollback delta stays at 0 for 5 seconds, warn about a possible ErrorCorrection misconfiguration.
-            bool deltaNonZero = rollbackDelta.sqrMagnitude > 0f || rollbackYawDelta != 0f;
-            if (deltaNonZero)
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+            // What the engine actually handed this view, per rollback. A "no delta for 300 frames" warning
+            // used to sit beside it, asking whether the entity carried ErrorCorrectionTargetComponent — but
+            // it was gated on having received a delta at least once, and deltas are only produced for
+            // entities that carry it, so the gate was already the answer. The reachable question ("nobody
+            // wired it anywhere") is the engine's, and CapturePreRollbackTransforms detects it directly
+            // (IMP103). Steady input predicting perfectly is what the warning actually fired on.
+            if (rollbackDelta.sqrMagnitude > 0f || rollbackYawDelta != 0f)
             {
-                _everReceivedDelta = true;
-                _framesSinceNonZeroDelta = 0;
-
                 float deltaMag = rollbackDelta.magnitude;
                 logger?.KDebug($"[EC][Visual] entity={entityIndex} " +
                     $"delta={deltaMag:F4}m yaw={rollbackYawDelta * Mathf.Rad2Deg:F3}deg " +
                     $"accum={_accumulatedPosError.magnitude:F4}m/{Mathf.Abs(_accumulatedYawError) * Mathf.Rad2Deg:F3}deg " +
                     $"smoothed={_smoothedPosError.magnitude:F4}m/{Mathf.Abs(_smoothedYawError) * Mathf.Rad2Deg:F3}deg");
             }
-            else
-            {
-                _framesSinceNonZeroDelta++;
-            }
-            if (_everReceivedDelta && _framesSinceNonZeroDelta == 300)
-                logger?.KWarning($"[EC] entity={entityIndex}: no delta for 5s — check EnableErrorCorrection / ErrorCorrectionTargetComponent");
 #endif
+        }
+
+        /// <summary>
+        /// The other half of the <c>[EC][Visual]</c> line: a correction the smoother threw away.
+        ///
+        /// Every reset path returns before that line, so a delta the view snapped on left no trace at all
+        /// and the log could not tell "the view never received one" from "the view received one and
+        /// discarded it". That is not a rare corner — a mispredicted turn reaches the 90° bound in a
+        /// single tick, and a live P2P session showed exactly that: an engine-side delta of 90.000deg
+        /// with no view-side line anywhere near it. Reports what arrived and what was standing before
+        /// the reset, so the discarded amount is visible rather than inferred.
+        ///
+        /// Silent when there is nothing to say — a teleport reset on a view that had accumulated nothing
+        /// is a no-op, and this runs per view per frame.
+        /// </summary>
+        [System.Diagnostics.Conditional("DEBUG"), System.Diagnostics.Conditional("DEVELOPMENT_BUILD"), System.Diagnostics.Conditional("UNITY_EDITOR")]
+        private void LogDiscarded(IKLogger logger, int entityIndex, string reason,
+                                  Vector3 rollbackDelta, float rollbackYawDelta, float bound)
+        {
+            if (logger == null) return;
+            bool arrived  = rollbackDelta.sqrMagnitude > 0f || rollbackYawDelta != 0f;
+            bool standing = _accumulatedPosError.sqrMagnitude > 0f || _accumulatedYawError != 0f;
+            if (!arrived && !standing) return;
+
+            logger.KDebug($"[EC][Visual] entity={entityIndex} snapped reason={reason} bound={bound:F3} " +
+                $"delta={rollbackDelta.magnitude:F4}m/{rollbackYawDelta * Mathf.Rad2Deg:F3}deg " +
+                $"discarded={_accumulatedPosError.magnitude:F4}m/{Mathf.Abs(_accumulatedYawError) * Mathf.Rad2Deg:F3}deg");
         }
 
         /// <summary>Immediately initializes accumulation/interpolation state. Configuration fields are preserved.</summary>
@@ -203,10 +238,6 @@ namespace xpTURN.Klotho
             _accumulatedYawError = 0f;
             _smoothedPosError    = Vector3.zero;
             _smoothedYawError    = 0f;
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-            _everReceivedDelta       = false;
-            _framesSinceNonZeroDelta = 0;
-#endif
         }
 
         // ── Independent position/rotation decay rate calculation ──

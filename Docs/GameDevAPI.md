@@ -64,7 +64,7 @@ memory pruning can never drop them:
 |---|---|---|---|
 | `TransformComponent` | 1 | `Position`, `Rotation`, `Scale`, `PreviousPosition`, `PreviousRotation`, `PreviousInitialized`, `TeleportTick` | Position / rotation / scale + the view-interpolation prev-snapshot (see §4.1) |
 | `OwnerComponent` | 2 | `OwnerId` | Owning player. The usual key for "may this command touch this entity" |
-| `ErrorCorrectionTargetComponent` | 3 | *(marker)* | Marks an entity the engine may smooth toward a corrected state |
+| `ErrorCorrectionTargetComponent` | 3 | *(marker)* | Marks an entity the engine may smooth toward a corrected state — your simulation adds it; `EnableErrorCorrection` alone produces no deltas ([SimulationConfigGuide §1.1](./SimulationConfigGuide.md#11-enabling-error-correction--three-touches)) |
 | `SessionParticipantComponent` | 4 | `PlayerId` | Engine writes one per active player at `Start()`, as an all-participants-spawned gate |
 | `RandomSeedComponent` | 5 | `Seed` (ulong) | **Singleton.** Engine-injected at session start and restored via FullState on LateJoin / Reconnect / Spectator / Replay. Read `frame.GetReadOnlySingleton<RandomSeedComponent>().Seed` and combine with `DeterministicRandom.FromSeed(seed, featureKey, frame.Tick)` for rollback-stable RNG streams |
 | `MatchEndStateComponent` | 26 | `Ended`, `WinnerPlayerId` (`-1` = draw) | **Singleton.** Match-end bookkeeping the engine reads for the end-of-match ladder |
@@ -309,6 +309,27 @@ var session = KlothoSession.Create(setup);
 > log for development. It lives on the setup rather than in `ISimulationConfig` on purpose: a guest runs the
 > config it received over the wire, so a config-borne flag would read its default on exactly the peer that needs
 > it off. Set it per peer, and never in a shipping build.
+
+**On the join path, only your `SimulationConfig.Mode` is yours.** The config that governs a session is the one
+the authority authored: `KlothoSession.Create` takes `Connection.SimulationConfig` whenever there is a
+connection, so a joining peer's own authored `SimulationConfig` contributes nothing to the simulation — its
+`Mode` selected the role and that is all. Tuning `TickIntervalMs` or `InterpolationDelayTicks` in a local asset
+and then joining has no effect. The join APIs reflect this: `JoinP2PAsync` / `JoinServerDrivenAsync` take an
+`ISessionConfig` seed and no `ISimulationConfig` at all. `KlothoConnection` says so on every join, at
+Information level, immediately above the full list of received values.
+
+If you want to see *which* of your authored values the authority overrode, compare them yourself once the
+session exists — `session.Engine.SimulationConfig` is the resolved one:
+
+```csharp
+var resolved = session.Engine.SimulationConfig;
+if (resolved.TickIntervalMs != myAuthored.TickIntervalMs)
+    logger.KWarning($"tick {myAuthored.TickIntervalMs} -> {resolved.TickIntervalMs} (authority's)");
+```
+
+Klotho deliberately does not carry your authored config for this purpose. A diagnostic-only
+`ISimulationConfig` on the flow setup would read as an input — which is the same misreading the notice above
+exists to prevent — and the remedy never depends on which field differed: author it on the host or server.
 
 `SessionConfig` carries the 16 host-decided session fields (`RandomSeed`, `MaxPlayers` / `MinPlayers` / `MaxSpectators`, late-join/reconnect policy & tuning, chain-stall watchdog, countdown, match-end grace). Author it once as a `USessionConfig` ScriptableObject and reuse across scenes — `KlothoSession.Create()` copies the values into an internal `SessionConfig` (so editor assets are never mutated, and `RandomSeed = 0` is auto-replaced by `Environment.TickCount` on host). Passing `null` falls back to the runtime default `new SessionConfig()` — convenient for tests and replay paths.
 
@@ -892,12 +913,62 @@ standard path. Every view receives one `ApplyTransform` call per frame — drive
 override `ApplyTransform` when special split is required (e.g. root vs interpolation target); regular views just
 inherit the base path.
 
+**Per-tick and per-frame are different hooks.** `OnUpdateView` runs from `Engine.OnTickExecuted` — once per simulation
+tick, right after the EVU reconciles spawns and despawns. `OnLateUpdateView` / `ApplyTransform` run per rendered frame.
+A view therefore sees far more frame callbacks than tick callbacks at any tick rate below the display rate.
+
+**A snapshot-interpolated view outlives its entity.** Its render position is `LastVerifiedTick -
+InterpolationDelayTicks`, so when the Verified frame stops carrying the entity the render is still `delay` ticks short
+of it — the view is kept until the render clock arrives, or the tail of the motion is never drawn. During that window
+the view keeps receiving `OnLateUpdateView` / `ApplyTransform` but **not** `OnUpdateView`: the entity is gone from the
+frame the game would query, so per-tick logic hung off that hook stops `delay` ticks before the view disappears. CSP
+views are destroyed immediately, because they render the Predicted frame and have no such gap.
+
+**`PlayerViewRegistry` keeps such a view registered for the whole grace**, because the map answers *"which view is on
+screen for this player"* rather than *"is this player's entity alive"* — a view still interpolating is still the thing
+a camera should follow. So `PlayerViews.Get(playerId)` can hand back a view whose entity has already left the Verified
+frame, and `OnLocalViewUnregistered` fires when the view is **destroyed**, `delay` ticks after the entity died. Read
+liveness from the frame, not from this map.
+
+**The grace covers views that already exist — not spawns still in flight.** View creation goes through
+`EntityViewFactory.CreateAsync`, and the shipped implementations complete synchronously on every path
+(`DefaultEntityViewPool.Rent` returns an already-completed task whether it hits the pool or instantiates, and the
+pool-less path is a plain `Object.Instantiate`), so for a default project there is nothing in flight to reason about.
+A game that overrides `CreateAsync` with a real asynchronous load (Addressables, for instance) introduces the case:
+if the load is still running when the entity leaves both the Verified and the Predicted frame, the in-flight result
+is discarded and no view appears. This is the same answer the synchronous path gives — reconciling for the first time
+at a tick the entity is already gone from creates nothing either — and it is deliberate. Inserting the view at that
+point would draw an entity for the remainder of its grace window, up to `InterpolationDelayTicks` of render time,
+and the entities this can happen to are by definition the ones whose load outlives their lifetime: projectiles and
+hit effects, which would flash in after the impact they belong to. Keep such views' loads warm (prewarm the pool)
+rather than relying on the grace to cover a slow one.
+
 Per-tick game-data updates (animator parameters / Renderer toggle / VFX SetActive) belong in `OnUpdateView` — it
 fires once per tick, before the per-frame transform application.
 
 When `ViewFlags.EnableSnapshotInterpolation` is set (typically SD-Client / Spectator remote views), the base path
 skips `_errorVisual` composition — the verified-frame interpolation already renders the authoritative state, so
 applying rollback-delta-based offset would double-correct and jitter.
+
+**The two paths read different frames, and that includes existence.** The CSP path's whole render basis is the live
+Predicted frame, so a view whose entity is not alive there writes nothing. The snapshot path renders the Verified
+timeline instead: an entity can be alive there while prediction has already destroyed it, and such a view keeps
+interpolating. The live frame is only its fallback for the ring-warmup window where no Verified frame covers the
+render time yet.
+
+When no Verified frame covers the render window — a freshly spawned remote entity, whose view exists as
+soon as the newest Verified frame has it while the render clock is still `InterpolationDelayTicks` behind —
+the snapshot path renders the **newest Verified pose**, not the live Predicted one. Rendering the prediction
+there put the view `lead + delay` ticks ahead of its own timeline and snapped it backward once the window
+arrived. The live frame is used only when there is no Verified frame at all (session start, late join,
+FullState restore).
+
+`UpdatePositionParameter.UninterpolatedPosition` / `UninterpolatedRotation` follow the same split. They are the
+tick-quantized value — the root transform under `_interpolationTarget`, and the snap target of the CSP teleport
+branch — sourced from the live Predicted frame on the CSP path and from the render window's `alpha = 0` endpoint (a
+Verified snapshot, at most one tick behind the interpolated child) on the snapshot path. A game that overrides
+`ApplyTransform` or sets an interpolation target should expect the root of a verified-rendered entity to hold an
+authoritative pose rather than a prediction.
 
 ### Engine event subscription
 

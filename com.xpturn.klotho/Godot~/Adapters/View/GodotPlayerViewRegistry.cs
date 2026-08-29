@@ -2,6 +2,12 @@
 // The EntityViewUpdaterNode populates this from OwnerComponent on spawn/despawn — game code typically
 // only subscribes to the events or calls Get. Pure C# data structure.
 //
+// This maps a player to the view ON SCREEN, not to a live entity. A snapshot-bound view outlives its
+// entity by the despawn grace and stays registered for that whole window — it is still interpolating and
+// still the thing a camera should follow. So Get(playerId) can return a view whose entity has already left
+// the Verified frame, and OnLocalViewUnregistered fires when the view is destroyed, not when the entity
+// dies. Do not read this map as a liveness oracle; ask the frame for that.
+//
 // IsActuallyLocal disambiguates spectator mode (LocalPlayerId falls back to 0, colliding with the real
 // host playerId 0) via IsSpectatorMode.
 using System;

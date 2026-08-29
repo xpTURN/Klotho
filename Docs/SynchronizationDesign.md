@@ -71,10 +71,10 @@ The single most important idea in the engine's organization is that each peer ma
 
 ```text
   tick:  … 97   98   99  │ 100  101  102  103
-         ───────────────┼────────────────────►
-        ◄── Verified ───┤◄──── Predicted ────►
-           (immutable)  │   (speculative, rollback-able)
-                        │
+          ───────────────┼────────────────────►
+         ◄── Verified ───┤◄──── Predicted ────►
+            (immutable)  │   (speculative, rollback-able)
+                         │
               _lastVerifiedTick = 99
                                           CurrentTick = 103
 ```
@@ -331,15 +331,23 @@ The design direction here: **let each event consumer subscribe to the guarantee 
 
 ## 11. Error Correction — Hiding the Seam of a Rollback
 
-A rollback can teleport a remote entity when the corrected position differs from the predicted one. Snapping is jarring. Error correction ([KlothoEngine.ErrorCorrection.cs](com.xpturn.klotho/Runtime/Core/Engine/KlothoEngine.ErrorCorrection.cs), config in [ErrorCorrectionSettings.cs](com.xpturn.klotho/Runtime/Core/ErrorCorrectionSettings.cs)) computes the visual delta between pre- and post-rollback transforms and lets the **view layer** decay it smoothly, while the **simulation** stays exactly on the corrected (authoritative) value.
+A rollback can teleport a remote entity when the corrected position differs from the predicted one. Snapping is jarring. Error correction ([KlothoEngine.ErrorCorrection.cs](com.xpturn.klotho/Runtime/Core/Engine/KlothoEngine.ErrorCorrection.cs), filter thresholds in [ErrorCorrectionSettings.cs](com.xpturn.klotho/Runtime/Core/ErrorCorrectionSettings.cs)) computes the visual delta between pre- and post-rollback transforms and lets the **view layer** decay it smoothly, while the **simulation** stays exactly on the corrected (authoritative) value.
 
 This is a deliberate **separation of correctness from presentation**: the simulation is never allowed to lie for the sake of smoothness — only the rendered transform is interpolated. Thresholds encode intent:
 
 - below `PosMinCorrection` / `RotMinCorrectionDeg`: ignore (don't jitter the view over sub-perceptible noise),
-- above `PosTeleportDistance` / `RotTeleportDeg`: snap (a genuine teleport *should* look like one — smoothing it would read as a glide through a wall),
+- above the view's teleport thresholds (`PosTeleportDistance` / `RotTeleportDeg`): snap (a genuine teleport *should* look like one — smoothing it would read as a glide through a wall),
 - in between: exponential decay at a rate that scales with error magnitude (`MinRate`→`MaxRate`).
 
+**Only the first bullet's pair is the engine's.** `ErrorCorrectionSettings` is a delta *filter* and carries exactly `PosMinCorrection` and `RotMinCorrectionDeg`; everything the other two bullets name — accumulation, variable-rate decay, zero-snap, teleport-snap, smoothing — belongs to the view and is authored per view on `ErrorVisualState` (Inspector / prefab), not per engine.
+
 It is **off by default** (`EnableErrorCorrection = false`): it costs per-entity work and only earns its keep under latency high enough to make rollback corrections visible. The design exposes it as a knob rather than baking it in — consistent with the "provision the minimum the conditions require" theme of Section 7.
+
+**And the flag alone does nothing.** The engine produces a delta only for entities carrying `ErrorCorrectionTargetComponent`, which the *game's* simulation code adds, so turning the config flag on without marking anything leaves the whole path inert. See [SimulationConfigGuide §1.1](SimulationConfigGuide.md#11-enabling-error-correction--three-touches) for the three touches it takes (the flag is authority-owned, which entities to mark, and what the marker does and does not travel with).
+
+Where it takes effect follows the **render path**, not the topology. Only views rendered from the predicted (CSP) frames apply the delta; snapshot-interpolated views skip it, because interpolating between two verified frames already shows the corrected state and adding the offset on top would double-correct. So the knob covers the local player under SD, everything under P2P, and nothing at all for a spectator — whose every view is snapshot-interpolated. The delta *computation* used to be wired for the SD client only, on the reasoning that P2P stores real remote input in the buffer — which holds while that input arrives inside the input-delay window and stops holding at exactly the latencies that justify this feature. It is now wired for both, by making "a rollback runs this frame" a caller-supplied argument rather than a peek at the SD client's batch queue: each mode expresses that condition differently, and a function that knows one of them silently disables the others.
+
+A **FullState resync** feeds the same path. The restore replaces the predicted pose with the authoritative one, so the jump is the prediction error at that instant — typically centimetres, well inside the band the smoother exists for, and not a function of what triggered the resync. Both the P2P and SD-client resync handlers publish their deltas to the view; the bootstrap and late-join applies do not, because there is no local pose to diff against.
 
 ---
 

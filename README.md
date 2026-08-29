@@ -215,6 +215,7 @@ Docs: [Docs/Samples/Brawler.md](Docs/Samples/Brawler.md)
 | [Docs/Cookbook.md](Docs/Cookbook.md) | "I want to X" — task-to-entry-point index across the 26 documents, plus four recipes (projectile · knockback · one-shot effect · deterministic nearest-enemy) |
 | [Docs/GameDevAPI.md](Docs/GameDevAPI.md) | Game-developer API status |
 | [Docs/SimulationConfigGuide.md](Docs/SimulationConfigGuide.md) | SimulationConfig recommended-value guide (per genre / platform) |
+| [Docs/ViewInterpolation.md](Docs/ViewInterpolation.md) | View interpolation guide for beginners (why it exists · CSP vs snapshot paths · render clock · teleports · error correction · troubleshooting) |
 | [Docs/BaseLibraries.md](Docs/BaseLibraries.md) | List of base libraries used |
 | [Docs/ECS.md](Docs/ECS.md) | ECS guide (entities · components · systems · filters · Frame snapshot/hash · rollback) |
 | [Docs/ECSMemoryOptimization.md](Docs/ECSMemoryOptimization.md) | ECS memory optimization (frame-heap formation · runtime `[Mem]` analysis · per-component `maxCount` · unused-type pruning) |

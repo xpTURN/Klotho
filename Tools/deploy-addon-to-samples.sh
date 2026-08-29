@@ -7,11 +7,16 @@
 #   Samples/GodotSdSample         -> addons/klotho/Klotho.props          (client)
 #   Samples/GodotSdSampleServer   -> ../GodotSdSample/addons/klotho/Klotho.Server.props  (reuses SdSample's copy)
 # So only two addon folders need refreshing; the dedicated server shares GodotSdSample's.
+#
+# Usage: deploy-addon-to-samples.sh [CONFIG]     CONFIG = Release (default) | Debug — forwarded to
+# pack-godot-addon.sh. Debug is for verifying diagnostics in a sample: KDebug and #if DEBUG blocks are
+# compiled out of Release, so a Release addon cannot print them. Deploy Release when done.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACK="$REPO_ROOT/Tools/pack-godot-addon.sh"
 STAGING="$REPO_ROOT/dist/addons/klotho"
+CONFIG="${1:-${KLOTHO_PACK_CONFIG:-Release}}"
 
 TARGETS=(
   "$REPO_ROOT/Samples/GodotPolySample/addons/klotho"
@@ -19,8 +24,8 @@ TARGETS=(
   "$REPO_ROOT/Samples/GodotSdSample/addons/klotho"
 )
 
-echo "==> build addon once -> $STAGING"
-bash "$PACK" "$STAGING" >/dev/null
+echo "==> build addon once -> $STAGING (config: $CONFIG)"
+bash "$PACK" "$STAGING" "$CONFIG" >/dev/null
 echo "    built ($(find "$STAGING" -type f | wc -l | tr -d ' ') files)"
 
 for t in "${TARGETS[@]}"; do

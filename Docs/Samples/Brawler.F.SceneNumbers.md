@@ -96,7 +96,7 @@ The C# field default is `MoveSpeed = 0` (i.e., the value must come from JSON). R
 | Component | Role | Field Wiring |
 |---|---|---|
 | `BrawlerGameController` (MonoBehaviour) | Game controller | `_staticCollidersAsset`, `_navMeshAsset`, `_dataAsset`, `_simulationConfig`, `_sessionConfig`, `_viewSync`, `_entityViewUpdater`, `_gameMenu`, `_brawlerSettings` |
-| `BrawlerViewSync` | Holds view references | `_gameHUD`, `_resultScreen`, `_movingPlatforms` |
+| `BrawlerViewSync` | Holds view references | `_gameHUD`, `_resultScreen` (`_movingPlatforms` is **not** an Inspector field — the scene's `PlatformView`s are collected at `Initialize` and handed to the factory) |
 | `EntityViewUpdater` | Entity ↔ View reconcile | `_factory` = `BrawlerEntityViewFactory.asset`, `_pool` (optional) |
 | `BrawlerCameraController` | Camera follow | `_cinemachineCamera`, `_proxy` |
 
@@ -139,10 +139,18 @@ Warrior (root)
 
 ```
 MovingPlatform
-├── PlatformView (inherits EntityView) — works without it too
+├── PlatformView (inherits EntityView) — REQUIRED: it is the adoption marker
 ├── MeshRenderer / MeshFilter (Cube scale 3×0.5×3)
 └── (optional) BoxCollider — visual only, Kinematic
 ```
+
+The platform view is **adopted**, not spawned. Place the prefab in the stage scene: `BrawlerViewSync.Initialize`
+collects every `PlatformView` (including inactive ones) and hands the array to `BrawlerEntityViewFactory`, whose
+`CreateAsync` returns the scene instance instead of instantiating and whose `Destroy` deactivates it instead of
+destroying. From there the platform is an ordinary view — EVU owns its lifecycle and the base `EntityView`
+pipeline drives its transform (interpolation, teleport handling, version-safe frame lookups). Without a
+`PlatformView` in the scene the entity still simulates and still collides; it simply has nothing on screen.
+See [GameDevWorkflow → Step 7, "Adopting a scene-placed object as a View"](../GameDevWorkflow.md).
 
 ### Objs/TrapZone.prefab
 
@@ -267,4 +275,4 @@ Add `Samples/Brawler/Scenes/BrawlerScene` in `File > Build Settings`. Verify the
 | `BrawlerEntityViewFactory._itemPrefabs` | `Prefabs/Objs/ItemShield/ItemBoost/ItemBomb` |
 | `BrawlerViewSync._gameHUD` | `GameHUD` in the scene |
 | `BrawlerViewSync._resultScreen` | `ResultScreen` in the scene |
-| `BrawlerViewSync._movingPlatforms` | List of `MovingPlatform`s in the scene |
+| scene `PlatformView`s | Found at runtime (`FindObjectsByType`, inactive included) and bound to `BrawlerEntityViewFactory` — no Inspector wiring |

@@ -79,26 +79,54 @@ namespace xpTURN.Klotho
             }
 
             // Server-authoritative entity (no Owner) — Verified on SD-Client/Spectator, NonVerified otherwise.
-            bool useVerified = UseVerifiedPath() && !Engine.IsReplayMode;
-            behaviour = useVerified ? BindBehaviour.Verified : BindBehaviour.NonVerified;
+            behaviour = IsPredictedRender(ownerId: 0, hasOwner: false)
+                ? BindBehaviour.NonVerified
+                : BindBehaviour.Verified;
             return true;
+        }
+
+        /// <summary>
+        /// The bits <see cref="GetViewFlags"/> is authoritative for. Everything outside this mask is
+        /// left to whatever the prefab authored — see <see cref="ComposeViewFlags"/>.
+        ///
+        /// Only <see cref="ViewFlags.EnableSnapshotInterpolation"/> qualifies by default, because it is
+        /// the one flag decided from runtime facts the prefab cannot know (network mode and whether the
+        /// entity is locally owned). The rest describe how a particular view behaves and belong to the
+        /// asset. Override to widen this if a factory decides more per entity — and it must be widened,
+        /// not worked around: a bit this mask does not claim is taken from the prefab, so returning it
+        /// from <c>GetViewFlags</c> alone would have it silently dropped.
+        /// </summary>
+        public virtual ViewFlags FactoryOwnedFlags => ViewFlags.EnableSnapshotInterpolation;
+
+        /// <summary>
+        /// Merges the prefab-authored flags with the factory's decision: the factory wins inside
+        /// <see cref="FactoryOwnedFlags"/>, the prefab keeps everything else.
+        ///
+        /// A plain assignment would clobber the prefab's bits — the factory can only express two of the
+        /// sixteen combinations, so overwriting destroys unrelated authoring (that was IMP103 V-3). A
+        /// plain OR is not the fix either: it would let a prefab that ticked
+        /// <c>EnableSnapshotInterpolation</c> force the verified path onto a locally-owned entity and
+        /// render the local player several ticks late. Masking is what keeps both halves honest.
+        /// </summary>
+        public ViewFlags ComposeViewFlags(ViewFlags prefabFlags, ViewFlags factoryFlags)
+        {
+            ViewFlags owned = FactoryOwnedFlags;
+            return (prefabFlags & ~owned) | (factoryFlags & owned);
         }
 
         /// <summary>
         /// Computes per-entity ViewFlags (e.g. Snapshot Interpolation ON/OFF).
         /// Default: EnableSnapshotInterpolation on the Verified-path side, None on Predicted.
+        /// Only the bits in <see cref="FactoryOwnedFlags"/> are read from the result.
         /// </summary>
         public virtual ViewFlags GetViewFlags(Frame frame, EntityRef entity)
         {
             bool hasOwner = frame.Has<OwnerComponent>(entity);
             int  ownerId  = hasOwner ? frame.GetReadOnly<OwnerComponent>(entity).OwnerId : -1;
 
-            bool useVerifiedPath = UseVerifiedPath() && !Engine.IsReplayMode;
-            bool predictedRender = hasOwner
-                ? !useVerifiedPath || (ownerId == Engine.LocalPlayerId)
-                : !useVerifiedPath;
-
-            return predictedRender ? ViewFlags.None : ViewFlags.EnableSnapshotInterpolation;
+            return IsPredictedRender(ownerId, hasOwner)
+                ? ViewFlags.None
+                : ViewFlags.EnableSnapshotInterpolation;
         }
 
         // ── Helpers (protected — reusable in custom overrides) ────────────────────
@@ -106,10 +134,27 @@ namespace xpTURN.Klotho
         /// <summary>
         /// True iff this entity should render as Predicted (local responsiveness).
         /// Replay (regardless of mode) OR non-Verified-path (P2P / SD-Server) → always Predicted.
-        /// SD-Client / Spectator (Verified path, not replay) → local player owned = Predicted, others = Verified.
+        /// SD-Client (Verified path, not replay) → local player owned = Predicted, others = Verified.
+        ///
+        /// <b>A spectator owns nothing.</b> It has no LocalPlayerId, so the engine's `?? 0` fallback
+        /// reports 0 — and 0 is a valid player id that a P2P host holds. Without the IsSpectatorMode
+        /// guard a spectator watching a P2P session matched its own fallback against the host's entity and
+        /// rendered that one predicted: running ahead of every other entity and snapping on rollback.
+        /// `PlayerViewRegistry.IsActuallyLocal` already disambiguated the same collision the same way; this
+        /// is that guard, in the one place both the render path and the binding are decided (IMP103).
+        ///
+        /// <paramref name="hasOwner"/> exists so the no-owner case shares this expression instead of
+        /// duplicating it. A sentinel ownerId would have been the alternative and is deliberately avoided:
+        /// -1 already means "no local player" (`ServerNetworkService.LocalPlayerId`, `KlothoSession`), so
+        /// reusing it for "no owner" overloads one value with two meanings.
         /// </summary>
-        protected bool IsPredictedRender(int ownerId)
-            => !UseVerifiedPath() || Engine.IsReplayMode || (ownerId == Engine.LocalPlayerId);
+        protected bool IsPredictedRender(int ownerId, bool hasOwner)
+            => !UseVerifiedPath()
+            || Engine.IsReplayMode
+            || (hasOwner && !Engine.IsSpectatorMode && ownerId == Engine.LocalPlayerId);
+
+        /// <summary>Owner-carrying overload — kept so existing subclass calls compile unchanged.</summary>
+        protected bool IsPredictedRender(int ownerId) => IsPredictedRender(ownerId, hasOwner: true);
 
         /// <summary>True iff this peer uses the Verified path (SD-Client or Spectator).</summary>
         protected bool UseVerifiedPath()
@@ -129,9 +174,23 @@ namespace xpTURN.Klotho
             var prefab = ResolvePrefab(frame, entity);
             if (prefab == null) return null;
 
-            if (Pool != null) return await Pool.Rent(prefab);
+            // Spawn at the entity's pose. Otherwise a pooled view reappears wearing its previous
+            // occupant's transform — Return keeps the local pose under the pool root, so re-renting
+            // restores the world one — and a fresh Instantiate lands on the prefab's authored position.
+            // The first ApplyTransform normally corrects that within the same frame, but it never runs
+            // for a view whose flags skip the position line (DisableUpdate / DisablePositionUpdate), and
+            // it runs a frame late for a pool that completes asynchronously. The interpolation child is
+            // already cleared by InternalActivate; this is the root's half of the same fix (IMP104 W-7).
+            bool hasPose = TryGetSpawnPose(frame, entity, out Vector3 spawnPos, out Quaternion spawnRot);
 
-            var go = Object.Instantiate(prefab);
+            if (Pool != null)
+                return await Pool.Rent(prefab,
+                                       hasPose ? spawnPos : (Vector3?)null,
+                                       hasPose ? spawnRot : (Quaternion?)null);
+
+            var go = hasPose
+                ? Object.Instantiate(prefab, spawnPos, spawnRot)
+                : Object.Instantiate(prefab);
             var view = go.GetComponent<EntityView>();
             if (view == null)
             {
@@ -139,6 +198,33 @@ namespace xpTURN.Klotho
                 return null;
             }
             return view;
+        }
+
+        /// <summary>
+        /// The entity's pose for <see cref="CreateAsync"/>, or false when it carries no transform.
+        ///
+        /// Split out because <c>CreateAsync</c> is <c>async</c> and C# forbids by-reference locals
+        /// there — reading the component through <c>ref readonly</c> has to happen in a regular method,
+        /// and the alternative is copying the whole struct to read two fields.
+        ///
+        /// <c>protected</c> because an override that returns a view WITHOUT calling base — adopting a
+        /// scene-placed object is the usual reason — skips the pose write above and has no other way to
+        /// ask the same question. Returns false for an entity with no transform; leave the pose alone
+        /// then (IMP105 C-13).
+        /// </summary>
+        protected static bool TryGetSpawnPose(Frame frame, EntityRef entity, out Vector3 pos, out Quaternion rot)
+        {
+            if (!frame.Has<TransformComponent>(entity))
+            {
+                pos = default;
+                rot = default;
+                return false;
+            }
+
+            ref readonly var t = ref frame.GetReadOnly<TransformComponent>(entity);
+            pos = new Vector3(t.Position.x.ToFloat(), t.Position.y.ToFloat(), t.Position.z.ToFloat());
+            rot = Quaternion.Euler(0f, t.Rotation.ToFloat() * Mathf.Rad2Deg, 0f);
+            return true;
         }
 
         /// <summary>

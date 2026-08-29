@@ -38,7 +38,7 @@ namespace xpTURN.Klotho
         [field: SerializeField] public bool EnableErrorCorrection { get; set; } = false;
 
         [field: Header("View Interpolation")]
-        [field: SerializeField, Range(1, 3)] public int InterpolationDelayTicks { get; set; } = 3;
+        [field: SerializeField, Range(1, 4)] public int InterpolationDelayTicks { get; set; } = 3;
 
         [field: Header("P2P Quorum-Miss Watchdog")]
         [field: SerializeField] public int QuorumMissDropTicks { get; set; } = 20;

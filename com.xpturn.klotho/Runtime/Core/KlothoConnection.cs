@@ -501,7 +501,15 @@ namespace xpTURN.Klotho.Core
                     break;
             }
 
+            // The received config is the one that governs: KlothoSession.Create takes
+            // Connection.SimulationConfig whenever there is a Connection, so a joining peer's own
+            // authored SimulationConfig contributes nothing to the simulation — its Mode selected the
+            // role and that is all. Tuning TickIntervalMs or InterpolationDelayTicks in a local asset
+            // and then joining has no effect and, before this line, no indication either (IMP103).
             var sc = _result.SimulationConfig;
+            _logger?.KInformation(
+                $"[KlothoConnection] The SimulationConfig below GOVERNS this session (received from the host/server). " +
+                $"A locally authored SimulationConfig is not used on the join path — only its Mode, which selected the role.");
             _logger?.KInformation(
                 $"[KlothoConnection] SimulationConfig: " +
                 $"TickIntervalMs={sc.TickIntervalMs}, " +

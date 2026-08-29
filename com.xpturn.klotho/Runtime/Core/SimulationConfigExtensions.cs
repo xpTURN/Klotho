@@ -70,9 +70,15 @@ namespace xpTURN.Klotho.Core
             if (config.MaxEntities <= 0)
                 throw new ArgumentException("MaxEntities must be > 0");
 
-            if (config.InterpolationDelayTicks < 1 || config.InterpolationDelayTicks > 3)
+            // Upper bound raised 3 -> 4 (IMP103). The sawtooth the render clock rides has amplitude one
+            // tick plus one render frame, and the slack that absorbs it is (delay - 1) ticks, so the
+            // condition is frameMs <= (delay - 2) * tickMs. At a 16ms tick that needs 4 to cover a 60fps
+            // frame at all — and 3 was the cap, which is why every 16ms config in this repo and the
+            // console/global rows of SimulationConfigGuide were unsatisfiable. The guide also instructed
+            // "+1" on a base of 3, i.e. a value its own validation rejected.
+            if (config.InterpolationDelayTicks < 1 || config.InterpolationDelayTicks > 4)
                 throw new ArgumentException(
-                    $"InterpolationDelayTicks must be in [1, 3] (got {config.InterpolationDelayTicks})");
+                    $"InterpolationDelayTicks must be in [1, 4] (got {config.InterpolationDelayTicks})");
 
             // SD only
             if (config.Mode == NetworkMode.ServerDriven)

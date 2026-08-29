@@ -163,13 +163,27 @@ namespace xpTURN.Klotho.Core
         /// <summary>
         /// Whether Error Correction is enabled. If false (default), all EC computation is disabled.
         /// Enable selectively in multiplayer / high-latency environments by switching to true.
+        /// Effective on views rendered from the predicted (CSP) path only — the snapshot interpolation
+        /// path already renders the authoritative state, so it skips the rollback delta by design.
+        /// That makes this a no-op for a spectator (every view is snapshot-interpolated) and for the
+        /// remote entities of an SD client, while P2P — where every view is CSP — is fully covered.
         /// </summary>
         bool EnableErrorCorrection { get; }
 
         /// <summary>
         /// Snapshot interpolation delay tick count for the View layer.
-        /// When computing RenderClock.VerifiedBaseTick, <c>LastVerifiedTick - InterpolationDelayTicks</c> is applied.
-        /// Larger values give more jitter-absorption headroom but also increase the render delay of remote entities. Recommended range is [1, 3].
+        /// <c>LastVerifiedTick - InterpolationDelayTicks</c> is the tick the render clock converges
+        /// toward, not the value RenderClock.VerifiedBaseTick reports on any given frame: the live base
+        /// carries the current drift and lands in <c>[max(0, LastVerifiedTick - InterpolationDelayTicks - 10),
+        /// max(0, LastVerifiedTick - 1)]</c> — the lower end from the 10-tick snap guard, the upper end
+        /// from the verified-boundary clamp that keeps both interpolation endpoints Verified.
+        /// Larger values give more jitter-absorption headroom but also increase the render delay of remote entities
+        /// (the delay is <c>InterpolationDelayTicks * TickIntervalMs</c>). Valid range is [1, 4].
+        /// <para>The value is not free to choose: the render clock rides a sawtooth of one tick plus one
+        /// render frame, and the slack absorbing it is <c>(delay - 1)</c> ticks, so a clamp-free render
+        /// needs <c>frameMs &lt;= (delay - 2) * tickMs</c> — the frame-time budget. 3 covers a 60fps frame
+        /// at any tick interval of 17ms or more; a 16ms tick needs 4. Below 3 the budget is zero or
+        /// negative at every tick rate, so 1 and 2 clamp on every frame with positive drift.</para>
         /// Fixed value — applied as-is by the live render clock (AdvanceVerifiedRenderTime); no dynamic adjustment.
         /// </summary>
         int InterpolationDelayTicks { get; }

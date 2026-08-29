@@ -13,10 +13,11 @@
 #   Tools/run-all-tests.sh --dotnet-only    # .NET tests only
 #   Tools/run-all-tests.sh --unity-only     # Unity EditMode tests only
 #   Tools/run-all-tests.sh --no-unity-2022  # skip the 2022.3 LTS project (editor not installed)
-#   Tools/run-all-tests.sh --no-build       # pass --no-build to dotnet test
-#   Tools/run-all-tests.sh --debug          # dotnet test with the Debug configuration (default)
-#   Tools/run-all-tests.sh --release        # dotnet test with the Release configuration
-#   Tools/run-all-tests.sh --both-configs   # dotnet test with Debug and Release, in that order
+#   Tools/run-all-tests.sh --no-build       # pass --no-build to dotnet test (every configuration
+#                                           # below must already be built — checked up front)
+#   Tools/run-all-tests.sh --debug          # dotnet test with the Debug configuration only
+#   Tools/run-all-tests.sh --release        # dotnet test with the Release configuration only
+#   Tools/run-all-tests.sh --both-configs   # Debug and Release, in that order — this is the default
 #   Tools/run-all-tests.sh -c <cfg>         # dotnet test with an arbitrary configuration name
 #   Tools/run-all-tests.sh -h | --help
 #
@@ -64,7 +65,12 @@ RUN_UNITY_2022=1
 DOTNET_NO_BUILD=0
 # Configurations passed to dotnet test, in run order. Debug alone matches the
 # dotnet default, so the unqualified invocation behaves as it always has.
-DOTNET_CONFIGS=("Debug")
+# Both by default. A dev-only guard (#if DEBUG / DEVELOPMENT_BUILD / UNITY_EDITOR) compiles out of a
+# Release build, so a Debug-only default silently skips every test that covers one — which is exactly
+# how an engine warning added under such a guard shipped "passing" while Release failed on it (IMP103).
+# Several guards already exist (Filter loop-mutation watch, rebake pool overlap, EC diagnostics), so the
+# gap recurs. The cost is roughly double the dotnet time; --debug restores the old behaviour.
+DOTNET_CONFIGS=("Debug" "Release")
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; }
 
@@ -109,7 +115,28 @@ run_dotnet_tests() {
   fi
 
   local build_flag=()
-  [[ "${DOTNET_NO_BUILD}" -eq 1 ]] && build_flag=(--no-build)
+  if [[ "${DOTNET_NO_BUILD}" -eq 1 ]]; then
+    build_flag=(--no-build)
+    # --no-build only says "do not rebuild"; it does not say which configurations exist. Since the
+    # default set is Debug AND Release, a tree where only one of them was ever built fails per
+    # project with `dotnet test`'s "The argument <dll> is invalid" — which never mentions the build —
+    # and then again as a missing suite in the summary. Name the configuration instead. Failing is
+    # correct here: classifying an unbuilt configuration as "skipped" would blunt the missing-suite
+    # gate, whose whole job is to notice a suite that produced no result (IMP105 S-1).
+    local missing=() _cfg _proj
+    for _cfg in "${DOTNET_CONFIGS[@]}"; do
+      for _proj in "${DOTNET_TEST_PROJECTS[@]}"; do
+        [[ -d "${REPO_ROOT}/$(dirname "${_proj}")/bin/${_cfg}" ]] \
+          || missing+=("${_cfg}: $(dirname "${_proj}")")
+      done
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      echo "${C_RED}--no-build was given but these have never been built:${C_RST}" >&2
+      printf '  %s\n' "${missing[@]}" >&2
+      echo "Run once without --no-build, or narrow the configuration with --debug / --release / -c <cfg>." >&2
+      exit 2
+    fi
+  fi
 
   local config proj name trx rc
   local overall=0
@@ -192,6 +219,26 @@ run_unity_tests() {
 # ── Final summary report (parses TRX + Unity NUnit XML) ──────────────────────
 print_summary() {
   section "Final report"
+  # Which suites this invocation was supposed to produce. Without it the summary cannot tell
+  # "the suite passed" from "the suite left no file": a missing result is simply an absent row, and
+  # `--dotnet-only` makes absent Unity rows legitimate, so counting rows is not enough. The labels
+  # below have to match the ones the parser derives from file names.
+  local expected=()
+  if [[ "${RUN_DOTNET}" -eq 1 ]]; then
+    local _cfg _proj _name
+    for _cfg in "${DOTNET_CONFIGS[@]}"; do
+      for _proj in "${DOTNET_TEST_PROJECTS[@]}"; do
+        _name="$(basename "$(dirname "${_proj}")")"
+        expected+=("${_name}-${_cfg}")
+      done
+    done
+  fi
+  if [[ "${RUN_UNITY}" -eq 1 ]]; then
+    expected+=("Unity: brawler-editmode")
+    [[ "${RUN_UNITY_2022}" -eq 1 ]] && expected+=("Unity: 2022lts-editmode")
+  fi
+
+  EXPECTED_SUITES="$(printf '%s\n' ${expected[@]+"${expected[@]}"})" \
   RESULTS_DIR="${RESULTS_DIR}" python3 - <<'PY'
 import glob, os, sys
 import xml.etree.ElementTree as ET
@@ -208,6 +255,9 @@ RST = "\033[0m"  if tty else ""
 
 rows = []          # (suite, total, passed, failed, skipped)
 failures = []      # (suite, test_fullname)
+
+# Suites the runner said it would produce. Empty when nothing was asked for.
+expected = [x.strip() for x in os.environ.get("EXPECTED_SUITES", "").split("\n") if x.strip()]
 
 def local(tag):
     return tag.rsplit('}', 1)[-1]
@@ -251,7 +301,15 @@ for path in sorted(glob.glob(os.path.join(results_dir, "unity-*.xml"))):
         if tc.get("result") == "Failed":
             failures.append((suite, tc.get("fullname", tc.get("name", "?"))))
 
+missing = []   # filled after the table is built
+
 if not rows:
+    # Exiting 0 here would call a run that produced nothing a success.
+    if expected:
+        print(f"{RED}{BLD}No test results were collected, but {len(expected)} suite(s) were expected:{RST}")
+        for name in expected:
+            print(f"  {RED}✗{RST} {name}")
+        sys.exit(1)
     print(f"{YEL}No test results were collected.{RST}")
     sys.exit(0)
 
@@ -269,6 +327,16 @@ for s, t, p, f, k in rows:
 print("  " + "-" * (name_w + 31))
 print(f"{BLD}{fmt('TOTAL', tot, pas, fai, ski)}{RST}")
 
+# Suites that were expected but left no result file. A compile error, a licence failure or a hung
+# editor all land here, and none of them produce a row of their own.
+found = {r[0] for r in rows}
+missing = [name for name in expected if name not in found]
+if missing:
+    print()
+    print(f"{RED}{BLD}Missing suites ({len(missing)}) — expected but produced no result file:{RST}")
+    for name in missing:
+        print(f"  {RED}✗{RST} {name}")
+
 # Failure list
 real_failures = [x for x in failures if not x[1].startswith("<parse")]
 parse_errors  = [x for x in failures if x[1].startswith("<parse")]
@@ -284,11 +352,12 @@ if parse_errors:
         print(f"  {YEL}![{suite}] {msg}{RST}")
 
 print()
-if fai == 0 and not parse_errors:
+if fai == 0 and not parse_errors and not missing:
     print(f"{GRN}{BLD}✔ All passed ({pas}/{tot}){RST}")
     sys.exit(0)
 else:
-    print(f"{RED}{BLD}✗ {fai} failed / {tot} total{RST}")
+    suffix = f", {len(missing)} suite(s) missing" if missing else ""
+    print(f"{RED}{BLD}✗ {fai} failed / {tot} total{suffix}{RST}")
     sys.exit(1)
 PY
 }

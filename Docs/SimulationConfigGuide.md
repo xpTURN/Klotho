@@ -17,6 +17,7 @@
 | `UsePrediction` | Pause on missing input (Paused) | Predict, then rollback | — |
 | `SDInputLeadTicks` | Less server-arrival slack · risk of unapplied input | Higher perceived input latency · greater stability | — (SD only) |
 | `InterpolationDelayTicks` | Fresher remote entities · more jitter exposure | Smoother interpolation · more delay | — (View) |
+| `EnableErrorCorrection` | Rollback jumps are drawn in full | Rollback jumps are visually smoothed | — (View · **inert without the marker in [1.1](#11-enabling-error-correction--three-touches)**) |
 | `QuorumMissDropTicks` | Faster presumed-drop recovery · false-positive rollback thrash on jitter | Slower recovery · more jitter-tolerant | — (P2P only) |
 | `DiagnosticHistoryTicks` | `0` disables · desync localization falls back to check-tick granularity | Deeper layered hash history · **new** per-tick hash cost under P2P | — (diagnostic-only · not wire-propagated) |
 
@@ -34,7 +35,60 @@ Effective input latency (perceived) ≈ InputDelayTicks × TickIntervalMs
 Remote input arrival slack          ≈ InputDelayTicks × TickIntervalMs (RTT/2 must be < this for hiccup-free play)
 ```
 
+**Key formula (View interpolation, both modes):**
+```
+Remote render delay          = InterpolationDelayTicks × TickIntervalMs
+Frame-time budget            = (InterpolationDelayTicks − 2) × TickIntervalMs
+  · the render clock rides a sawtooth of one tick + one render frame; the slack absorbing it is
+    (delay − 1) ticks, so a clamp-free render needs  frameMs ≤ budget
+  · budget ≤ 0 at delay 1 and 2 — those clamp on every frame with positive drift, at any tick rate
+  · delay 3 covers a 60fps frame for any TickIntervalMs ≥ 17; a 16ms tick needs 4
+  · frameMs is the WORST frame time you support, not the typical one
+```
+
+> **`InterpolationDelayTicks` is validated to [1, 4].** The upper bound used to be 3; the rows below
+> and the §4 adjustments were written before the budget formula existed and recommended values whose
+> budget is zero. They have been corrected — if you are copying an older config, re-derive from the
+> formula rather than from the old numbers.
+
 > **Not tuning knobs:** `SimulationConfig` also carries `StageId` (which stage/map the match runs) and `MatchConfigData` (an opaque per-match payload — game mode, rules, difficulty). These are **content/match selectors set per-match by the authority**, not per-genre performance values, so they are not tuned here — leave them at their defaults (`StageId` 0, empty) for a single-stage game. See [GameDevAPI §3.6](./GameDevAPI.md#36-per-match-config--stageid--matchconfigdata) and [LobbyIntegrationGuide §4-E](./LobbyIntegrationGuide.md#4-e-per-room-match-config--reservation-sd-multi-room).
+
+
+### 1.1 Enabling Error Correction — three touches
+
+`EnableErrorCorrection = true` **on its own does nothing.** The flag arms the view-side smoother, but the
+rollback deltas it smooths are only produced for entities carrying a marker component — and that marker is
+added by *your simulation code*. Three places have to agree:
+
+| # | Where | What |
+|---|---|---|
+| ⑴ | The **authority's** config | `EnableErrorCorrection = true` |
+| ⑵ | Simulation code | `frame.Add(entity, new ErrorCorrectionTargetComponent())` on entities that may render client-predicted |
+| ⑶ | *(optional · Unity)* Prefab | tune `EntityView._errorVisual` (`ErrorVisualState`, 11 fields) |
+
+**⑴ is the authority's config, not necessarily the one you are editing.** The flag rides the propagated
+`SimulationConfig` (`SimulationConfigMessage` / `SpectatorAcceptMessage`), so an SD **guest** runs the
+server's value and its own asset is ignored. Set it where the match is authored: the server config for SD,
+the host's for P2P.
+
+**⑵ decides which entities are smoothed, and the rule is "can this render client-predicted?"** — in
+practice, player-owned entities. Error correction applies on the CSP render path only; the
+snapshot-interpolation path already draws authoritative state and skips the rollback delta by design. So a
+spectator gets nothing, an SD client's *remote* entities get nothing, and P2P — where every view is CSP —
+is fully covered. Bots and server-owned props do not need the marker. The Brawler sample does exactly
+this: the marker goes on player characters at spawn and nowhere else
+([PlatformerCommandSystem](../Samples/Brawler/Assets/Brawler/Scripts/ECS/Systems/PlatformerCommandSystem.cs)).
+
+> ⚠️ **⑵ is simulation state, and the desync check does not protect it.** The marker is a tag component
+> that contributes nothing to the frame hash, so peers that disagree about who carries it **still pass
+> SyncCheck**. It does change the FullState bytes (the per-type entity list), so a disagreement surfaces
+> only on a FullState path — LateJoin, Reconnect, Spectator, Replay — where the authority's set silently
+> overwrites the receiver's. Treat the marker as part of the deterministic build: every peer ships the same
+> code that adds it.
+
+If ⑴ is on and ⑵ is missing, the engine says so: after 8 consecutive rollbacks with no marked entity it
+emits a latched `[EC]` warning naming the likely cause. There is no such signal for the reverse (marker
+present, flag off) — that combination simply costs a little memory and does nothing.
 
 ---
 
@@ -59,6 +113,8 @@ Remote input arrival slack          ≈ InputDelayTicks × TickIntervalMs (RTT/2
 > - `Mobile` = LTE/5G (assumes RTT 60–150 ms · jitter 20–60 ms)
 > - **Bold** values are recommended starting points; parentheses give the acceptable range
 > - All ms values are integers
+> - `EnableErrorCorrection = true` in the rows below is only half the setting — it does nothing without
+>   the marker component of [1.1](#11-enabling-error-correction--three-touches) ⑵
 
 ### 3.1 Fighting — 1v1 / 2v2
 
@@ -75,7 +131,7 @@ A genre where a single input frame translates directly to a visible result. **Ro
 | `SDInputLeadTicks` | — | **2** (2–4) | Keep small under SD |
 | `QuorumMissDropTicks` | **20** (10–40) | — | P2P presumed-drop watchdog (PC only) |
 | `EnableErrorCorrection` | `false` | `true` | Smoother interpolation on mobile |
-| `InterpolationDelayTicks` | 1 | 2 | Short — responsiveness first |
+| `InterpolationDelayTicks` | **3** | **3** | Budget 51/75 ms. 1 and 2 were recommended here before the formula and have budget ≤ 0 — at a 16ms tick use 4 |
 | `MaxEntities` | 32 | 32 | Sized to characters + projectiles |
 
 **Tuning notes:**
@@ -98,7 +154,7 @@ Many entities · responsiveness matters · deterministic simulation (the Brawler
 | `InputResendIntervalMs` | **150** (100–200) | **150** (100–250) | Unacked-input resend |
 | `MaxUnackedInputs` | 30 | 30 | |
 | `EnableErrorCorrection` | `true` | `true` | Remote-entity correction |
-| `InterpolationDelayTicks` | 2 | 3 | Higher on mobile to absorb jitter |
+| `InterpolationDelayTicks` | **3** | **3** (3–4) | Budget 25/40 ms. PC was 2 = budget 0; mobile may go to 4 for jitter |
 | `MaxEntities` | 256 | 128 | Proportional to content scale |
 
 **The Brawler sample (`Samples/Brawler/Server/simulationconfig.json`)** is a real-world PC example for this category (`InputDelayTicks=4`, `SDInputLeadTicks=4` — i.e. it opts into the non-zero `InputDelayTicks` end of the range for extra headroom).
@@ -120,7 +176,7 @@ Many entities · responsiveness matters · deterministic simulation (the Brawler
 | `UsePrediction` | `false` | `false` | |
 | `SDInputLeadTicks` | **4** (3–6) | **6** (4–10) | |
 | `EnableErrorCorrection` | `true` | `true` | |
-| `InterpolationDelayTicks` | 2 | 3 | |
+| `InterpolationDelayTicks` | **3** | **3** (3–4) | Budget 33/50 ms. PC was 2 = budget 0 |
 | `MaxEntities` | 512 | 256 | Includes minions/mobs |
 
 ### 3.4 RTS (Real-Time Strategy)
@@ -167,18 +223,18 @@ Each turn is discrete; simulation advances after input arrives. **Slow tick + no
 ### 4.1 Mobile (LTE / 5G / Wi-Fi)
 - **RTT variability**: assume +50–100 ms average RTT and +20–40 ms jitter standard deviation versus PC.
 - **`SDInputLeadTicks`**: add +2–4 to the PC recommendation.
-- **`InterpolationDelayTicks`**: add +1 (jitter absorption).
+- **`InterpolationDelayTicks`**: add +1 for jitter absorption, i.e. 3 → 4 (4 is the validated maximum). The genre rows above already start at 3, so this is the one step available.
 - **`TickIntervalMs`**: bump up one tier vs. PC (e.g., PC 25 ms → Mobile 40 ms).
 - **Battery / heat**: lowering tick rate reduces both simulation cost and send/receive frequency, so it has a large impact.
 - **Runtime NavMesh rebake**: if your game has one, its slice budget is a per-device knob and is *not* a config field — see [4.4](#44-per-device-knobs-that-are-not-in-simulationconfig).
 - **These are room-wide, not per-client.** The values above describe the profile a mobile room runs; a PC and a phone in the SAME room share one config (see the cross-platform table in [4.4](#44-per-device-knobs-that-are-not-in-simulationconfig)). Mixed rosters take the weaker platform's profile.
 
 ### 4.2 Console (wired / stable)
-- PC recommendations work as-is. `TickIntervalMs` can be reduced to 16–17 (60 Hz) for fighting/action games.
+- PC recommendations work as-is. `TickIntervalMs` can be reduced to 16–17 (60 Hz) for fighting/action games — **at 16 ms raise `InterpolationDelayTicks` to 4**, because 3 leaves a 16 ms budget and a 60fps frame is 16.67 ms. 17 ms is the smallest tick that 3 covers, and it covers it by 0.3 ms.
 
 ### 4.3 Global Matchmaking (cross-region RTT > 150 ms)
 - Recommend `SDInputLeadTicks` ≥ 8 (the server has no fixed tolerance window, so cross-region RTT is absorbed entirely by client lead).
-- Add +1–2 to the recommended `InterpolationDelayTicks`.
+- Add +1 to the recommended `InterpolationDelayTicks` (3 → 4). The earlier "+1–2" produced 5, which validation rejects; the budget at 4 already covers a 2-frame stall at any tick rate ≥ 17 ms.
 
 ### 4.4 Per-device knobs that are NOT in `SimulationConfig`
 
@@ -253,7 +309,7 @@ Neither is logged by the engine, so a game that tunes per device should put both
    - `Accumulator clamped` → frame drops or `TickIntervalMs` set too low.
    - SD `MaxUnackedInputs exceeded` → adjust `InputResendIntervalMs` or raise `SDInputLeadTicks`.
 3. **On desync**: temporarily lower `SyncCheckInterval` (e.g., 10 → 5) for faster detection. Keep `DiagnosticHistoryTicks > 0` (default 60) so the engine localizes the divergence to a component type / system participant and auto-probes the peer for a verdict — see [DesyncDiagnostics.md](./DesyncDiagnostics.md). Under P2P this buys a per-tick hash; set `0` only if that steady cost is unaffordable (localization then degrades to check-tick granularity).
-4. **Interpolation jitter**: raise `InterpolationDelayTicks` one step at a time and enable `EnableErrorCorrection`.
+4. **Interpolation jitter**: raise `InterpolationDelayTicks` one step at a time. `EnableErrorCorrection` helps on top of that, but **the flag alone changes nothing** — without the marker of [1.1](#11-enabling-error-correction--three-touches) ⑵ no deltas are produced for it to smooth.
 5. **Reactive escalation ceiling**: `SimulationConfig.Validate()` enforces `ReactiveMax ≤ MaxRollbackTicks / 2`. If you lower `MaxRollbackTicks` (e.g. fighting at 8), `ReactiveMax` is clamped to that half (≤4) with a warning — raise `MaxRollbackTicks` first if you need a wider reactive window.
 6. **Frame spike when a building lands**: read `driver.BoundaryFinishes`. A rising count means the slices did not finish inside the delay window and the boundary tick paid for the whole rebake — raise the budget, the build delay, or lower the stage size ([4.4](#44-per-device-knobs-that-are-not-in-simulationconfig)).
 7. **On `OnMatchAborted(ChainStallTimeout)` false positives**: verify `SessionConfig.ReconnectTimeoutMs` against the recovery floor. Effective threshold = `max(ReconnectTimeoutMs / TickIntervalMs + 100, SessionConfig.MinStallAbortTicks)`. If `ReconnectTimeoutMs < 30s`, `MinStallAbortTicks` (default 600 = 30s @ 50ms) acts as the floor — raise both for high-latency/long-recovery scenarios.
@@ -279,7 +335,7 @@ Neither is logged by the engine, so a game that tunes per device should put both
 
 4) Mobile build?
    YES → TickIntervalMs +1 tier, SDInputLeadTicks +2–4,
-         InterpolationDelayTicks +1, EnableErrorCorrection=true
+         InterpolationDelayTicks +1, EnableErrorCorrection=true (+ marker — see 1.1)
 ```
 
 ---

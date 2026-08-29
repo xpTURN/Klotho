@@ -162,7 +162,7 @@ namespace xpTURN.Klotho.Network
                 }
                 _engine.ConfirmCatchupTick(tick);
             }
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             _logger?.KTrace($"[KlothoNetworkService][CatchupInput] state={_lateJoinState}, ticks=[{msg.StartTick}..{msg.StartTick + msg.TickCount - 1}], dataLen={msg.InputDataLength}");
 #endif
         }

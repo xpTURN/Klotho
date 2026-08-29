@@ -15,21 +15,31 @@
 #
 # The canonical Godot core csproj and the samples are left untouched; the LiteNetLib NuGet swap is
 # scoped to the packaging build (Packaging/Klotho.Core.Pack.csproj).
+#
+# Usage: pack-godot-addon.sh [OUT_DIR] [CONFIG]
+#   CONFIG = Release (default) | Debug. Also settable as KLOTHO_PACK_CONFIG.
+#   Debug matters for diagnostics: KDebug calls and #if DEBUG blocks are compiled out of Release, so a
+#   Release addon cannot show [EC][DIAG] / [EC][Visual] or the dev-only guards at all. Ship Release.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="$REPO_ROOT/com.xpturn.klotho"
 OUT="${1:-$REPO_ROOT/dist/addons/klotho}"
+CONFIG="${2:-${KLOTHO_PACK_CONFIG:-Release}}"
+case "$CONFIG" in
+  Release|Debug) ;;
+  *) echo "!! CONFIG must be Release or Debug (got '$CONFIG')"; exit 1 ;;
+esac
 SERVER_PACK="$PKG/Godot~/Packaging/Klotho.Server.Pack.csproj"   # ProjectReferences Klotho.Core.Pack -> builds both DLLs
 GEN_DLL="$PKG/Plugins/Analyzers/KlothoGenerator.dll"
 
-echo "==> addons output: $OUT"
+echo "==> addons output: $OUT (config: $CONFIG)"
 rm -rf "$OUT"
 mkdir -p "$OUT/lib" "$OUT/Adapters" "$OUT/Analyzers"
 
 echo "==> 1/6 build core + server DLLs (LiteNetLib excluded -> NuGet)"
-dotnet build "$SERVER_PACK" -c Release -v q -nologo >/dev/null
-BIN="$PKG/Godot~/Packaging/bin/Release"
+dotnet build "$SERVER_PACK" -c "$CONFIG" -v q -nologo >/dev/null
+BIN="$PKG/Godot~/Packaging/bin/$CONFIG"
 CORE_DLL="$(find "$BIN" -name 'xpTURN.Klotho.Runtime.dll' | head -1)"
 SERVER_DLL="$(find "$BIN" -name 'KlothoServer.dll' | head -1)"
 [ -n "$CORE_DLL" ] && [ -n "$SERVER_DLL" ] || { echo "!! core/server DLL not found"; exit 1; }

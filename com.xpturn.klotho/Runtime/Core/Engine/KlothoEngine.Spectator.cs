@@ -65,20 +65,19 @@ namespace xpTURN.Klotho.Core
                 return;
             }
 
-            // Clear previous-frame deltas before any rollback this frame.
-            ClearErrorDeltas();
-
             _accumulator += deltaTime * 1000f;
 
             // Apply inputs confirmed by batch arrival first, and re-simulate via rollback if needed.
-            // Capture/Compute only on batch arrival — mirrors SD client's UpdateServerDrivenClient EC pair,
-            // but gated at the call site since spectator does not use _pendingVerifiedQueue.
+            // No error-correction pair here: a spectator has no LocalPlayerId, so every view is assigned
+            // the snapshot interpolation path, and that path deliberately skips the rollback delta —
+            // verified-frame interpolation already renders the authoritative state. Deltas computed here
+            // would have no consumer (IMP103 V-4), which is why CapturePreRollbackTransforms now skips
+            // spectators outright rather than leaving the resync path to park deltas nobody drains
+            // (IMP105 C-6). The per-frame clear runs in Update, ahead of this method's own early return.
             bool batchArrived = _spectatorLastConfirmedTick > _prevSpectatorLastConfirmedTick;
             if (batchArrived)
             {
-                CapturePreRollbackTransforms();
                 SpectatorHandleConfirmedInput();
-                ComputeErrorDeltas();
             }
 
             // If only the confirmed tick is behind without any prediction, run a catch-up loop regardless of accumulated time.

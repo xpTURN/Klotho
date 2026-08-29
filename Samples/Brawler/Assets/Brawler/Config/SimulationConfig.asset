@@ -12,7 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5196492e53fe8469eac624f74cc061f1, type: 3}
   m_Name: SimulationConfig
   m_EditorClassIdentifier: xpTURN.Klotho.Runtime.Unity::xpTURN.Klotho.USimulationConfig
-  <TickIntervalMs>k__BackingField: 50
+  <TickIntervalMs>k__BackingField: 25
   <MaxEntities>k__BackingField: 256
   <CatchupMaxTicksPerFrame>k__BackingField: 200
   <InputDelayTicks>k__BackingField: 4

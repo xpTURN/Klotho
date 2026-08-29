@@ -120,7 +120,7 @@ The actual file, verbatim:
   "RttSanityMaxMs": 240,
 
   "EnableErrorCorrection": true,
-  "InterpolationDelayTicks": 2,
+  "InterpolationDelayTicks": 3,
 
   "EventDispatchWarnMs": 5,
   "TickDriftWarnMultiplier": 3
@@ -133,7 +133,7 @@ Key choices:
 - `UsePrediction = false` — the server doesn't need prediction
 - `SDInputLeadTicks = 4` — server-relative lead ticks; the buffer that absorbs client input latency
 - `LateJoinDelaySafety = 2`, `RttSanityMaxMs = 240` — feed the server-side `RecommendedExtraDelayCalculator` (Sync / LateJoin / Reconnect seed + mid-match push). See Specification.md §2.2.
-- `InterpolationDelayTicks = 2` — SD clients use this as the upper bound for the AdaptiveRenderClock
+- `InterpolationDelayTicks = 3` — SD clients render this many ticks behind the newest Verified tick. 3 is the lowest value whose frame-time budget `(delay − 2) × TickIntervalMs` is positive at this 25 ms tick; at 2 the render clock clamped on 7–9% of frames. The client asset carries the same 25 ms / 3 pair, so switching the sample to P2P renders the same way
 
 ### H-3-2. sessionconfig.json
 

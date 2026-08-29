@@ -49,7 +49,7 @@ namespace xpTURN.Klotho.Core
         // same-instance re-entry is closed by the Initialize/enqueue guards) — insurance.
         private readonly List<ICommand> _rejectedVerifiedCmdsCache = new List<ICommand>();
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
         // Per-tick perf measurement. Logs only when an iteration exceeds TickIntervalMs.
         private readonly System.Diagnostics.Stopwatch _perfSw = new System.Diagnostics.Stopwatch();
 #endif
@@ -181,7 +181,11 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         private void UpdateServerDrivenClient(float deltaTime)
         {
-            ClearErrorDeltas();
+            // Clear runs once per Update, ahead of every per-mode early return, so it is not repeated
+            // here. Publish stays: it has to follow the transport pump (_networkService.Update, which
+            // ran before this branch was entered) or the parked deltas wait a frame — see the P2P
+            // publish site for the full reasoning (IMP105 C-3/C-6).
+            PublishPendingResyncDeltas();
 
             // re-arm timer for an outstanding FullState request. Returns true if the
             // match was aborted (retry budget exhausted) — skip the tick loop in that case.
@@ -234,7 +238,7 @@ namespace xpTURN.Klotho.Core
 
                 _accumulator -= _simConfig.TickIntervalMs;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 if (_simConfig.TickDriftWarnMultiplier > 0)
                 {
                     long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -272,7 +276,9 @@ namespace xpTURN.Klotho.Core
             }
 
             // Capture Transform state right before rollback for use in subsequent error delta computation.
-            CapturePreRollbackTransforms();
+            // The queue is the SD client's rollback trigger: ProcessVerifiedBatch below rolls back and
+            // re-simulates only when a batch is waiting.
+            CapturePreRollbackTransforms(_pendingVerifiedQueue.Count > 0);
 
             // Process the server verified batch in bulk.
             ProcessVerifiedBatch();
@@ -297,7 +303,7 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         private void ExecuteClientPredictionTick()
         {
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             _perfSw.Restart();
 #endif
             int frameTick = _simulation.CurrentTick;
@@ -322,9 +328,16 @@ namespace xpTURN.Klotho.Core
                     var predicted = _inputPredictor.PredictInput(playerId, CurrentTick, _previousCommandsCache);
                     _tickCommandsCache.Add(predicted);
                     // On the SD path, prediction validation is replaced by the state hash, so _pendingCommands is not used.
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
-                    var bufRange = _inputBuffer.GetBufferedTickRange(playerId);
-                    _logger?.KDebug($"[SD][PredSource] tick={CurrentTick} targetPlayerId={playerId} selfPeerId={LocalPlayerId} bufferedTickLo={bufRange.lo} bufferedTickHi={bufRange.hi}");
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+                    // Ask the level before computing. KDebug's interpolated-string handler already skips
+                    // the holes when Debug is off, so the message itself is free — but GetBufferedTickRange
+                    // is a plain statement outside it, and it walks the whole command buffer. The gate that
+                    // covers the string does not cover the argument (IMP105 P-2).
+                    if (_logger != null && _logger.IsEnabled(KLogLevel.Debug))
+                    {
+                        var bufRange = _inputBuffer.GetBufferedTickRange(playerId);
+                        _logger.KDebug($"[SD][PredSource] tick={CurrentTick} targetPlayerId={playerId} selfPeerId={LocalPlayerId} bufferedTickLo={bufRange.lo} bufferedTickHi={bufRange.hi}");
+                    }
 #endif
                 }
             }
@@ -333,7 +346,7 @@ namespace xpTURN.Klotho.Core
             _tickCommandsCache.Sort(s_commandComparer);
             _simulation.Tick(_tickCommandsCache);
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             // Prediction-tick hash is dev-only diagnostics; NOT recorded into the history — the
             // verified resim re-executes and re-records this tick, so a predicted value would be
             // overwritten anyway and buys no prod signal.
@@ -352,7 +365,7 @@ namespace xpTURN.Klotho.Core
             OnTickExecutedWithState?.Invoke(executedTick, FrameState.Predicted);
             DispatchTickEvents(executedTick, FrameState.Predicted);
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             _perfSw.Stop();
             long elapsedMs = _perfSw.ElapsedMilliseconds;
             if (elapsedMs >= _simConfig.TickIntervalMs)
@@ -376,7 +389,7 @@ namespace xpTURN.Klotho.Core
             if (_pendingVerifiedQueue.Count == 0)
                 return;
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             int batchCount = _pendingVerifiedQueue.Count;
             var sw = System.Diagnostics.Stopwatch.StartNew();
 #endif
@@ -392,7 +405,7 @@ namespace xpTURN.Klotho.Core
                 Stage = SimulationStage.Forward;
             }
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
             sw.Stop();
             long elapsedMs = sw.ElapsedMilliseconds;
             if (elapsedMs >= _simConfig.TickIntervalMs)
@@ -463,7 +476,7 @@ namespace xpTURN.Klotho.Core
                     _logger?.KDebug($"[KlothoEngine][SD] Rollback: restoreTick={restoreTick}, frame.Tick before={_simulation.CurrentTick}");
                     _simulation.Rollback(restoreTick);
                     _logger?.KDebug($"[KlothoEngine][SD] Rollback: frame.Tick after={_simulation.CurrentTick}");
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                     _logger?.KDebug($"[SD][DIAG] PostRestore: restoreTick={restoreTick} hash=0x{_simulation.GetStateHash():X16}");
 #endif
                     rollbackPerformed = true;
@@ -508,7 +521,7 @@ namespace xpTURN.Klotho.Core
                 }
 
                 // Overwrite the predicted input in the InputBuffer with the verified input.
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 {
                     bool hasLocal = false;
                     for (int i = 0; i < entry.Commands.Count; i++)
@@ -519,7 +532,7 @@ namespace xpTURN.Klotho.Core
                         _logger?.KWarning($"[SD] Verified entry missing local input: executionTick={executionTick}, localId={LocalPlayerId}, entryCmds={entry.Commands.Count}");
                 }
 #endif
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 {
                     // Remote player commands are not stored in _inputBuffer (prediction only),
                     // so verify predicted-vs-verified consistency only for LocalPlayerId.
@@ -589,7 +602,7 @@ namespace xpTURN.Klotho.Core
                 // Verified resim hashes every tick, so recording is a free byproduct. This is
                 // the SD client's prod accumulation path (the prediction tick is intentionally skipped).
                 _diagHistorySim?.RecordHashHistory(executionTick);
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 _logger?.KDebug($"[SD][DIAG] VerifiedHash: executionTick={executionTick} hash=0x{resimHash:X16}");
 #endif
                 if (resimHash != entry.StateHash)
@@ -700,7 +713,7 @@ namespace xpTURN.Klotho.Core
             // Prediction resimulation runs only once per batch.
             if (lastVerifiedTick >= 0 && lastVerifiedTick + 1 < CurrentTick)
             {
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                 _logger?.KDebug($"[SD][DIAG] PredResim: range=[{lastVerifiedTick + 1},{CurrentTick - 1}] depth={CurrentTick - lastVerifiedTick - 1} activeIds=[{string.Join(",", _activePlayerIds)}]");
 #endif
                 int resimTick = lastVerifiedTick + 1;
@@ -718,7 +731,7 @@ namespace xpTURN.Klotho.Core
                         int playerId = _activePlayerIds[pi];
                         if (!_inputBuffer.HasCommandForTick(resimTick, playerId))
                         {
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                             if (playerId == LocalPlayerId)
                                 _logger?.KWarning($"[SD] PredResim: local input missing, using predictor: resimTick={resimTick}, localId={LocalPlayerId}");
 #endif
@@ -738,7 +751,7 @@ namespace xpTURN.Klotho.Core
                     _inputBuffer.SetResimulating(false);
 #endif
 
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
                     _logger?.KDebug($"[SD][HASH] ResimTick: tick={resimTick} hash=0x{_simulation.GetStateHash():X16}");
 #endif
 
@@ -982,9 +995,9 @@ namespace xpTURN.Klotho.Core
                 _lastEnqueuedVerifiedTick = tick;
                 _serverDrivenNetwork.ClearUnackedInputs();
                 DrainPendingVerifiedQueue();
-                _posDeltas.Clear();
-                _yawDeltas.Clear();
-                _teleportedEntities.Clear();
+                // Includes the parked resync deltas: the restored world was never simulated locally, so
+                // nothing measured against the old one still describes a jump (IMP105 C-6).
+                ResetErrorCorrectionState();
 
                 // In catchup mode, HandleVerifiedStateReceived stores directly into the InputBuffer.
                 StartCatchingUp();
@@ -1001,7 +1014,13 @@ namespace xpTURN.Klotho.Core
             int preResetTotalTicks = ComputeReplayTotalTicks();
 
             // Determinism failure or Reconnect recovery path.
+            // Mirrors the P2P placement (FullStateResync.cs, HandleFullStateReceived): capture before,
+            // compute after. The two branches above are deliberately excluded — the initial FullState is
+            // the bootstrap (no local pose to diff against) and the Late Join branch restores into a world
+            // this peer never simulated, which is also why it clears the delta maps outright (IMP103 #5).
+            CaptureResyncTransforms();
             var applyResult = ApplyFullState(tick, stateData, stateHash, ApplyReason.ResyncRequest);
+            ComputeResyncErrorDeltas(ApplyReason.ResyncRequest, tick, applyResult);
 
             // respect the ApplyFullState contract (P2P mirror, FullStateResync.cs:456-468).
             // Skipped — retreat guard rejected the state, NOTHING applied. Skip all post-processing

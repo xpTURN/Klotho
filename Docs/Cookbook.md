@@ -3,7 +3,7 @@
 The other entry points are **linear**: [GameDevWorkflow.md](GameDevWorkflow.md) §2 walks Step 1→7
 (component → command → system → callbacks → events → subscription → view sync), and the two Quick Starts
 walk an engine-specific 5-step setup. This page is the other axis. You know what you want to build; this
-tells you which of the 26 documents — or which line of the Brawler sample — to open.
+tells you which of the 27 documents — or which line of the Brawler sample — to open.
 
 Nothing here is new material. Every row points at something that already exists.
 
@@ -34,6 +34,9 @@ Nothing here is new material. Every row points at something that already exists.
 | ---- | ---- |
 | Show simulation state in the engine's scene | [QuickStart.Unity.md](QuickStart.Unity.md) / [QuickStart.Godot.md](QuickStart.Godot.md) — `EntityViewFactory` / `EntityViewUpdater` |
 | Read the frame from view code | [GameDevAPI.md](GameDevAPI.md) §7 |
+| Make entities move smoothly between ticks (interpolation) | [ViewInterpolation.md](ViewInterpolation.md) — beginner guide: CSP vs snapshot paths, render clock, `InterpolationDelayTicks` |
+| Keep a teleport from smearing across the screen | [ViewInterpolation.md](ViewInterpolation.md) §7 — stamp `TransformComponent.TeleportTick` |
+| Hide rollback pops on the local player | [ViewInterpolation.md](ViewInterpolation.md) §8 · [SimulationConfigGuide.md](SimulationConfigGuide.md) §1.1 — error correction takes three touches |
 | Fire a one-shot effect (VFX/SFX/UI) exactly once | [GameDevAPI.md](GameDevAPI.md) §6 + recipe §2.3 below |
 | Join / host / spectate a match | [QuickStart.Unity.md](QuickStart.Unity.md) · [GameDevAPI.md](GameDevAPI.md) §9 (spectator) |
 | Run a dedicated server | [Installation.Unity.md](Installation.Unity.md) / [Installation.Godot.md](Installation.Godot.md) · [GameDevAPI.md](GameDevAPI.md) §12 |
@@ -63,6 +66,7 @@ Nothing here is new material. Every row points at something that already exists.
 | See where tick time goes | `ISimulationConfig.SystemPerfMonitoring` — per-system report with `AddSystem(…, group:)` labels |
 | Reduce per-frame memory | [ECSMemoryOptimization.md](ECSMemoryOptimization.md) — `MaxCount`, pruning |
 | Inspect live entities / components | [ECS.md](ECS.md) §12 · the editor's entity-component window |
+| Fix stutter, jitter or a view that lags / jumps | [ViewInterpolation.md](ViewInterpolation.md) §11 — symptom table |
 
 ---
 

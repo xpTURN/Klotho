@@ -6,7 +6,7 @@ namespace xpTURN.Klotho.Core
     /// <summary>
     /// Engine-internal event dispatcher. Monitors callback execution time.
     /// </summary>
-#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
     internal struct EventDispatcher
     {
         private readonly IKLogger _logger;

@@ -37,6 +37,10 @@ namespace xpTURN.Klotho.Core
         private int _unexpectedFullStateDropCount;
         internal int UnexpectedFullStateDropCount => _unexpectedFullStateDropCount;
 
+        // Local tick-0 state hash, for the bootstrap-FullState comparison in HandleFullStateReceived.
+        // 0 = unavailable (see where it is written), and the comparison is then skipped.
+        private long _bootstrapStateHash;
+
         // Counts hash-mismatch observations in ApplyFullState. Quantifies the residual
         // divergence frequency — operational input for corrective-reset priority.
         private int _resyncHashMismatchCount;
@@ -674,6 +678,33 @@ namespace xpTURN.Klotho.Core
             bool isResync = _resyncState == ResyncState.Requested;
             bool isCorrectiveReset = kind == FullStateKind.CorrectiveReset;
 
+            // The host broadcasts the tick-0 state to everyone at bootstrap. A peer that was present at game
+            // start already produced the identical snapshot locally, so dropping this copy is correct — but
+            // it is not an anomaly, and counting it as one made unexpectedFullStateDrop useless: it fired
+            // exactly once per guest per session, every session. Late joiners are the peers that need the
+            // payload, and they arrive here with _expectingFullState set.
+            //
+            // The drop is also the one moment we can compare tick-0 state across peers for free, so a hash
+            // difference is escalated instead of ignored: it means the two sides disagreed before the first
+            // tick, which no later desync report can attribute. _bootstrapStateHash is taken in
+            // HandleGameStart for every session and cleared by Stop(), so 0 here means the local tick-0
+            // state was never established (this peer never reached HandleGameStart) and there is nothing
+            // to compare against.
+            if (kind == FullStateKind.InitialState && !isResync && !_expectingFullState)
+            {
+                if (_bootstrapStateHash != 0 && _bootstrapStateHash != stateHash)
+                {
+                    _unexpectedFullStateDropCount++;
+                    _logger?.KError(
+                        $"[KlothoEngine][FullStateResync] Bootstrap FullState disagrees with the local tick-0 state: " +
+                        $"remote=0x{stateHash:X16} local=0x{_bootstrapStateHash:X16} — the peers diverged before tick 0 " +
+                        $"(check RegisterSystems static load / OnInitializeWorld determinism)");
+                    return;
+                }
+                _logger?.KDebug($"[KlothoEngine][FullStateResync] Bootstrap FullState ignored — already held locally (tick={tick}, hash=0x{stateHash:X16})");
+                return;
+            }
+
             if (!isResync && !_expectingFullState && !isCorrectiveReset)
             {
                 _unexpectedFullStateDropCount++;
@@ -693,7 +724,9 @@ namespace xpTURN.Klotho.Core
             // ResetTransientSyncStateAfterFullState overwrites _lastVerifiedTick to tick-1 (which would
             // include unrecorded predicted ticks). Same clamp value as ComputeReplayTotalTicks.
             int preResetTotalTicks = ComputeReplayTotalTicks();
+            CaptureResyncTransforms();
             var applyResult = ApplyFullState(tick, stateData, stateHash, reason);
+            ComputeResyncErrorDeltas(reason, tick, applyResult);
 
             if (applyResult == FullStateApplyResult.Skipped)
             {

@@ -25,7 +25,7 @@
   "SDInputLeadTicks": 2,
 
   "EnableErrorCorrection": true,
-  "InterpolationDelayTicks": 2,
+  "InterpolationDelayTicks": 4,
 
   "QuorumMissDropTicks": 20,
 

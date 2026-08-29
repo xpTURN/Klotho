@@ -8,6 +8,8 @@
         "xpTURN.Klotho.Logging",
         "xpTURN.Klotho.Logging.Unity",
         "xpTURN.Klotho.Runtime",
+        "xpTURN.Klotho.Runtime.Unity",
+        "UniTask",
         "xpTURN.Klotho.Tests",
         "xpTURN.Klotho.Gameplay",
         "Brawler.ECS"

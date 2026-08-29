@@ -50,6 +50,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
     {
         private const int Warmup = 32;
 
+        /// <summary>How many times a measurement is repeated before the smallest is taken — see
+        /// <see cref="SmallestPass"/> for what the repetition is protecting against.</summary>
+        private const int Passes = 3;
+
         private static string RepoRoot()
         {
             // The com.xpturn.klotho directory, the marker every other fixture in this suite walks
@@ -154,12 +158,49 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
         private static long MeasurePerRebake(FPNavMeshRebakeContext ctx, FPBuildingRect[] buildings,
             FPBuildingPlacementRules rules = default)
+            => SmallestPass(() => RebakeAndInstall(ctx, buildings, rules), iterations: 8);
+
+        /// <summary>
+        /// Allocation per call: the SMALLEST of <see cref="Passes"/> measured passes, with the
+        /// thread's allocation quantum drained before each one.
+        ///
+        /// <para><b>Both halves are there for one defect, and it is in the INSTRUMENT rather than in
+        /// anything measured.</b> <see cref="GC.GetAllocatedBytesForCurrentThread"/> is only exact at
+        /// the granularity of the thread's allocation context: when a BACKGROUND GC runs while the
+        /// thread holds an unused quantum remainder, that remainder is charged to the thread, so a
+        /// provably non-allocating loop reports up to ~8 KB. Reduced to a loop of pure arithmetic it
+        /// reproduces at 105 of 1,500 windows with concurrent GC on and 0 of 1,500 with it off — and
+        /// 0 of 1,500 with the collect below, at 2,999 background GCs.</para>
+        ///
+        /// <para>Which is exactly what these gates saw: this fixture passed alone every time and
+        /// failed inside the full suite, at a different configuration and a different odd number
+        /// each run (32, 3,616, 4,096, 4,168, 4,544, 4,936, 5,856 B — all under one quantum, always
+        /// one iteration of twenty). A suite of 2,355 tests keeps a large heap and background GCs
+        /// running; a lone fixture does not.</para>
+        ///
+        /// <para><b>The collect</b> drains the remainder, so a background GC landing mid-window has
+        /// nothing to charge — sufficient on its own for the gates that assert zero, since a window
+        /// that allocates nothing never takes a new quantum. <b>The passes</b> cover the ones that
+        /// do allocate and therefore re-arm the artifact by taking one: the charge is non-negative
+        /// and lands in at most one pass, while a real allocation is in every pass, so the minimum
+        /// is the true steady state. Neither loosens a ceiling — a per-call regression survives both,
+        /// which is the point of measuring this way instead of raising the numbers.</para>
+        /// </summary>
+        private static long SmallestPass(Action call, int iterations)
         {
-            const int iterations = 8;
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < iterations; i++)
-                RebakeAndInstall(ctx, buildings, rules);
-            return (GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
+            long best = long.MaxValue;
+            for (int p = 0; p < Passes; p++)
+            {
+                GC.Collect();
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                for (int i = 0; i < iterations; i++)
+                    call();
+                long per = (GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
+                if (per < best) best = per;
+                // Nothing can beat zero, and the gates that assert it are the common case.
+                if (best == 0) break;
+            }
+            return best;
         }
 
         [Test]
@@ -450,11 +491,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         {
             for (int i = 0; i < Warmup; i++)
                 preview();
-            const int iterations = 20;
-            long before = System.GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < iterations; i++)
-                preview();
-            return (System.GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
+            return SmallestPass(preview, iterations: 20);
         }
 
         // ─────────────────────────────────────────────── the per-tick driver
@@ -518,14 +555,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             frame.Tick = 101;
             driver.Update(ref frame);
 
-            const int iterations = 64;
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < iterations; i++)
+            int tick = 102;
+            long perTick = SmallestPass(() =>
             {
-                frame.Tick = 102 + i;
+                frame.Tick = tick++;
                 driver.Update(ref frame);
-            }
-            long perTick = (GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
+            }, iterations: 64);
 
             Assert.AreEqual(0, perTick,
                 $"the driver allocated {perTick} B on a quiet tick. It runs every tick on every peer, "
