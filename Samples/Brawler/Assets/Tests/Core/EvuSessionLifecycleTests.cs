@@ -11,16 +11,16 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// Two holes in the EntityViewUpdater's session lifetime (IMP105 C-15 / C-16).
+    /// Two holes in the EntityViewUpdater's session lifetime.
     ///
-    /// C-15: Initialize only unsubscribed from the previous engine. Everything else — the active-view
+    /// Hole 1 — Initialize only unsubscribed from the previous engine. Everything else — the active-view
     /// dictionary above all — survived, so a game that re-initialized without calling Cleanup() first
     /// kept the previous session's views on screen, drawing a stopped engine's last frame, unreachable
     /// through PlayerViews (the registry IS replaced), and colliding with the new session's keys: a
     /// fresh EntityManager hands out (0, 1) again, so TrySpawn found the old entry and deduped the new
     /// spawn away. The Godot adapter's Initialize has always started with Cleanup().
     ///
-    /// C-16: every loop over the view dictionary assumed its entries were alive. A view destroyed from
+    /// Hole 2 — every loop over the view dictionary assumed its entries were alive. A view destroyed from
     /// outside — a reloaded scene invalidating an adopted scene view, or a game destroying one by hand —
     /// threw out of the loop, and the loop that mattered was LateUpdate: it reaches transform.position
     /// through ApplyTransform, so it threw EVERY FRAME regardless of what the game overrides. Cleanup
@@ -86,7 +86,7 @@ namespace xpTURN.Klotho.View.Tests
         public void TearDown()
         {
             // Cleanup first: OnDestroy only unsubscribes, so destroying the updater's GameObject leaves
-            // every view it created alive in the shared EditMode scene (IMP105 T-1).
+            // every view it created alive in the shared EditMode scene.
             if (_evu != null) _evu.Cleanup();
             if (_evuGo != null) Object.DestroyImmediate(_evuGo);
             if (_factory != null) Object.DestroyImmediate(_factory);
@@ -95,7 +95,7 @@ namespace xpTURN.Klotho.View.Tests
             _engine = null;
         }
 
-        // ── C-15: re-initializing without Cleanup ───────────────────────────────────────────────
+        // ── Re-initializing without Cleanup ─────────────────────────────────────────────────────
 
         [Test]
         public void Reinitialize_WithoutCleanup_ReclaimsThePreviousSessionsViews()
@@ -154,10 +154,10 @@ namespace xpTURN.Klotho.View.Tests
             Assert.That(_evu.PlayerViews, Is.Not.SameAs(first));
         }
 
-        // ── C-10: Unity's null is not C#'s ──────────────────────────────────────────────────────
+        // ── Unity's null is not C#'s ────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// A destroyed serialized reference must not be handed on as if it were live (IMP105 C-10).
+        /// A destroyed serialized reference must not be handed on as if it were live.
         ///
         /// `??` and `?.` compare references; Unity's `==` asks the engine whether the object still
         /// exists. Mixing them inside one method made Initialize answer the same question both ways: it
@@ -191,12 +191,12 @@ namespace xpTURN.Klotho.View.Tests
                 "the warning above it already decided this factory does not exist — attaching it anyway makes the two lines disagree");
         }
 
-        // ── C-16: a view destroyed from outside ─────────────────────────────────────────────────
+        // ── A view destroyed from outside ───────────────────────────────────────────────────────
 
         [Test]
         public void LateUpdate_SurvivesAnExternallyDestroyedView()
         {
-            // The reference RED for C-16: this site needs no game override and no log level to throw.
+            // The reference RED: this site needs no game override and no log level to throw.
             // ApplyTransform writes transform.position, and InternalLateUpdateView's early returns
             // (DisableUpdate / Engine / EntityRef / null frame) all pass for a destroyed view, because
             // what was destroyed is the GameObject — the entity is still alive on both timelines.
@@ -395,7 +395,7 @@ namespace xpTURN.Klotho.View.Tests
                 if (_hasOwner) _ownerId = f.GetReadOnly<OwnerComponent>(EntityRef).OwnerId;
             }
 
-            // The base returns false so a missing override fails loudly (IMP104 W-3); an owner-bearing
+            // The base returns false so a missing override fails loudly; an owner-bearing
             // probe without this is rebound on every Reconcile.
             public override bool OwnerMatches(int ownerId) => _hasOwner && _ownerId == ownerId;
         }

@@ -366,7 +366,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         }
 
         /// <summary>
-        /// T-13. The per-frame ghost preview's allocation, for every policy and both API forms.
+        /// The per-frame ghost preview's allocation, for every policy and both API forms.
         ///
         /// <para><b>Why this exists before any pooling work.</b> The changes that reduce this
         /// allocation are, several of them, invisible to every correctness test in the suite: a
@@ -397,8 +397,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.AreEqual(22321, baseMesh.TriangleCount,
                 "the numbers below were measured on this exact asset");
 
-            // Measured 360 / 528 / 1,056 / 1,944 B at N = 1 / 4 / 16 / 32 after stage 3 of
-            // IMP100/Plan-PreviewClipAlloc.md. The trail, at N = 32:
+            // Measured 360 / 528 / 1,056 / 1,944 B at N = 1 / 4 / 16 / 32 after stage 3 of the
+            // preview-allocation work. The trail, at N = 32:
             //   85,624 → 41,512 (stage 1: CSR order table, sized transition list, no Y channel)
             //          → 10,464 (stage 2: the nine clip buffers pooled)
             //          →  1,944 (stage 3: Result hands out the working lists instead of five arrays)
@@ -473,8 +473,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                         + "allocate NOTHING. The strict policies walk the base mesh's edges once and "
                         + "touch nothing already built; ClipOverlap builds clip rings but does it in "
                         + "buffers it reuses (FPClipScratch). It was "
-                        + $"{new[] { 5104, 12696, 41384, 85624 }[k]} B under ClipOverlap before "
-                        + "IMP100/Plan-PreviewClipAlloc.md. A per-frame API has no room for a "
+                        + $"{new[] { 5104, 12696, 41384, 85624 }[k]} B under ClipOverlap before the "
+                        + "buffers were pooled. A per-frame API has no room for a "
                         + "steady-state allocation, so this is zero and not a ceiling");
                 }
             }

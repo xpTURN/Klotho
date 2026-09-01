@@ -27,7 +27,7 @@ namespace xpTURN.Klotho
         /// Which tick it comes from depends on the render path: the CSP path uses the live Predicted
         /// frame, the snapshot path uses the render window's alpha=0 endpoint (a Verified snapshot, at
         /// most one tick behind the interpolated child). For a verified-rendered entity the live pose is
-        /// a prediction — the one thing that path exists to avoid — so it is not used there (IMP103 D-2).
+        /// a prediction — the one thing that path exists to avoid — so it is not used there.
         /// </summary>
         public Vector3 UninterpolatedPosition;
 
@@ -36,9 +36,9 @@ namespace xpTURN.Klotho
 
         // DeltaTime (Unity Time.deltaTime) was removed here. Nothing read it, and unlike the fields above
         // it was never an extension point worth keeping: the value is a global static, so an ApplyTransform
-        // override reads Time.deltaTime directly rather than being handed it (IMP103 D-4). The Godot adapter
-        // has no counterpart to this struct at all — IMP52 decided the parameter/ApplyTransform split is
-        // unnecessary there because it applies the transform inline.
+        // override reads Time.deltaTime directly rather than being handed it. The Godot adapter
+        // has no counterpart to this struct at all — the parameter/ApplyTransform split is deliberately
+        // absent there, because that adapter applies the transform inline.
 
         /// <summary>
         /// Whether the render interval this frame sits on crosses a teleport, so the view must jump rather
@@ -52,7 +52,7 @@ namespace xpTURN.Klotho
         /// <c>TeleportTick</c> values. A window with only one endpoint occupied reports false.</item>
         /// </list>
         /// <see cref="EntityView.ApplyTransform"/> acts on it for CSP views only; the snapshot path puts the
-        /// jump on the interpolation boundary instead (IMP103 V-5).
+        /// jump on the interpolation boundary instead.
         /// </summary>
         public bool Teleported;
     }

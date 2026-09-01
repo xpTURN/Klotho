@@ -862,6 +862,10 @@ namespace xpTURN.Klotho.Network
             // Apply server-authoritative SessionConfig fields in place. Engine and NetworkService
             // share the same SessionConfig reference, so mutating the instance propagates to both
             // readers automatically. Match-start one-shot; SessionConfig stays immutable afterward.
+            // RandomSeed IS written here, unlike the P2P host path which drops it: this config was
+            // built with the guest's zero (KlothoSession.Create), never authored, and the authority
+            // is a different class (ServerNetworkService) that keeps no write-back at all — so there
+            // is no authored value here to protect.
             if (_sessionConfig is SessionConfig cfg)
             {
                 cfg.RandomSeed = msg.RandomSeed;

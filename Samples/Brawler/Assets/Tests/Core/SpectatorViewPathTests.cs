@@ -10,7 +10,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// Which render path a spectator assigns (IMP103 V-4).
+    /// Which render path a spectator assigns.
     ///
     /// This is the premise the engine-side decision rests on: the spectator's error-correction calls were
     /// removed because a spectator has no LocalPlayerId — the engine falls back to 0 and the game's ids
@@ -23,7 +23,7 @@ namespace xpTURN.Klotho.View.Tests
     /// against the host's entity and treat it as local — CSP render path AND NonVerified binding, because
     /// the same comparison was written twice. `PlayerViewRegistry.IsActuallyLocal` had already
     /// disambiguated the identical collision via IsSpectatorMode; the factory now does it in the one
-    /// expression both decisions share (IMP103).
+    /// expression both decisions share.
     ///
     /// Two of these tests exist because fixing only the render path would have been worse than the bug:
     /// a Verified render flag on a NonVerified binding renders from one timeline while the view's lifetime

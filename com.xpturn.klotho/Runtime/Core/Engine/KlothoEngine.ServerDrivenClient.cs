@@ -184,7 +184,7 @@ namespace xpTURN.Klotho.Core
             // Clear runs once per Update, ahead of every per-mode early return, so it is not repeated
             // here. Publish stays: it has to follow the transport pump (_networkService.Update, which
             // ran before this branch was entered) or the parked deltas wait a frame — see the P2P
-            // publish site for the full reasoning (IMP105 C-3/C-6).
+            // publish site for the full reasoning.
             PublishPendingResyncDeltas();
 
             // re-arm timer for an outstanding FullState request. Returns true if the
@@ -332,7 +332,7 @@ namespace xpTURN.Klotho.Core
                     // Ask the level before computing. KDebug's interpolated-string handler already skips
                     // the holes when Debug is off, so the message itself is free — but GetBufferedTickRange
                     // is a plain statement outside it, and it walks the whole command buffer. The gate that
-                    // covers the string does not cover the argument (IMP105 P-2).
+                    // covers the string does not cover the argument.
                     if (_logger != null && _logger.IsEnabled(KLogLevel.Debug))
                     {
                         var bufRange = _inputBuffer.GetBufferedTickRange(playerId);
@@ -996,7 +996,7 @@ namespace xpTURN.Klotho.Core
                 _serverDrivenNetwork.ClearUnackedInputs();
                 DrainPendingVerifiedQueue();
                 // Includes the parked resync deltas: the restored world was never simulated locally, so
-                // nothing measured against the old one still describes a jump (IMP105 C-6).
+                // nothing measured against the old one still describes a jump.
                 ResetErrorCorrectionState();
 
                 // In catchup mode, HandleVerifiedStateReceived stores directly into the InputBuffer.
@@ -1017,7 +1017,7 @@ namespace xpTURN.Klotho.Core
             // Mirrors the P2P placement (FullStateResync.cs, HandleFullStateReceived): capture before,
             // compute after. The two branches above are deliberately excluded — the initial FullState is
             // the bootstrap (no local pose to diff against) and the Late Join branch restores into a world
-            // this peer never simulated, which is also why it clears the delta maps outright (IMP103 #5).
+            // this peer never simulated, which is also why it clears the delta maps outright.
             CaptureResyncTransforms();
             var applyResult = ApplyFullState(tick, stateData, stateHash, ApplyReason.ResyncRequest);
             ComputeResyncErrorDeltas(ApplyReason.ResyncRequest, tick, applyResult);
@@ -1154,7 +1154,11 @@ namespace xpTURN.Klotho.Core
             ClearFullStateRequestState();
             ApplyFullState(tick, stateData, stateHash, ApplyReason.InitialFullState);
             _lastServerVerifiedTick = tick;
-            _replaySystem.SetInitialStateSnapshot(stateData, stateHash);
+            _replaySystem.SetInitialStateSnapshot(stateData, stateHash, tick);
+            // Same instant as the snapshot (see the P2P/server site). This one can be a mid-match tick,
+            // which is exactly why the anchors cannot be taken back at StartRecording.
+            var anchors = GetFingerprintBreakdown();
+            _replaySystem.SetReproductionAnchors(anchors.Layout, anchors.StaticCollider, anchors.Nav, anchors.Game);
             // ApplyFullState resets _accumulator to 0, so re-establish the warm-up lead.
             ApplySDWarmUpLead();
             _logger?.KInformation(

@@ -29,6 +29,8 @@ namespace xpTURN.Samples.DevLobby.Tests
         readonly BcEd25519Backend _backend = new BcEd25519Backend();
         readonly List<(int peer, byte[] wire)> _sent = new List<(int, byte[])>();
         readonly List<string> _policySawMatchIds = new List<string>(); // every id handed to _configPolicy
+        readonly List<string> _policySawInstanceIds = new List<string>(); // and the instance id beside it
+        int _policySawCapacity = -1;                                      // the assigned server's capacity
         LobbyRoomRegistry _reg;
 
         DevLobbyCore NewCore()
@@ -46,7 +48,7 @@ namespace xpTURN.Samples.DevLobby.Tests
         DevLobbyReserveCoordinator NewCoord(DevLobbyCore core)
             => new DevLobbyReserveCoordinator(core, () => _now, () => "n" + (++_nonceSeq),
                    (peer, wire) => _sent.Add((peer, wire)),
-                   (matchId, roomId) => { _policySawMatchIds.Add(matchId); return (7, (byte[])null); },
+                   req => { _policySawMatchIds.Add(req.MatchId); _policySawInstanceIds.Add(req.InstanceId); _policySawCapacity = req.Capacity; return (7, (byte[])null); },
                    Validity, AckTimeout);
 
         LobbyWire.ReservePushMsg LastPush()

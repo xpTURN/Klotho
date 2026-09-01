@@ -11,7 +11,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// Tick-then-read for the error visual (IMP103 V-9).
+    /// Tick-then-read for the error visual.
     ///
     /// The rollback delta is produced in the engine's Update and the view reads it in the same frame's
     /// LateUpdate — but the view used to fill the transform parameter from the smoother BEFORE advancing
@@ -22,9 +22,9 @@ namespace xpTURN.Klotho.View.Tests
     /// uninterpolated pose with no offset, so the teleport test here passed before the fix too. It
     /// stays as the guard that keeps it that way once the read moves after the Tick.
     ///
-    /// Neither order was ever chosen. IMP19 and the IMP24 plan were tick-then-read; a 2026-04-23 fix
-    /// moved only Tick from the per-tick path to LateUpdate and the read stayed behind in Update, and
-    /// IMP46 later merged the two and preserved the accidental order as "1-frame smoothing latency".
+    /// Neither order was ever chosen: the design was tick-then-read, a 2026-04-23 fix moved only Tick
+    /// from the per-tick path to LateUpdate while the read stayed behind in Update, and the later merge
+    /// of the two preserved that accidental order as "1-frame smoothing latency".
     ///
     /// Same harness as ErrorVisualGateTests, same zero-vs-non-zero assertions for the same reason
     /// (EditMode Time.deltaTime is ~0.2ms, so one Tick of a 0.3m delta produces ~0.011m).
@@ -109,7 +109,7 @@ namespace xpTURN.Klotho.View.Tests
         }
 
         /// <summary>
-        /// The V-9 case. The delta is present when LateUpdate runs, so the offset must be on the
+        /// The delta is present when LateUpdate runs, so the offset must be on the
         /// transform in that same frame. Pre-fix the smoother has advanced (Visual is non-zero) but the
         /// transform was filled from the stale zero — the offset is one frame late.
         /// </summary>

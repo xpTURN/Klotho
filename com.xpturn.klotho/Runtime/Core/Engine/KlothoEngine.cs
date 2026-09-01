@@ -401,7 +401,7 @@ namespace xpTURN.Klotho.Core
         // time — but the >10-tick snap guard fires inside the SAME AdvanceVerifiedRenderTime call, ahead of
         // any RenderClock read, so VerifiedBaseTick is never wrong for even one frame. The only residue is
         // that frame's _verifiedRenderTimescale, computed before the snap and clamped to [0.5, 2.0]. A
-        // reset would therefore add a state-clearing path for no observable gain (IMP103 별건 #8).
+        // reset would therefore add a state-clearing path for no observable gain.
         private double _verifiedRenderTimeMs;
         private bool   _verifiedRenderTimeInitialized;
         // Drift-proportional render timescale computed by AdvanceVerifiedRenderTime, exposed via
@@ -718,8 +718,42 @@ namespace xpTURN.Klotho.Core
         // interface change so existing network-service mocks are unaffected. Every P2P peer holds the same
         // signed bytes, so seeding the world from them in OnInitializeWorld is deterministic across peers.
         public byte[] GetPlayerEntitlement(int playerId)
-            => _serverDrivenNetwork?.GetPlayerEntitlement(playerId)
-               ?? (_networkService as KlothoNetworkService)?.GetPlayerEntitlement(playerId);
+        {
+            // A network service that answers `null` has ANSWERED — that player was issued nothing. Chaining
+            // with `??` would treat that as "no answer" and fall through to the replay table, so a live
+            // match could seed a player from bytes the authority did not give them. The fallback is for
+            // sessions with nobody to ask, not for empty answers.
+            if (_serverDrivenNetwork != null)
+                return _serverDrivenNetwork.GetPlayerEntitlement(playerId);
+            if (_networkService is KlothoNetworkService p2pNetwork)
+                return p2pNetwork.GetPlayerEntitlement(playerId);
+            return ReplayEntitlementOf(playerId);
+        }
+
+        /// <summary>
+        /// Per-player verified data recovered from a replay, used only when no network service can answer.
+        ///
+        /// <para><b>The order above is the contract.</b> Network first, this last. Reversed, a LIVE match
+        /// would read an empty table and seed tick 0 as though nothing had been issued — the game breaks,
+        /// not the verifier, and it does so quietly. This table is populated only on the replay path, so in
+        /// a live session it is null and the null-coalescing chain never reaches it.</para>
+        ///
+        /// <para>Filled from the file's roster-parallel record at StartReplay, and extended at each join
+        /// tick from the join command that carries the joiner's bytes.</para>
+        /// </summary>
+        private Dictionary<int, byte[]> _replayEntitlements;
+
+        private byte[] ReplayEntitlementOf(int playerId)
+            => _replayEntitlements != null && _replayEntitlements.TryGetValue(playerId, out var bytes)
+                ? bytes
+                : null;
+
+        /// <summary>Records one player's verified data recovered from the replay stream (join tick).</summary>
+        internal void SetReplayEntitlement(int playerId, byte[] entitlement)
+        {
+            if (entitlement == null || entitlement.Length == 0) return;
+            (_replayEntitlements ??= new Dictionary<int, byte[]>())[playerId] = entitlement;
+        }
 
         /// <summary>
         /// Gets per-player custom data. Returns false if not yet received.
@@ -928,6 +962,14 @@ namespace xpTURN.Klotho.Core
             }
 
             _simulation.OnPlayerJoinedNotification += HandlePlayerJoinedNotification;
+            // Adopts the joiner's verified data from the join command, before the notification above seeds
+            // the world from it. Subscribed here AND on the callbacks overload that replay takes — the two
+            // shapes a session's engine comes in. NOT in the bare overload: the spectator takes that one
+            // and builds its world from full states, never from a command stream. On this path the network
+            // service answers first (see GetPlayerEntitlement's order contract), so the table it fills is
+            // one nobody reads — deliberately, so both paths can wire the same way.
+            if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsForJoinData)
+                ecsForJoinData.OnPlayerJoinedEntitlement += SetReplayEntitlement;
             _simulation.Initialize();
 
             // Arm the diagnostic hash-history ring when configured. Diagnostic-only and local, so it
@@ -991,6 +1033,21 @@ namespace xpTURN.Klotho.Core
             _viewCallbacks = viewCallbacks;
             _commandSender = new CommandSender(this);
             Initialize(simulation, logger);
+
+            // The join tick, for a session that has no network service to ask — replay. Mirrors the pair
+            // the network overload sets: a recorded PlayerJoinCommand re-executes on playback, its carried
+            // entitlement is adopted first, then the notification creates the participant slot and hands
+            // the joiner to the game (OnPlayerJoinedWorld). Without these a replayed late-joiner gets no
+            // slot and no join-time seed: the recording is correct and nobody reads it, which diverges the
+            // whole playback from the join tick on and is invisible to a result comparison.
+            //
+            // AFTER the delegating call on purpose: _simulation is assigned in THAT body, so subscribing
+            // beside _simulationCallbacks above would dereference null. Ordering against
+            // _simulation.Initialize() does not matter (it clears the frame, not C# events, and no tick
+            // runs in between) — the network overload subscribes before it only because it can.
+            _simulation.OnPlayerJoinedNotification += HandlePlayerJoinedNotification;
+            if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsForJoin)
+                ecsForJoin.OnPlayerJoinedEntitlement += SetReplayEntitlement;
         }
 
         public void Initialize(ISimulation simulation, IKLogger logger)
@@ -1020,9 +1077,99 @@ namespace xpTURN.Klotho.Core
             _reliableTracker.Attach();
         }
 
+        /// <summary>
+        /// Whether <see cref="Start()"/> begins recording a replay. Default true — the recording is
+        /// what the replay file and the tick-0 snapshot injection are made of, so this is opt-out.
+        /// Per-peer and not wire-borne: it decides only what this machine keeps in memory.
+        /// Set from <c>KlothoSessionSetup.EnableReplayRecording</c> in KlothoSession.Create.
+        ///
+        /// <para>Only <see cref="Start()"/> reads it. The spectator engine never goes through Start
+        /// (StartSpectator sets Running directly and never records), so there is no second site to
+        /// keep in sync — unlike <see cref="AllowLayoutMismatch"/>.</para>
+        /// </summary>
+        public bool EnableReplayRecording { get; set; } = true;
+
         public void Start()
         {
-            Start(enableRecording: true);
+            Start(enableRecording: EnableReplayRecording);
+        }
+
+        /// <summary>
+        /// Builds the tick-0 world: participant slots, the seed singleton, the match-end singleton, the
+        /// game's OnInitializeWorld, and the navmesh correction that has to land before anything samples
+        /// a derivative of it.
+        ///
+        /// <para>The ORDER here is state-hash input — entities are created in it, so two peers that run
+        /// these steps in a different sequence disagree from tick 0. That is why replay reconstruction
+        /// calls THIS method instead of repeating the sequence: a second copy would be correct until the
+        /// day someone edits one of them, and the symptom would be a verifier calling an honest client a
+        /// cheat.</para>
+        ///
+        /// <para>Deliberately NOT included: the input-delay prefill that precedes this in Start(). That
+        /// fills the input buffer rather than the frame, so it is outside the state hash — and on the
+        /// replay path the replay player drives input, where a prefill would do harm.</para>
+        ///
+        /// <para>SD clients never call this: their initial state arrives as a server FullState.</para>
+        /// </summary>
+        private void BuildInitialWorld()
+        {
+            // Engine writes deterministic participant slots into the frame
+            // before any game-specific world setup runs.
+            if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSim)
+            {
+                var frame = ecsSim.Frame;
+                for (int i = 0; i < _activePlayerIds.Count; i++)
+                {
+                    var slotEntity = frame.CreateEntity();
+                    frame.Add(slotEntity, new xpTURN.Klotho.ECS.SessionParticipantComponent
+                    {
+                        PlayerId = _activePlayerIds[i],
+                    });
+                }
+
+                // Singleton seed entity — zero-extend cast normalizes negative int seeds to a stable ulong.
+                var seedEntity = frame.CreateEntity();
+                frame.Add(seedEntity, new xpTURN.Klotho.ECS.RandomSeedComponent
+                {
+                    Seed = (ulong)(uint)_randomSeed,
+                });
+
+                // Singleton match-end state — created here in the fixed deterministic
+                // entity-creation order (participants → seed → matchEnd) so the state hash matches
+                // across peers. The game's match-end system writes {Ended, Winner, Reason}; the engine
+                // reads it (IsMatchEndedState / GetActiveMatchEnd) at resync/restore boundaries.
+                // SD clients skip this block (!isSdClient) and receive the singleton via FullState.
+                var matchEndEntity = frame.CreateEntity();
+                frame.Add(matchEndEntity, new xpTURN.Klotho.ECS.MatchEndStateComponent());
+            }
+
+            _worldInitInProgress = true;
+            try { _simulationCallbacks?.OnInitializeWorld(this); }
+            finally { _worldInitInProgress = false; }
+
+            // Establish the navmesh invariant BEFORE anything samples a derivative of it, and
+            // note the position: after world init, so the driver sees the buildings a map may
+            // have pre-placed, and before both the static fingerprint below and the initial
+            // FullState broadcast that follows.
+            //
+            // The driver guarantees installed == Bake(f(frame)) from the start of every EXECUTED
+            // tick. World init is the one window that guarantee has never covered: the initial
+            // FullState — and the fingerprint it carries — goes out after this point and before
+            // tick 0 ever runs. Without this the peer's derivative there is still the LOADED
+            // mesh, which is the same walkable region as Bake({}) but not the same triangulation
+            // (measured in the field: 0x21D6… vs 0xDF40…), so a client that applies that state
+            // and corrects itself gets blamed for a static-environment mismatch for being right.
+            //
+            // Net cost is zero: this MOVES the match-start rebake that tick 0 already paid for,
+            // and tick 0 then sees the tag match and skips.
+            //
+            // SD clients skip this whole block (the !isSdClient gate at the call site) and do not need it — their
+            // window is closed by the same correction on the full-state apply path.
+            if (_navRebakeDriver != null && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsInit)
+            {
+                var initFrame = ecsInit.Frame;
+                _navRebakeDriver.CorrectNow(ref initFrame);
+            }
         }
 
         public void Start(bool enableRecording)
@@ -1095,63 +1242,7 @@ namespace xpTURN.Klotho.Core
 #endif
             if (!isSdClient)
             {
-                // Engine writes deterministic participant slots into the frame
-                // before any game-specific world setup runs.
-                if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsSim)
-                {
-                    var frame = ecsSim.Frame;
-                    for (int i = 0; i < _activePlayerIds.Count; i++)
-                    {
-                        var slotEntity = frame.CreateEntity();
-                        frame.Add(slotEntity, new xpTURN.Klotho.ECS.SessionParticipantComponent
-                        {
-                            PlayerId = _activePlayerIds[i],
-                        });
-                    }
-
-                    // Singleton seed entity — zero-extend cast normalizes negative int seeds to a stable ulong.
-                    var seedEntity = frame.CreateEntity();
-                    frame.Add(seedEntity, new xpTURN.Klotho.ECS.RandomSeedComponent
-                    {
-                        Seed = (ulong)(uint)_randomSeed,
-                    });
-
-                    // Singleton match-end state — created here in the fixed deterministic
-                    // entity-creation order (participants → seed → matchEnd) so the state hash matches
-                    // across peers. The game's match-end system writes {Ended, Winner, Reason}; the engine
-                    // reads it (IsMatchEndedState / GetActiveMatchEnd) at resync/restore boundaries.
-                    // SD clients skip this block (!isSdClient) and receive the singleton via FullState.
-                    var matchEndEntity = frame.CreateEntity();
-                    frame.Add(matchEndEntity, new xpTURN.Klotho.ECS.MatchEndStateComponent());
-                }
-
-                _worldInitInProgress = true;
-                try { _simulationCallbacks?.OnInitializeWorld(this); }
-                finally { _worldInitInProgress = false; }
-
-                // Establish the navmesh invariant BEFORE anything samples a derivative of it, and
-                // note the position: after world init, so the driver sees the buildings a map may
-                // have pre-placed, and before both the static fingerprint below and the initial
-                // FullState broadcast that follows.
-                //
-                // The driver guarantees installed == Bake(f(frame)) from the start of every EXECUTED
-                // tick. World init is the one window that guarantee has never covered: the initial
-                // FullState — and the fingerprint it carries — goes out after this point and before
-                // tick 0 ever runs. Without this the peer's derivative there is still the LOADED
-                // mesh, which is the same walkable region as Bake({}) but not the same triangulation
-                // (measured in the field: 0x21D6… vs 0xDF40…), so a client that applies that state
-                // and corrects itself gets blamed for a static-environment mismatch for being right.
-                //
-                // Net cost is zero: this MOVES the match-start rebake that tick 0 already paid for,
-                // and tick 0 then sees the tag match and skips.
-                //
-                // SD clients skip this whole block (!isSdClient above) and do not need it — their
-                // window is closed by the same correction on the full-state apply path.
-                if (_navRebakeDriver != null && _simulation is xpTURN.Klotho.ECS.EcsSimulation ecsInit)
-                {
-                    var initFrame = ecsInit.Frame;
-                    _navRebakeDriver.CorrectNow(ref initFrame);
-                }
+                BuildInitialWorld();
 
                 // One-time static geometry fingerprint. Gated to non-SD-client peers: the SD client
                 // has no static loaded yet here (it arrives via Initial FullState), so logging it now
@@ -1175,6 +1266,27 @@ namespace xpTURN.Klotho.Core
             if (enableRecording && !_isReplayMode)
             {
                 _replaySystem.StartRecording(_activePlayerIds.Count, _simConfig, _randomSeed);
+
+                // The roster the tick-0 world was built from — recorded ONLY when this peer built it.
+                // An SD client's initial state comes from the server, and its own roster order is not
+                // evidence of the order the server created participants in, so it records none. That makes
+                // "roster present" mean "reconstructable" with no extra flag (see IReplayMetadata).
+                //
+                // After StartRecording on purpose: recording onto a live ReplayData needs no pending buffer.
+                if (!isSdClient)
+                {
+                    _replaySystem.SetInitialRoster(_activePlayerIds);
+
+                    // The per-player verified data this peer's tick-0 world was built from, in the SAME
+                    // order — walked from the roster rather than copied from the network service's own
+                    // list, so the parallelism is structural instead of two lists that happen to agree.
+                    // Without it, a rebuild reads "nothing was issued" and seeds a different world whose
+                    // entity and component counts match, which reads as a determinism bug.
+                    var entitlements = new byte[_activePlayerIds.Count][];
+                    for (int i = 0; i < _activePlayerIds.Count; i++)
+                        entitlements[i] = GetPlayerEntitlement(_activePlayerIds[i]);
+                    _replaySystem.SetInitialEntitlements(entitlements);
+                }
             }
 
             // SD server defers Running until all players ack initial FullState (or timeout) — see MarkBootstrapComplete.
@@ -1279,7 +1391,7 @@ namespace xpTURN.Klotho.Core
             // late-join catch-up, or before the transport exists keeps publishing the previous frame's
             // delta, and ErrorVisualState.Tick adds it to the accumulator again every frame until the
             // total crosses the teleport threshold and snaps — a drift-then-snap loop for as long as the
-            // stall lasts. The catch-up window is the long one (seconds), not Paused (IMP105 C-3).
+            // stall lasts. The catch-up window is the long one (seconds), not Paused.
             //
             // Only the clear moves up. PublishPendingResyncDeltas stays behind the transport pump, and the
             // two must NOT be fused into one call: see the publish site below.
@@ -1342,7 +1454,7 @@ namespace xpTURN.Klotho.Core
             // landed. Publishing after the pump is correct for both; moving this call up to sit with the
             // clear would, on the Unity ordering, run it before the parking and delay every resync
             // correction by a whole frame — the one frame the view renders the jump raw, which is the
-            // exact symptom the parking exists to remove (IMP105 C-3/C-6). The pair is not fused.
+            // exact symptom the parking exists to remove. The pair is not fused.
             PublishPendingResyncDeltas();
 
             // During Resync, halt tick progression and only check the timeout.
@@ -1907,7 +2019,11 @@ namespace xpTURN.Klotho.Core
             UnsubscribeDesyncProbe();
 
             if (_simulation != null)
+            {
                 _simulation.OnPlayerJoinedNotification -= HandlePlayerJoinedNotification;
+                if (_simulation is xpTURN.Klotho.ECS.EcsSimulation ecsForJoinDataOff)
+                    ecsForJoinDataOff.OnPlayerJoinedEntitlement -= SetReplayEntitlement;
+            }
             if (_replaySystem != null)
                 _replaySystem.OnInitialStateSnapshotSet -= HandleInitialStateSnapshotSet;
 
@@ -1916,7 +2032,7 @@ namespace xpTURN.Klotho.Core
             ResetErrorCorrectionState();
 
             // Same reason, one value further: a stale tick-0 hash would be compared against the NEXT
-            // session's bootstrap broadcast and report a divergence that never happened (IMP105 C-8).
+            // session's bootstrap broadcast and report a divergence that never happened.
             _bootstrapStateHash = 0;
 
             _initialized = false;
@@ -2416,7 +2532,7 @@ namespace xpTURN.Klotho.Core
             // check can attribute (the peers disagreed BEFORE tick 0) was therefore invisible exactly
             // where it is hardest to diagnose otherwise. Worse, the engine instance may be reused for a
             // second session (Stop clears _initialized), so a hash from a recorded match survived into a
-            // non-recorded one and reported a divergence that never happened (IMP105 C-8).
+            // non-recorded one and reported a divergence that never happened.
             //
             // GetStateHash rather than SerializeFullStateWithHash: the two are kept equal on purpose —
             // snapshot participants are folded one at a time to match (EcsSimulation.GetStateHash) — and
@@ -2432,9 +2548,14 @@ namespace xpTURN.Klotho.Core
                 && !(_simConfig.Mode == NetworkMode.ServerDriven && !_serverDrivenNetwork.IsServer))
             {
                 var (data, hash) = _simulation.SerializeFullStateWithHash();
-                _replaySystem.SetInitialStateSnapshot(data, hash);
+                _replaySystem.SetInitialStateSnapshot(data, hash, CurrentTick);
+                // Anchors ride with the snapshot, not with StartRecording: the navigation term moves with
+                // runtime rebakes, so the two must be taken at the same instant to describe one world.
+                var anchors = GetFingerprintBreakdown();
+                _replaySystem.SetReproductionAnchors(anchors.Layout, anchors.StaticCollider, anchors.Nav, anchors.Game);
                 _logger?.KInformation(
-                    $"[KlothoEngine][Replay] InitialStateSnapshot injected: size={data.Length}, hash=0x{hash:X16}");
+                    $"[KlothoEngine][Replay] InitialStateSnapshot injected: size={data.Length}, hash=0x{hash:X16}, tick={CurrentTick}, " +
+                    $"anchors layout=0x{anchors.Layout:X16} colliders=0x{anchors.StaticCollider:X16} nav=0x{anchors.Nav:X16} game=0x{anchors.Game:X16}");
             }
 
             // SD Server or P2P Host broadcasts the authoritative tick-0 state to all remote peers as a bootstrap.
@@ -2456,7 +2577,7 @@ namespace xpTURN.Klotho.Core
                 }
                 // Stamped InitialState, not the default Unicast. The receiver needs to tell "the bootstrap
                 // copy of a state I already built myself" from "a FullState I asked for" — without the kind
-                // it can only see an unexpected arrival and count it as an anomaly (IMP103).
+                // it can only see an unexpected arrival and count it as an anomaly.
                 if (isSdServer)
                     _serverDrivenNetwork.BroadcastFullState(0, _cachedFullState, _cachedFullStateHash, FullStateKind.InitialState);
                 else

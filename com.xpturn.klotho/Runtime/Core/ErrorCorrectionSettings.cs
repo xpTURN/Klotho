@@ -15,9 +15,9 @@ namespace xpTURN.Klotho.Core
     /// This type used to carry seven more fields — MinRate, MaxRate, PosBlendStart, PosBlendEnd,
     /// PosTeleportDistance, RotTeleportDeg, SmoothingRate — that the engine never read. All seven existed
     /// verbatim on <c>ErrorVisualState</c>, so raising one here did nothing while an identically named
-    /// knob did the work elsewhere; they were removed for that reason (IMP103). The two that remain are
+    /// knob did the work elsewhere; they were removed for that reason. The two that remain are
     /// deliberately NOT duplicated on the view side, which is why the deletion boundary was simply "the
-    /// names that collide" — IMP24 drew it that way on purpose when it split the view parameters out.
+    /// names that collide" — the boundary was drawn that way on purpose when the view parameters moved out.
     /// </summary>
     public struct ErrorCorrectionSettings
     {

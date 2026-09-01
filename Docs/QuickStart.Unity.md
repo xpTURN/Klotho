@@ -199,12 +199,27 @@ Wire the factory + (optional) `DefaultEntityViewPool` onto the scene's `EntityVi
 
 `KlothoSessionFlow` exposes these (engine-agnostic; Unity wraps the async ones in `UniTask`) — pick one per mode:
 
+- `StartLocal(simCfg, sessionCfg, roomName?)` — single player (sync, no socket).
 - `StartHostAndListen(simCfg, sessionCfg, roomName, address, port)` — P2P host (sync).
 - `JoinP2PAsync(transport, host, port, sessionCfg, ct)` — P2P guest.
 - `JoinServerDrivenAsync(transport, host, port, roomId, sessionCfg, ct)` — Server-Driven client.
 - `ReconnectAsync(transport, creds, sessionConfigSeed, ct)` — cold-start reconnect (`creds` = `PersistedReconnectCredentials`).
 - `SpectateAsync(host, port, roomId, ct)` — spectator (transport from `SpectatorTransportFactory`).
 - `StartReplayFromFile(path)` — file → session replay.
+
+### Single player
+
+One call, no socket, no port:
+
+```csharp
+var setup = new KlothoFlowSetupBuilder(BuildCallbacks)
+    .WithLogger(_logger)
+    .WithTransport(new NullTransport(_logger))   // no bind, no firewall prompt
+    .Build();
+var session = new KlothoSessionFlow(setup).StartLocal(_simConfig, _sessionConfig);
+```
+
+`_sessionConfig` is **copied** — `MinPlayers` is forced to 1 on the copy, so a shared inspector config is never written to. Author `CountdownDurationMs = 0` unless you want the default 3-second countdown before the match starts. Observers get `SessionEntryKind.Local`, not `Host`.
 
 Session creation / state is observed through the single `IKlothoSessionObserver` — branch on `OnSessionCreated`'s `SessionEntryKind`, not `simCfg.Mode`.
 

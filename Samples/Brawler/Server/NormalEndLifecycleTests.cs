@@ -9,6 +9,7 @@ using xpTURN.Klotho.Core;
 using xpTURN.Klotho.ECS;
 using xpTURN.Klotho.Deterministic.Navigation;
 using xpTURN.Klotho.Network;
+using xpTURN.Klotho.Replay;   // ReplaySystem / CommandFactory — reading back the file the room wrote
 
 namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
 {
@@ -46,6 +47,7 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             NE6_AllPeersGoneDuringGrace_ImmediateDrain();
             NE9_NoRoomManagerWiringWithoutAttach();
             NE10_IsEnded_FalseForEnding();
+            NE11_ServerWritesItsReplay_AndItRebuilds();
 
             Console.WriteLine($"\n=== NormalEndLifecycle results: {_passed} passed, {_failed} failed ===");
             _loggerFactory.Dispose();
@@ -78,6 +80,70 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             Assert("NE1g Room transitions to Empty", room.State == RoomState.Empty);
 
             env.Dispose();
+        }
+
+        // ── NE11: the server's own replay — written on room teardown, carrying a tick-0 roster ──
+        //
+        // Why this lives here: the verifier suite can only synthesize metadata, and a server recording only
+        // exists when a real room runs and tears down. This is the one place in the repo that does that
+        // headlessly.
+        //
+        // <para><b>What it does NOT prove.</b> This harness starts the sim by calling Engine.Start() directly
+        // (as the multi-room suite does) rather than by driving the ready/GameStart handshake — and the
+        // initial snapshot and the reproduction anchors are injected by the GAMESTART handler, not by Start().
+        // So the file this writes is deliberately incomplete: it has ticks and a roster but no snapshot and
+        // no anchors, and --verify stops on it at `anchors=absent`. Running a server file all the way to a
+        // verdict needs a real match (V-2/V-7 in the plan), which is a client-driven step.</para>
+        static void NE11_ServerWritesItsReplay_AndItRebuilds()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "klotho-server-replay-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var env = CreateTestEnv(EndGracePolicy.Continue, endGraceMs: 40, abortGraceMs: 40, replaySaveDir: dir);
+                var room = env.RoomManager.CreateRoom(0);
+                JoinPeer(env, peerId: 1, roomId: 0);
+                room.Update(0.025f);
+                room.Engine.Start();                       // drains joins first, as the multi-room suite does
+                for (int i = 0; i < 8; i++) room.Update(0.025f);
+
+                room.RequestEnd(EndReason.MatchEnded, TimeSpan.FromMilliseconds(40));
+                Thread.Sleep(80);
+                room.Update(0.025f);
+                env.RoomManager.TransitionDrainingRooms();
+                env.RoomManager.CleanupDisposingRooms();   // engine.Stop() -> StopRecording -> the save fires
+                env.Dispose();
+
+                var files = Directory.GetFiles(dir, "*.rply");
+                Assert("NE11a server wrote a replay", files.Length == 1);
+                if (files.Length != 1) return;
+
+                // It is a real file, not a stub: it loads with this build's reader and its two records of the
+                // participant count agree. The ROSTER is empty here for the same reason the anchors are — the
+                // roster is filled by the GameStart handler from the network service's player list, and this
+                // harness starts the sim directly. A production room fills both.
+                var loader = new ReplaySystem(new CommandFactory(), null);
+                loader.LoadFromFile(files[0]);
+                var written = loader.CurrentReplayData.Metadata;
+                Assert("NE11b the file loads and is self-consistent",
+                       written.PlayerCount == written.InitialRoster.Count || written.InitialRoster.Count == 0);
+
+                // The runner reads it and refuses it for the RIGHT reason. This file never saw GameStart, so
+                // it has no anchors — and "no anchors" must be a verdict, never a pass (an attacker's cheapest
+                // move is to strip them). Two runs in one process are compared: not the full session-reuse
+                // question the plan flags (this file stops before playback), but it pins that repeated
+                // verification in one process is deterministic rather than order-dependent.
+                var first = BrawlerReplayVerifier.Verify(files[0], null);
+                var second = BrawlerReplayVerifier.Verify(files[0], null);
+                Assert("NE11c an anchorless server file is unverifiable, not verified",
+                       first.Code == BrawlerReplayVerifier.ExitUnverifiable);
+                Assert("NE11d repeated verification in one process is stable",
+                       second.Code == first.Code && second.Line == first.Line);
+            }
+            finally
+            {
+                try { Directory.Delete(dir, recursive: true); } catch { /* temp cleanup is best-effort */ }
+            }
         }
 
         // ── NE2: EnterEnding API contract — manual call transitions Running -> Ending and
@@ -258,7 +324,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             }
         }
 
-        static TestEnv CreateTestEnv(EndGracePolicy endGracePolicy, int endGraceMs, int abortGraceMs)
+        static TestEnv CreateTestEnv(EndGracePolicy endGracePolicy, int endGraceMs, int abortGraceMs,
+                                    string replaySaveDir = null)
         {
             EnsureSharedTestData();
 
@@ -270,7 +337,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             var navMesh = _sharedNavMesh;
             var staticColliders = _sharedStaticColliders;
             var assetRegistry = _sharedAssetRegistry;
-            var roomManagerConfig = new RoomManagerConfigBuilder((roomLogger) => new BrawlerServerCallbacks(roomLogger, staticColliders, navMesh, maxPlayersPerRoom, 0))
+            var roomManagerConfig = new RoomManagerConfigBuilder((roomLogger) => new BrawlerServerCallbacks(
+                    roomLogger, staticColliders, navMesh, maxPlayersPerRoom, 0, replaySaveDir: replaySaveDir))
                 .WithRoomLimits(1, maxPlayersPerRoom)
                 .WithSimulationConfig(() => new SimulationConfig
                 {

@@ -128,11 +128,11 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
             world.Step(bodies, 1, FP64.FromDouble(1.0 / 60.0), FPVector3.Zero, null, null, null);
 
             float dy = (bodies[0].position.y - posBefore.y).ToFloat();
-            // normal = +Y → positionA -= correction → capsule moves -Y
-            // When merge works: 1 response → |dy| ≈ 0.27
-            // Without merge: 2 responses → |dy| ≈ 0.54
-            Assert.Less(dy, 0f, "must move down due to tread collision response");
-            Assert.Greater(dy, -0.45f, "merge must work and prevent over-correction (2 responses)");
+            // The contact normal is A→B (capsule → tread), i.e. −Y, so the response lifts the
+            // capsule OUT of the floor. When merge works: 1 response → dy ≈ 0.27;
+            // without merge: 2 responses → dy ≈ 0.54.
+            Assert.Greater(dy, 0f, "tread contact must lift the capsule out of the floor");
+            Assert.Less(dy, 0.45f, "merge must work and prevent over-correction (2 responses)");
         }
 
         [Test]
@@ -166,11 +166,11 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
             float dy = (bodies[0].position.y - posBefore.y).ToFloat();
             float dx = (bodies[0].position.x - posBefore.x).ToFloat();
 
-            // normal = closestOnSeg - closestOnTri (capsule side - mesh side)
-            // tread: closestOnSeg.y > closestOnTri.y → normal = +Y → positionA -= +Y*mag → capsule -Y
-            // riser: closestOnSeg.x < closestOnTri.x (x=1) → normal = -X → positionA -= (-X)*mag → capsule +X
-            Assert.Less(dy, 0f, "capsule must move down due to tread normal=+Y response");
-            Assert.Greater(dx, 0f, "capsule must move +X due to riser normal=-X response");
+            // Contact normals are A→B (capsule → mesh), and the response moves A along −normal:
+            //   tread: the capsule sits above it  → normal −Y → capsule lifted +Y
+            //   riser: the capsule is on the low side of the wall at x=1 → normal +X → pushed −X
+            Assert.Greater(dy, 0f, "tread contact must lift the capsule out of the floor");
+            Assert.Less(dx, 0f, "riser contact must push the capsule off the step face");
         }
 
         // ── Test 3: SetSkipStaticGroundResponse + Multi-Contact integration ─────────────────
@@ -209,8 +209,8 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
 
             // Stationary: ground (tread) response skipped → dy ≈ 0
             Assert.AreEqual(0f, dy, EPSILON, "ground response must be skipped when stationary");
-            // riser (wall, |normal.y| < 0.5) keeps full response → dx > 0
-            Assert.Greater(dx, 0f, "riser contact response must be preserved");
+            // riser (wall, |normal.y| < 0.5) keeps full response → pushed off the step face (−X)
+            Assert.Less(dx, 0f, "riser contact response must be preserved");
         }
 
         [Test]
@@ -242,8 +242,8 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
             world.Step(bodies, 1, FP64.FromDouble(1.0 / 60.0), FPVector3.Zero, null, null, null);
 
             float dy = (bodies[0].position.y - posBefore.y).ToFloat();
-            // normal = +Y → positionA -= correction → capsule moves -Y
-            Assert.Less(dy, 0f, "ground response must occur when SetSkipStaticGroundResponse=false");
+            // A→B normal is −Y, so the response lifts the capsule out of the tread
+            Assert.Greater(dy, 0f, "ground response must occur when SetSkipStaticGroundResponse=false");
         }
     }
 }

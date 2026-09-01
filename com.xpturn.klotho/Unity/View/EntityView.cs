@@ -28,7 +28,7 @@ namespace xpTURN.Klotho
         // The interpolation child's authored local pose, captured in EnsureInitialized. Only observable
         // on views whose position line never runs (DisableUpdate / DisablePositionUpdate) — every other
         // view has its child written in world space each frame, so authoring there does not survive the
-        // first ApplyTransform either way (IMP105 C-9).
+        // first ApplyTransform either way.
         private Vector3    _authoredTargetLocalPosition = Vector3.zero;
         private Quaternion _authoredTargetLocalRotation = Quaternion.identity;
 
@@ -114,7 +114,7 @@ namespace xpTURN.Klotho
             // child, before anything has written to it. ResetInterpolationTarget restores THIS instead of
             // zero: zero is right for pool residue and wrong for authoring, and the two are the same
             // field. Captured once per instance — a pooled re-rent skips EnsureInitialized, which is
-            // exactly what we want, since by then the value has been overwritten (IMP105 C-9).
+            // exactly what we want, since by then the value has been overwritten.
             if (_interpolationTarget != null)
             {
                 _authoredTargetLocalPosition = _interpolationTarget.localPosition;
@@ -148,7 +148,7 @@ namespace xpTURN.Klotho
         /// Restores the AUTHORED local pose, not zero. The same flags that make the residue permanent
         /// make the authoring permanent too — that is the only case where either is observable — so
         /// zeroing here destroyed a prefab-authored child offset for exactly the views that could never
-        /// get it back (IMP105 C-9).
+        /// get it back.
         /// </summary>
         private void ResetInterpolationTarget()
         {
@@ -280,7 +280,7 @@ namespace xpTURN.Klotho
             // This used to be an early return for BOTH paths. It still is for CSP, whose whole render
             // basis is this frame — but the snapshot path renders the Verified timeline, where the entity
             // can be perfectly alive while prediction has already destroyed it. Gating that path here
-            // froze such a view for the entire SD lead (IMP103 D-2). Demoting the check from a gate to a
+            // froze such a view for the entire SD lead. Demoting the check from a gate to a
             // fallback condition is NOT the same as dropping it: the snapshot path still may not read
             // this frame's transform without it.
             bool predictedAlive = predicted.Entities.IsAlive(EntityRef)
@@ -305,20 +305,19 @@ namespace xpTURN.Klotho
                     // Uninterpolated* is the render window's alpha=0 endpoint, not the live Predicted pose.
                     // For a verified-rendered entity the live pose is a prediction — the one thing this
                     // path exists to avoid — and it is the root, documented as the reference for
-                    // collision/raycasts, that used to receive it (IMP103 D-2).
+                    // collision/raycasts, that used to receive it.
                     currPos = pose.BasePosition;
                     currRot = pose.BaseRotation;
 
                     // The snapshot path's teleport is the interpolator's, not TeleportTick-vs-CurrentTick:
-                    // its timeline reaches the teleport when the window does (IMP103 V-5).
+                    // its timeline reaches the teleport when the window does.
                     teleported = pose.Teleported;
                 }
                 else if (TryGetLatestVerifiedPose(out Vector3 vPos, out Quaternion vRot))
                 {
                     // The window holds nothing for this entity, but the newest Verified frame does. That is
                     // the spawn gap: the view exists as soon as the latest Verified frame has the entity,
-                    // while the render clock is still InterpolationDelayTicks behind — delay-1 ticks of it
-                    // (IMP103, view-lifetime window).
+                    // while the render clock is still InterpolationDelayTicks behind — delay-1 ticks of it.
                     //
                     // Using the live Predicted pose here is what produced a BACKWARD jump: predicted sits
                     // lead+delay ticks ahead of the render clock, so the moment the window reached the birth
@@ -327,7 +326,7 @@ namespace xpTURN.Klotho
                     // at delay<=2 and one tick at delay=3. It does not reach zero in general: this value is
                     // pose(lastVerified) and it advances each tick, so it is not the spawn pose after the
                     // first warmup frame. Holding the spawn pose instead would zero it at every delay and
-                    // is filed separately — it needs per-view state.
+                    // is not done here — it needs per-view state.
                     //
                     // This branch is not only the spawn gap. Late join, FullState restore and render-clock
                     // drift catchup all produce "window misses, newest Verified has it", and the source
@@ -376,7 +375,7 @@ namespace xpTURN.Klotho
                 // allocator's free list is LIFO with immediate reuse, so a slot released inside a tick is
                 // the FIRST one the next spawn takes — and the snapshot for that tick was captured on
                 // entry, while the old occupant was still alive with a transform. Without this the new
-                // view lerps out of a stranger's position for one whole tick (IMP103 V-8).
+                // view lerps out of a stranger's position for one whole tick.
                 var prev = prevRef.Frame;
                 if (prev != null
                     && prev.Entities.IsAlive(EntityRef)
@@ -393,13 +392,13 @@ namespace xpTURN.Klotho
 
                 // TeleportTick rides on TransformComponent and the game stamps it with its own tick, so
                 // comparing it against the tick this render interval sits on needs no engine support and no
-                // error correction. Reading only the live frame keeps this independent of the prev endpoint
-                // (IMP103 V-7). Reading it HERE rather than once for both paths is forced, not an
+                // error correction. Reading only the live frame keeps this independent of the prev endpoint.
+                // Reading it HERE rather than once for both paths is forced, not an
                 // optimization: the snapshot path may have no live transform to take a `ref readonly` to.
                 //
                 // The `> 0` term is not defensive: TeleportTick defaults to 0, so without it every entity
                 // that has never teleported answers true at CurrentTick == 1 and the whole CSP fleet takes
-                // the teleport branch for as long as the tick cursor sits there (IMP105 C-1). The engine
+                // the teleport branch for as long as the tick cursor sits there. The engine
                 // guards the same ambiguity the same way (KlothoEngine.ErrorCorrection.cs). Losing the
                 // ability to detect a teleport stamped during tick 0 costs nothing: both lerp endpoints
                 // are then post-teleport, so there is no discontinuity to skip.
@@ -410,15 +409,15 @@ namespace xpTURN.Klotho
             // needs. Its set is filled by ComputeErrorDeltas alone, which runs only when error correction is
             // on AND a rollback happened this frame — and even then it reports "re-simulation introduced a
             // teleport", not "the game teleported this tick". An ordinary respawn is neither, so the CSP
-            // lerp used to walk across it for the whole tick interval in every configuration (IMP103 V-7).
-            // It is ORed onto the CSP term only; the snapshot path uses the interpolator's own check (V-5).
+            // lerp used to walk across it for the whole tick interval in every configuration.
+            // It is ORed onto the CSP term only; the snapshot path uses the interpolator's own check.
             //
             // The whole error-visual pipeline sits behind EnableErrorCorrection, which is what the Godot
             // adapter has always done ("non-EC games pay nothing"). The flag is off by default, so
             // without this every game ran the delta lookups and the five-stage smoother for a feature it
             // never asked for. Three separate places depend on it — the teleport OR below, the skip flags
             // that feed the parameter, and the accumulation after ApplyTransform — because they sit on
-            // either side of the transform write and cannot be one block (IMP103 D-1).
+            // either side of the transform write and cannot be one block.
             //
             // Note the flag is read fresh each frame but the accumulator is only reset on bind
             // (InternalActivate). Flipping it from false to true mid-match would resume the smoother from
@@ -443,13 +442,13 @@ namespace xpTURN.Klotho
             // Tick-then-read: the delta was produced in this frame's engine Update, so the smoothed value
             // that hides it has to be on this frame's transform. Reading first applied the offset one
             // frame late — the correction jump showed in full and the next frame jumped back — and a
-            // teleport frame applied the previous offset once more before Reset cleared it (IMP103 V-9).
+            // teleport frame applied the previous offset once more before Reset cleared it.
             //
             // Gated on the snapshot path, not on skipPosError: a DisablePositionUpdate-only view skips the
             // position offset but still applies the yaw one, so its accumulation has to keep running.
             // Only the snapshot path discards both, and it does so by design — verified-frame
             // interpolation already renders the authoritative state. Accumulating for it was work with no
-            // consumer (IMP103 D-3). Safe because a view only changes path through EVU's bind, which calls
+            // consumer. Safe because a view only changes path through EVU's bind, which calls
             // InternalActivate → _errorVisual.Reset() a few statements later; a game subclass writing
             // _viewFlags directly would bypass that.
             if (errorCorrection && !snapshotPath)
@@ -489,7 +488,7 @@ namespace xpTURN.Klotho
         ///
         /// IsAlive comes first and Has after it, the same order the interpolator's occupancy check uses:
         /// Has forwards Index alone, so a recycled slot answers about its new occupant, and GetReadOnly
-        /// on an entity without the component throws rather than returning anything (IMP103).
+        /// on an entity without the component throws rather than returning anything.
         /// </summary>
         private bool TryGetLatestVerifiedPose(out Vector3 position, out Quaternion rotation)
         {

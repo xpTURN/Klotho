@@ -559,17 +559,23 @@ namespace xpTURN.Klotho.Deterministic.Physics
                 {
                     ref var sc = ref _staticColliders[~c.entityB];
 
-                    // Skip slope band ground contact
+                    // Skip slope band ground contact.
+                    // The band is defined on the STATIC SURFACE normal — the direction the static
+                    // face points back at the body — which is the negation of the contact normal
+                    // (A→B = dynamic body → static collider). Positive Y is then an upward-facing
+                    // (walkable) surface for every collider type; before IMP107 this read the raw
+                    // contact normal and so only fired for meshes, whose normal was inverted.
                     // Box collider: an edge contact's normal can differ from the face normal, so
-                    // correct contact normal → nearest face normal before judging
+                    // snap to the nearest face normal before judging.
                     if (_skipStaticGroundResponse)
                     {
-                        FP64 checkNY = c.normal.y;  // preserve sign (skip positive only)
+                        FPVector3 surfaceN = -c.normal;
+                        FP64 checkNY = surfaceN.y;
 
                         if (sc.collider.type == ShapeType.Box)
                         {
                             FPQuaternion invRot = FPQuaternion.Inverse(sc.collider.box.rotation);
-                            FPVector3 localN = invRot * c.normal;
+                            FPVector3 localN = invRot * surfaceN;
                             FP64 ax = FP64.Abs(localN.x);
                             FP64 ay = FP64.Abs(localN.y);
                             FP64 az = FP64.Abs(localN.z);
@@ -587,8 +593,9 @@ namespace xpTURN.Klotho.Deterministic.Physics
                             checkNY = worldFaceN.y;
                         }
 
-                        // Skip positive Y only (slope = walkable surface)
-                        // Keep negative Y (ceiling/underside = prevent penetration from below)
+                        // Skip positive Y only (slope = walkable surface); near-flat (>= 0.95)
+                        // keeps its response. Negative Y (ceiling/underside) is kept to prevent
+                        // penetration from below.
                         if (checkNY >= FP64.Half && checkNY < FP64.FromDouble(0.95))
                             continue;
                     }
@@ -835,22 +842,37 @@ namespace xpTURN.Klotho.Deterministic.Physics
             }
         }
 
+        // Contact/trigger snapshot copies for the debug visualizers. The caller supplies a
+        // fixed-size buffer, so the copy is CAPPED at buffer.Length and `count` reports what was
+        // actually copied — at high body counts the tail is dropped rather than overrunning the
+        // buffer. Simulation state is unaffected (these views feed drawing only), and the cap is
+        // the caller's array length, so every peer truncates identically.
         public void CopyContactsTo(FPContact[] buffer, out int count)
         {
-            count = _contacts.Count;
-            for (int i = 0; i < count; i++) buffer[i] = _contacts[i];
+            count = CopyCapped(_contacts, buffer);
         }
 
         public void CopyStaticContactsTo(FPContact[] buffer, out int count)
         {
-            count = _staticContacts.Count;
-            for (int i = 0; i < count; i++) buffer[i] = _staticContacts[i];
+            count = CopyCapped(_staticContacts, buffer);
         }
 
         public void CopyTriggerPairsTo((int, int)[] buffer, out int count)
         {
-            count = _triggerPairs.Count;
-            for (int i = 0; i < count; i++) buffer[i] = _triggerPairs[i];
+            count = CopyCapped(_triggerPairs, buffer);
+        }
+
+        static int CopyCapped<T>(List<T> source, T[] buffer)
+        {
+            if (buffer == null)
+                return 0;
+
+            int count = source.Count;
+            if (count > buffer.Length)
+                count = buffer.Length;
+
+            for (int i = 0; i < count; i++) buffer[i] = source[i];
+            return count;
         }
 
         public int GetSerializedSize() => _triggerSystem.GetSerializedSize();

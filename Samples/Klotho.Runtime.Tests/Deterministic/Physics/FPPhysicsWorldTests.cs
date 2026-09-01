@@ -1305,5 +1305,140 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
         }
 
         #endregion
+
+        #region ContactNormalDirection
+
+        // Regression for the A->B contact-normal contract (IMP107). Both cases failed before the
+        // dispatch sign correction: the pair pushed together (1.108) and the capsule sank into the
+        // static mesh floor (0.538).
+        static FPMeshData MeshFloor()
+        {
+            var v = new FPVector3[]
+            {
+                new FPVector3(FP64.FromFloat(-5f), FP64.Zero, FP64.FromFloat(-5f)),
+                new FPVector3(FP64.FromFloat(5f), FP64.Zero, FP64.FromFloat(-5f)),
+                new FPVector3(FP64.FromFloat(5f), FP64.Zero, FP64.FromFloat(5f)),
+                new FPVector3(FP64.FromFloat(-5f), FP64.Zero, FP64.FromFloat(5f)),
+            };
+            return new FPMeshData(v, new int[] { 0, 1, 2, 0, 2, 3 });
+        }
+
+        [Test]
+        public void ContactNormal_DynamicSphereAndCapsule_MustSeparate()
+        {
+            var pa = FPVector3.Zero;
+            var pb = new FPVector3(FP64.FromFloat(1.5f), FP64.Zero, FP64.Zero);
+            var sphere = FPCollider.FromSphere(new FPSphereShape(FP64.One, pa));
+            var capsule = FPCollider.FromCapsule(new FPCapsuleShape(FP64.One, FP64.One, pb));
+
+            NarrowphaseDispatch.Test(ref sphere, null, ref capsule, null, out FPContact c);
+            var rbA = FPRigidBody.CreateDynamic(FP64.One);
+            var rbB = FPRigidBody.CreateDynamic(FP64.One);
+            FPCollisionResponse.ResolveContact(ref rbA, ref pa, ref rbB, ref pb, in c,
+                FP64.FromFloat(1f / 60f));
+
+            Assert.Greater((pb - pa).magnitude.ToFloat(), 1.5f,
+                "overlapping bodies must be pushed apart, not into each other");
+        }
+
+        [Test]
+        public void ContactNormal_CapsuleOnStaticMeshFloor_MustBePushedUp()
+        {
+            // halfHeight 0.5 + radius 0.3 at y = 0.65 -> 0.15 of penetration, and the capsule
+            // segment stays ABOVE the plane (a segment crossing the plane flips the sign for an
+            // unrelated reason and hides the defect).
+            var meshData = MeshFloor();
+            var mesh = FPCollider.FromMesh(new FPMeshShape(FPVector3.Zero, FPQuaternion.Identity));
+            var pos = new FPVector3(FP64.Zero, FP64.FromFloat(0.65f), FP64.Zero);
+            var cap = FPCollider.FromCapsule(
+                new FPCapsuleShape(FP64.FromFloat(0.5f), FP64.FromFloat(0.3f), pos));
+
+            NarrowphaseDispatch.Test(ref cap, null, ref mesh, meshData, out FPContact c);
+            var dyn = FPRigidBody.CreateDynamic(FP64.One);
+            var sta = FPRigidBody.CreateStatic();
+            var dynPos = pos;
+            var staPos = FPVector3.Zero;
+            FPCollisionResponse.ResolveContact(ref dyn, ref dynPos, ref sta, ref staPos, in c,
+                FP64.FromFloat(1f / 60f));
+
+            Assert.Greater(dynPos.y.ToFloat(), 0.65f,
+                "a body resting on a static mesh floor must be pushed up, not through it");
+        }
+
+        [Test]
+        public void ContactNormal_StaticMeshMultiContact_MustBePushedUp()
+        {
+            // The static-mesh path goes through TestMulti, not Test — fixing only the switch
+            // would leave real terrain untouched.
+            var meshData = MeshFloor();
+            var mesh = FPCollider.FromMesh(new FPMeshShape(FPVector3.Zero, FPQuaternion.Identity));
+            var pos = new FPVector3(FP64.Zero, FP64.FromFloat(0.8f), FP64.Zero);
+            var sphere = FPCollider.FromSphere(new FPSphereShape(FP64.One, pos));
+
+            var buffer = new FPContact[8];
+            int hits = NarrowphaseDispatch.TestMulti(ref sphere, null, ref mesh, meshData, buffer, buffer.Length);
+
+            Assert.Greater(hits, 0);
+            for (int i = 0; i < hits; i++)
+                Assert.Less(buffer[i].normal.y.ToFloat(), 0f,
+                    "A->B normal from a body onto the floor below it points DOWN");
+        }
+
+        #endregion
+
+        #region ContactSnapshotCopy
+
+        static FPPhysicsWorld WorldWithThreeOverlappingSpheres(out FPPhysicsBody[] bodies)
+        {
+            // three mutually overlapping spheres -> three dynamic pairs -> three contacts
+            bodies = new FPPhysicsBody[3];
+            bodies[0] = MakeDynamicSphere(1, FPVector3.Zero, FP64.One, FP64.One);
+            bodies[1] = MakeDynamicSphere(2, new FPVector3(FP64.Half, FP64.Zero, FP64.Zero), FP64.One, FP64.One);
+            bodies[2] = MakeDynamicSphere(3, new FPVector3(FP64.One, FP64.Zero, FP64.Zero), FP64.One, FP64.One);
+
+            var world = new FPPhysicsWorld(FP64.FromInt(4));
+            world.Step(bodies, bodies.Length, FP64.FromFloat(0.02f), FPVector3.Zero, null, null, null);
+            return world;
+        }
+
+        [Test]
+        public void CopyContactsTo_BufferLargeEnough_CopiesEveryContact()
+        {
+            var world = WorldWithThreeOverlappingSpheres(out _);
+
+            var buffer = new FPContact[16];
+            world.CopyContactsTo(buffer, out int count);
+
+            Assert.AreEqual(3, count);
+        }
+
+        [Test]
+        public void CopyContactsTo_BufferSmallerThanContacts_TruncatesInsteadOfThrowing()
+        {
+            var world = WorldWithThreeOverlappingSpheres(out _);
+
+            // the caller's buffer is the cap: the tail is dropped, no IndexOutOfRangeException
+            var buffer = new FPContact[2];
+            int count = -1;
+            Assert.DoesNotThrow(() => world.CopyContactsTo(buffer, out count));
+            Assert.AreEqual(2, count);
+        }
+
+        [Test]
+        public void CopySnapshots_NullBuffer_ReturnsZero()
+        {
+            var world = WorldWithThreeOverlappingSpheres(out _);
+
+            int contactCount = -1, staticCount = -1, triggerCount = -1;
+            Assert.DoesNotThrow(() => world.CopyContactsTo(null, out contactCount));
+            Assert.DoesNotThrow(() => world.CopyStaticContactsTo(null, out staticCount));
+            Assert.DoesNotThrow(() => world.CopyTriggerPairsTo(null, out triggerCount));
+
+            Assert.AreEqual(0, contactCount);
+            Assert.AreEqual(0, staticCount);
+            Assert.AreEqual(0, triggerCount);
+        }
+
+        #endregion
     }
 }

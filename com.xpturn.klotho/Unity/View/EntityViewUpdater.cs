@@ -30,7 +30,7 @@ namespace xpTURN.Klotho
 
         // Pool supplied through Initialize. It cannot share the field above: that one is a concrete
         // DefaultEntityViewPool because Unity does not serialize interface references, so an injected
-        // IEntityViewPool has nowhere else to live. Injection wins when both are present (IMP104 W-2).
+        // IEntityViewPool has nowhere else to live. Injection wins when both are present.
         private IEntityViewPool _injectedPool;
 
         // Active views, keyed by EntityRef.ToId() — (Index, Version) packed into a long.
@@ -39,7 +39,7 @@ namespace xpTURN.Klotho
         // slot coexist as ordinary entries. That is what makes the despawn grace in DestroyStale
         // possible: the render clock sits InterpolationDelayTicks behind the Verified frame, so a
         // snapshot-bound view has to outlive its entity's disappearance from that frame by exactly
-        // that much or the tail of its motion is never drawn (IMP103, view-despawn grace).
+        // that much or the tail of its motion is never drawn.
         private readonly Dictionary<long, EntityView> _viewsByEntity = new();
 
         // Spawn-sequence counter per entity. SpawnViewAsync compares against this on completion to
@@ -116,7 +116,7 @@ namespace xpTURN.Klotho
             // IS replaced, below), and their keys collided with the new session's. A fresh
             // EntityManager hands out (0, 1) again, so TrySpawn found the old entry, OwnersMatch said
             // yes for any entity without an OwnerComponent, and the new spawn was deduped away
-            // silently (IMP105 C-15). The Godot adapter's Initialize has always started this way.
+            // silently. The Godot adapter's Initialize has always started this way.
             //
             // The warning goes BEFORE the call because Cleanup nulls Engine — and therefore the
             // logger — on its way out. It stays quiet on a first Initialize: no views, no warning.
@@ -139,7 +139,7 @@ namespace xpTURN.Klotho
 
             // A missing Factory is silent otherwise: CollectPresent returns early, nothing spawns, and
             // no log is emitted — the game just gets an empty scene. The Pool is genuinely optional, but
-            // this is not, and the null-conditional below reads the same for both (IMP104 W-5).
+            // this is not, and the null-conditional below reads the same for both.
             if (_factory == null)
                 Engine?.Logger?.KWarning($"[ViewLife] EntityViewUpdater has no Factory assigned — no views will be created. Assign one in the Inspector.");
 
@@ -147,7 +147,7 @@ namespace xpTURN.Klotho
             // reference passes straight through them — the warning above fires and then the very same
             // object is handed to Attach and used for the rest of the session, while every later
             // `_factory != null` (which DOES use the overload) answers the opposite. Ask the same
-            // question the same way in all three places (IMP105 C-10).
+            // question the same way in all three places.
             //
             // _injectedPool is code-supplied and interface-typed, so a plain null test is the right one
             // for it; the fallback below is the serialized reference and gets Unity's.
@@ -213,7 +213,7 @@ namespace xpTURN.Klotho
                 // A view inside its despawn grace gets no tick callback: the entity it draws is
                 // already gone from the Verified frame, so OnUpdateView would be a callback about
                 // something the game can no longer look up. Interpolation still runs in LateUpdate —
-                // that is what the grace exists for (IMP103, view-despawn grace D-4).
+                // that is what the grace exists for.
                 if (_despawnVerifiedTick.ContainsKey(kvp.Key)) continue;
                 if (IsGone(kvp.Value)) continue;   // reclaimed by the scan in the next Reconcile
                 kvp.Value.InternalUpdateView();
@@ -283,7 +283,7 @@ namespace xpTURN.Klotho
         /// `== null` is Unity's overload, not a C# null test: a destroyed object's managed half is
         /// still there, which is also why the destroyed entry never announced itself. Calling a
         /// virtual method on it is legal, so nothing throws until the body reaches Unity API —
-        /// LateUpdate does, through ApplyTransform, on every frame (IMP105 C-16). The Godot adapter
+        /// LateUpdate does, through ApplyTransform, on every frame. The Godot adapter
         /// answers the same question with GodotObject.IsInstanceValid.
         /// </summary>
         private static bool IsGone(EntityView view) => view == null;
@@ -363,12 +363,12 @@ namespace xpTURN.Klotho
             }
             _pendingSpawnCounter.Remove(key);
 
-            // Factory refused the spawn. Saying nothing here is the same silent failure W-5 removed for
+            // Factory refused the spawn. Saying nothing here is the same silent failure removed for
             // the unassigned factory: the entity stays collectable, so the next Reconcile dispatches the
             // same spawn again — forever, with no line to say why that entity has no visual. Brawler hit
-            // exactly this loop (IMP105 C-11), and the fix there was game-side; this is the engine-side
+            // exactly this loop, and the fix there was game-side; this is the engine-side
             // half. Latched like the others: the state that produces it does not change tick to tick, so
-            // an unlatched warning would be one per entity per tick (IMP105 C-19).
+            // an unlatched warning would be one per entity per tick.
             if (view == null)
             {
                 if (!_warnedFactoryRefusedSpawn)
@@ -384,7 +384,7 @@ namespace xpTURN.Klotho
             view.SetBindBehaviour(behaviour);
             // BindBehaviour is a plain overwrite because the factory's answer covers the whole enum —
             // nothing is lost. ViewFlags is a bitfield the factory only partly decides, so it merges
-            // instead: assigning would drop the prefab's authoring (IMP103 V-3).
+            // instead: assigning would drop the prefab's authoring.
             view.SetViewFlags(_factory.ComposeViewFlags(view.ViewFlags, flags));
             _viewsByEntity[key] = view;
 
@@ -405,7 +405,7 @@ namespace xpTURN.Klotho
         /// that clock converges to <c>LastVerifiedTick - InterpolationDelayTicks</c> — so at the
         /// moment the Verified frame stops carrying the entity, the render is still `delay` ticks
         /// short of it. Destroying there discards the last `delay` ticks of the entity's motion, and
-        /// it does so silently: the frames are in the ring, nothing reports a miss (IMP103).
+        /// it does so silently: the frames are in the ring, nothing reports a miss.
         /// </summary>
         private void DestroyStale()
         {
@@ -434,7 +434,7 @@ namespace xpTURN.Klotho
                 var view = kvp.Value;
 
                 // Destroyed from outside: stale by definition, and marking it here is what keeps the
-                // other five loops' exposure down to a single tick instead of forever (IMP105 C-16).
+                // other five loops' exposure down to a single tick instead of forever.
                 if (IsGone(view)) { _staleKeys.Add(kvp.Key); continue; }
 
                 if (view.BindBehaviour == BindBehaviour.Verified)
@@ -462,8 +462,8 @@ namespace xpTURN.Klotho
                         // frame carries it again, above) has no way to re-register — Register is called
                         // from exactly one place, the end of SpawnViewAsync, which TrySpawn skips for a
                         // view that is still alive. So the player stayed unmapped for the rest of the
-                        // match, and the game only ever heard the Unregistered half of the pair
-                        // (IMP105 C-2). Nothing is lost by waiting: Unregister is instance-guarded, so a
+                        // match, and the game only ever heard the Unregistered half of the pair.
+                        // Nothing is lost by waiting: Unregister is instance-guarded, so a
                         // respawn that claims the slot first wins and this view's eventual unbind at the
                         // stale-destroy below is skipped.
                     }
@@ -490,7 +490,7 @@ namespace xpTURN.Klotho
                 // Above the log line, not just above OnDeactivate: the interpolated arguments include
                 // GetInstanceID(), which throws on a destroyed view whenever Debug logging is live.
                 // The bookkeeping still runs — TryUnregisterPlayerView reads the cached owner, a
-                // managed field, so a destroyed view can and must still be unbound (IMP105 C-16).
+                // managed field, so a destroyed view can and must still be unbound.
                 if (IsGone(view))
                 {
                     WarnExternallyDestroyedViewOnce();
@@ -545,7 +545,7 @@ namespace xpTURN.Klotho
         //
         // The handle is reconstructed from the ToId() key rather than carried alongside the counter:
         // no extra storage, and EntityRef.FromId is ToId's inverse, so the bit layout stays in one place
-        // (this used to inline the two shifts, which put a second copy of that knowledge here — IMP105 N-1).
+        // (this used to inline the two shifts, which put a second copy of that knowledge here).
         private bool IsCollectableInEitherFrame(long key, Frame verified, Frame predicted)
         {
             var entity = EntityRef.FromId(key);

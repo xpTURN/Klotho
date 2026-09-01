@@ -86,7 +86,7 @@ namespace xpTURN.Samples.DevLobby.Tests
         private DevLobbyReserveCoordinator NewCoord(DevLobbyCore core)
             => new DevLobbyReserveCoordinator(core, () => _now, () => "n" + (++_nonceSeq),
                    (peer, wire) => _sent.Add((peer, wire)),
-                   (m, r) => (1 + (r % 2), (byte[])null), Validity, AckTimeout);
+                   req => (1 + (req.RoomId % 2), (byte[])null), Validity, AckTimeout);
 
         private LobbyRoomRegistry.RoomSlot Slot(int roomId) => _reg.Servers[Server].Rooms[roomId];
 

@@ -63,6 +63,96 @@ The engine owns a `ReplaySystem` instance, reachable as `KlothoEngine.ReplaySyst
 
 **File format** — `SaveToFile` writes the payload uncompressed, self-framed by a leading `RPLY` magic (`0x52504C59`); `LoadFromFile` requires that magic and rejects anything else. Pass `dumpJson: true` to also write a human-readable `.json` debug dump beside the file (reflection-based — debug only, never on a runtime path).
 
+### On-disk layout
+
+```text
+┌─ 4 ─────────────────────────────────────────────────────────────────────────┐
+│ magic  'RPLY' = 0x52504C59                                                  │
+├─ variable ──────────────────────────────────────────────────────────────────┤
+│ Metadata                                                                    │
+│   i32 Version · str SessionId · i64 RecordedAt · i64 DurationMs             │
+│   i32 TotalTicks · i32 PlayerCount · i32 TickIntervalMs · i32 RandomSeed    │
+│   ── SimulationConfig — restored on playback ─────────────────────────────  │
+│   i32 InputDelayTicks · i32 MaxRollbackTicks · i32 SyncCheckInterval        │
+│   b8  UsePrediction · i32 MaxEntities · i32 Mode                            │
+│   i32 HardToleranceMs · i32 InputResendIntervalMs · i32 MaxUnackedInputs    │
+│   i32 ServerSnapshotRetentionTicks · i32 EventDispatchWarnMs                │
+│   i32 TickDriftWarnMultiplier                                               │
+│   i32 StageId · blob MatchConfigData                                        │
+│   ── the game's own slot ────────────────────────────────────────────────   │
+│   blob GameCustomData                                                       │
+│   ── the tick-0 world ───────────────────────────────────────────────────   │
+│   blob InitialStateSnapshot                                                 │
+│   ── reproduction anchors + completion marker (§7-1) ────────────────────   │
+│   i64 LayoutFingerprint · i64 StaticColliderFingerprint                     │
+│   i64 NavFingerprint · i64 GameFingerprint                                  │
+│   i64 InitialStateHash · i32 InitialStateTick · i32 EndReason               │
+│   ── tick-0 roster, and per-player verified data parallel to it ─────────   │
+│   i32 n · i32 InitialRoster[n]                                              │
+│   i32 m · i32 InitialEntitlementLengths[m] · blob InitialEntitlementData    │
+│   ── layout inputs: recorded, never restored (§7-1) ─────────────────────   │
+│   i32 p · i32 PrunedComponentTypeIds[p]                                     │
+│   i32 q · i32 ComponentMaxCountTypeIds[q] · i32 ComponentMaxCountValues[q]  │
+├─ 4 ─────────────────────────────────────────────────────────────────────────┤
+│ i32 TickCount        how many entries the offset table has                  │
+├─ 4 ─────────────────────────────────────────────────────────────────────────┤
+│ i32 StreamSize       length in bytes of the command stream                  │
+├─ StreamSize ────────────────────────────────────────────────────────────────┤
+│ command stream — one chunk per recorded tick (next diagram)                 │
+├─ TickCount × 12 ────────────────────────────────────────────────────────────┤
+│ offset table:  i32 Tick · i32 Offset · i32 Length     × TickCount           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+blob = i32 length + that many bytes (length 0 ⇒ nothing follows)
+str  = i32 UTF-8 byte count + those bytes      b8 = a single byte 0/1
+every integer is little-endian; there is no padding and no per-section checksum
+```
+
+### The stream data chunk
+
+The command stream is a single blob, and one tick's commands are the slice the offset table points at.
+It is **not** self-framed: nothing inside it says where a tick begins or ends.
+
+```text
+one tick = stream[Offset .. Offset + Length)          ← reachable only through the table
+
+┌─ 4 ──────────────────────────────────────────────────┐
+│ i32 CommandCount                                     │
+├──────────────────────────────────────────────────────┤
+│  ┌─ 4 ─────────────────────────────────────────────┐ │
+│  │ i32 Size      bytes in the record below         │ │
+│  ├─────────────────────────────────────────────────┤ │  repeated
+│  │ i32 CommandTypeId                               │ │  CommandCount
+│  │ i32 PlayerId                                    │ │  times
+│  │ i32 Tick                                        │ │
+│  │ payload — Size − 12 bytes, per command type     │ │
+│  └─────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────┘
+```
+
+Four properties of the stream that a reader has to respect:
+
+- **Read the table, never scan.** Chunk order is *recording* order. It usually comes out ascending — a
+  quiet match writes each tick once, in order — but a rollback re-records ticks, so front-to-back scanning
+  is right until the first correction and wrong after it.
+- **The stream may contain dead bytes.** Re-recording a tick whose serialization is the *same length*
+  overwrites in place — that is what keeps a rollback-heavy match from inflating the buffer. A re-record of
+  a *different* length is appended instead, and the superseded bytes stay where they were. Only what the
+  table points at is live, and `StreamSize` counts the dead bytes too.
+- **`Tick` appears twice** — as the table's key and inside every command record. They agree; the record's
+  own field is what the engine reads when it re-executes the command.
+- **Trailing bytes are ignored, not rejected.** The loader reads exactly what the header describes and
+  stops, so anything appended after the offset table is neither parsed nor refused. File length proves
+  nothing about a replay; the anchors and the claim (§10) are what a reader can lean on.
+
+For scale, one measured Brawler recording — 4,982 ticks, two players at tick 0 and a third joining at
+tick 273 — is **783,682 bytes**: a ~1.9 KB metadata block (mostly the 1,511-byte tick-0 snapshot), a
+721,962-byte stream at **145 bytes per tick**, and a 59,784-byte offset table. Per-tick cost scales with how
+many players are issuing commands: the same sample measures **~102 B/tick** for a two-player P2P match and
+**~145** for the three-player one above, so budget from your own roster size rather than from one number. Nothing is compressed on the
+way out — gzip takes that file to 64,942 bytes (**12×**), so compression is worth doing wherever replays are
+stored or uploaded, and the format deliberately leaves it to that layer.
+
 ---
 
 ## 4. Recording (engine-driven)
@@ -96,6 +186,8 @@ A replay's length (`metadata.TotalTicks`) is the **last tick the match confirmed
 - **The unconfirmed tail is dropped (normal).** A networked client runs a few *predicted* ticks ahead of the inputs it has actually confirmed. If a session ends while some predicted ticks are still unconfirmed, those ticks aren't authoritatively reproducible — their confirming inputs never arrived — so recording stops at the last confirmed tick. The last fraction of a second shown locally may not be in the file, by design: it couldn't be replayed faithfully, so it isn't claimed.
 
 - **A desync recovery truncates the replay.** If the match hit a divergence that rollback couldn't absorb and recovered by dropping in an authoritative state wholesale — a **full-state resync** or **corrective reset** — recording **ends at that point**. Everything up to the reset is a faithful replay; the reset itself is a state *jump* with no input representation, so replaying past it would inevitably diverge. The engine cuts the replay at the last confirmed tick **before** the reset — the result is **shorter but 100% reproducible**, instead of longer and wrong. It is logged as `[KlothoEngine][Replay] truncated at ResyncRequest` (or `CorrectiveReset`) with the cut tick. Such a replay covers the match right up to the moment the desync was corrected — exactly the stretch worth reviewing. (Ordinary **late-join / reconnect / initial-state** deliveries are *not* truncations — only desync-recovery resets are.)
+
+The file says which of the two it was: `metadata.EndReason` is `Normal` for an ordinary stop (including a dropped unconfirmed tail) and `CorrectiveReset` / `ResyncRequest` for a state-jump truncation. A reader must not treat "shorter than expected" as suspicious without checking it. `Unspecified` means nobody stamped a reason — that is a bug in whatever ended the recording, not a property of the match.
 
 > **Practical read:** if a saved replay is shorter than expected, look for a resync / corrective-reset near the cut tick in the logs. A truncated replay is *honest* ("valid up to here"), not corrupt — it plays cleanly to its end and simply finishes early. The recovery point and everything after it are intentionally absent. If you need to reproduce what happened *after* a reset, that belongs to a fresh recording, not this file.
 
@@ -141,16 +233,20 @@ When playback reaches the end, the engine fires its finish path (`OnPlaybackFini
 A replay only reproduces correctly if playback is deterministically identical to recording:
 
 1. **Same binaries & determinism-affecting content** — a replay stores only inputs and re-derives state by re-simulating (rule 2), so playback must feed the simulation exactly what recording did. That means the same **simulation / game logic code** and component registration, and the same **content the deterministic simulation consumes**: DataAssets ([DataAsset.md](DataAsset.md)), the **static colliders** and **NavMesh** the stage builds (a stage's baked geometry is part of the simulation, not just visuals), and the RNG seed. Change any of these — a rebalanced DataAsset value, a re-baked collider set or NavMesh, or a logic edit — and the simulation diverges, so the recorded inputs no longer reproduce the original match. A replay is therefore bound to the exact code + content build (and stage) it was recorded on, and is not guaranteed compatible across versions or content revisions that alter simulation behavior or component layout.
+
+    So that a mismatch can be *attributed* rather than merely observed, the file records what it ran against: four fingerprints (component-registry layout, static colliders, navmesh, and the game's own slot), the initial snapshot's hash and the tick it was taken at, the two process-global layout inputs (`PrunedComponentTypeIds`, the per-component maxCount overrides), and the ordered roster the tick-0 world was built from (`InitialRoster` — the participants in the order their entities were created, which makes it state-hash input; late joiners never appear in it). The roster is empty when the recording peer did not build tick 0 — a server-driven client receives its initial state from the server — and that emptiness is the signal, so there is no separate flag. The fingerprints are taken at the same instant as the snapshot — the navigation term moves with runtime rebakes, so any other moment would describe a different world. `0` in a fingerprint means "no such source registered", which is normal for a game that has none. None of this is signed: it distinguishes an honest client's version mismatch from a real divergence, it does not stop a forger.
+
+    The two layout inputs are **recorded, not restored**. The component layout is frozen process-wide before any replay loads, so a verifier must be *started* with them; `ToSimulationConfig()` deliberately leaves them out rather than pretending to apply them.
 2. **The engine re-derives state from inputs** — never trust positions/HP from "the replay"; they don't exist in the file. They come out of re-simulating. So any non-determinism that would desync a live match also corrupts a replay (see [DeterministicMath.md §11](DeterministicMath.md) and [ECS.md §10](ECS.md)).
 3. **The initial snapshot is mandatory** — recording without `SetInitialStateSnapshot` produces a file that can't play back. (The engine injects it automatically; only relevant if you build a custom recorder.)
 4. **Gate live-only behavior on `IsReplayMode`** — view/audio/input code that should not run during playback must check `engine.IsReplayMode`, exactly as it would for spectator mode.
-5. **Config & seed come from metadata** — playback restores `SimulationConfig` (including the match's `StageId` and opaque `MatchConfigData`) and the RNG seed from the file, so a multi-stage match replays on the stage it was recorded on; don't override them. (Because these fields are now part of the recorded metadata, replay files written by earlier versions may not load — re-record them.)
+5. **Config & seed come from metadata** — playback restores `SimulationConfig` (including the match's `StageId` and opaque `MatchConfigData`) and the RNG seed from the file, so a multi-stage match replays on the stage it was recorded on; don't override them. (Replay files are **not** backward compatible and the loader does not try: `metadata.Version` must equal the build's `CURRENT_VERSION` exactly, so a file from any other version is rejected outright instead of being misparsed with the current layout. Re-record it.)
 
 ---
 
 ## 8. Error Handling
 
-`LoadFromFile` / `StartReplayFromFile` throw **`ReplayLoadException`** for every load failure — file-not-found, read I/O error, malformed/again-incompatible payload, or invalid metadata (`SimulationConfig.Validate` failures are wrapped into the same type). A null/empty path throws `ArgumentException`. Loading is atomic: on failure the previously loaded `CurrentReplayData` is left untouched.
+`LoadFromFile` / `StartReplayFromFile` throw **`ReplayLoadException`** for every load failure — file-not-found, read I/O error, malformed or version-incompatible payload, or invalid metadata (`SimulationConfig.Validate` failures are wrapped into the same type). The reason travels in `Message`, not only in `InnerException`, so showing `e.Message` (as below) is enough to tell a player "this replay is from another build — re-record it" apart from "the file is gone". A null/empty path throws `ArgumentException`. Loading is atomic: on failure the previously loaded `CurrentReplayData` is left untouched.
 
 ```csharp
 try
@@ -189,3 +285,181 @@ KlothoSession ReplayMatch(KlothoSessionFlow flow, string replayPath)
 ```
 
 The replay session ticks the *real* simulation from recorded inputs, so the match unfolds identically — and your view layer renders it the same way it rendered the live game, guarded by `engine.IsReplayMode` where live-only behavior must be suppressed.
+
+---
+
+## 10. Verifying a replay server-side
+
+Because a replay stores inputs and re-derives state (§1), a server build can re-run one and obtain the
+match result **authoritatively** — the client cannot lie about an outcome it did not simulate. The Brawler
+sample ships this as a mode of its dedicated server:
+
+```
+dotnet run --project Samples/Brawler/Server -- --verify path/to/replay.rply
+```
+
+**Exit codes are the verdict.** `0` verified, `10` claim mismatch (a cheat suspicion — and a *successful*
+run), `20` unverifiable, `30` unreadable file. Values `1`–`9` stay what they are everywhere else in that
+binary: the process failed. That gap is deliberate — a crashed verifier must never be mistaken for a
+detected cheat. One machine-readable line accompanies the code and names *why*.
+
+### What it can prove, and what it cannot
+
+- **It needs something to disagree with.** A re-simulation always agrees with itself, so the game writes
+  what it *claims* happened into `GameCustomData` at match end, and the verifier compares. A replay with
+  no claim is reported **unverifiable**, never verified — otherwise stripping the claim would make every
+  replay pass.
+- **The anchors attribute, they do not authenticate.** The four fingerprints (§7-1) let the verifier say
+  "this was recorded against different code or content" instead of calling an honest client a cheat. They
+  are non-cryptographic and unsigned: a forger rewrites them along with the payload. A file whose three
+  *environment* terms (colliders, nav, game) are all zero is treated as unverifiable for exactly that
+  reason. The layout term is deliberately not part of that test — it is an FNV fold the recorder always
+  fills, so including it made the check unreachable.
+- **A mismatch is not automatically cheating.** Any anchor disagreement means the two runs happened in
+  different worlds, so the comparison is void — the verdict is *unverifiable*, and the line names which
+  term moved (`anchors=mismatch:nav`).
+- **`anchors=` says how much was actually compared, not just whether it agreed.** A term is compared only
+  when *both* sides carry a value, and zero is a legitimate "not provided" — a game that registers no
+  `IGameFingerprintSource` reports 0 there. So the field distinguishes `ok:3/3` (all three compared and
+  agreed) from `partial:1/3(colliders)` (only that term had a value on both sides) from `unchecked`
+  (nothing was compared — playback never reached the tick where the environment exists). Reading a
+  `partial` line as a full environment match is the mistake this split exists to prevent.
+- **Short is not suspicious.** A recording that ended at a desync recovery (`EndReason != Normal`, §4) is
+  faithful only up to the cut, so its final result is not the match's — unverifiable, not a cheat.
+- **Tick 0 is rebuilt, not trusted.** Re-simulation proves what the recorded *inputs* produce; the
+  starting point they act on is bytes the recording peer wrote. So the verifier reconstructs the initial
+  world from the recorded roster, seed and config through the same code path a live match runs, and never
+  reads the snapshot bytes at all — substituting them achieves nothing. The rebuilt state is compared
+  against the recorded hash, and a disagreement is *unverifiable* rather than cheating: its commonest
+  cause is a content revision no anchor covers.
+- **The verdict says where tick 0 came from.** `tick0=reconstructed|restored` and `tick0hash=ok|mismatch`
+  are separate fields, and the difference is load-bearing: a verified *restore* means only "these inputs
+  produce this result", while a verified *rebuild* also means the starting point is this build's own. A
+  recording with no roster (an SD client) falls back to restoring the snapshot and is reported as
+  `restored`.
+- **Reconstruction only works if the file carries every input world-building reads.** Rebuilding runs the
+  game's `OnInitializeWorld`, so anything that reads live configuration — a session knob, an inspector
+  field, an environment variable — is an input the verifier does not have. Record those in
+  `MatchConfigData` (the game's own per-match slot: the file carries it and playback restores it) and read
+  them from there on every peer, not from the local config. The Brawler sample learned this the expensive
+  way, twice. First: bot ids are numbered past the room capacity, that capacity lived only in each peer's
+  `SessionConfig`, and the first rebuilt replay produced a world with **identical entity and component
+  counts and a different hash** — indistinguishable from a determinism failure until the missing input was
+  traced. Then, once a lobby was in play: tick 0 also seeds each player's **entitlement**, which the engine
+  reads from the *network service* — and a replay session has none, so it decodes as "everything owned"
+  and disagrees with what the server actually held. A verifier that substitutes a guess for an input it
+  does not have reports honest recordings as mismatches, so it should refuse (`20`) and name what is
+  missing.
+
+  The two are worth telling apart. A **per-match scalar** (the capacity) fits in the match config and is
+  cheap to close. A **per-player, server-verified value** (the entitlement) does not — not because of its
+  size, but because of *when* it exists: a match config is issued before anyone has joined, and a late
+  joiner arrives later still. Recording that is a format decision (it belongs with the roster), not a
+  payload one.
+
+  Two things make this worse than it looks, and both are worth checking in your own game:
+
+  - **It is not confined to tick 0.** A recorded join command replays like any other, so whatever your game
+    seeds *at join time* is re-derived during playback from data the replay session does not have. That
+    reaches the restore path too — not just reconstruction.
+  - **A mid-match divergence does not surface as "unverifiable".** Without a per-tick hash track there is
+    nothing to catch it early, so it shows up at the end as a different result — which a verifier compares
+    against the recorded claim and reports as a *mismatch*. An honest recording can be labelled cheating.
+    Until such inputs are recorded, it is safer for a verifier to refuse files that contain join commands
+    than to judge them.
+
+  And note that all of this stays invisible while nobody issues such data: both sides then agree on the
+  same empty default, and the first lobby-issued match is where it appears.
+
+  **How Klotho closes it.** The file records the per-player values the tick-0 world was built from,
+  index-parallel to `InitialRoster` (`InitialEntitlementData` + `InitialEntitlementLengths`), and a join
+  command carries the joining player's copy so the join tick reproduces too. On playback
+  `IKlothoEngine.GetPlayerEntitlement` answers from that record when no network service exists — so game
+  code keeps reading the same accessor and does not change. An empty record is a valid one: a match with
+  no issuer really has none, and the format version, not the field, is what distinguishes an older file.
+- **A correct file is not enough: playback has to be wired to read it.** The failure above is about
+  inputs the *file* lacks. There is a second, quieter one on the same axis — the file carries the input
+  and the replay session never subscribes to the event that delivers it. Klotho shipped exactly that: a
+  replay engine is built through a different `Initialize` overload than a networked one, and the join
+  subscriptions lived only in the networked body, so on playback a late joiner got no participant slot,
+  the game's join-time seed never ran, and the bytes the file carried for that joiner were read by nobody.
+  Every recording involved was correct. What makes this class hard is that **nothing in the verdict moves**:
+  tick 0 was byte-compared and matched, the final result matched the claim, and the diverged middle had no
+  check to fail. If your engine has more than one way to construct a session, the per-mode wiring is worth
+  a gate of its own — and a state hash taken at the *end* of playback is the cheapest thing that sees it
+  (the same file, run twice, must print the same value; a run whose inputs were altered must not).
+- **What rebuilding still leaves open.** After it, a forger no longer picks an arbitrary starting state —
+  only the four inputs that produce one (roster, seed, stage, match config), all of which are still the
+  recording peer's. Closing that needs a server-issued seed and a signature, neither of which the format
+  has.
+
+### Which record is authoritative — it depends on the match
+
+A verified re-simulation is not automatically *the* answer; what it is worth depends on what else exists.
+
+| Match | Authority | What verifying the replay adds |
+|---|---|---|
+| Dedicated server + lobby | the result the server reported to the lobby | **audit** — re-simulating what the authority already simulated. Catches build/content drift and server bugs, not cheating |
+| Dedicated server, no lobby | the server's in-memory result; nothing was reported | there is no second record to compare against; only the file's own claim |
+| Peer-to-peer | none — two peers, two recordings | each file verifies on its own; pairing them needs a shared match identity, which a lobbyless session does not have |
+| Solo | none | the rebuild is the whole verdict |
+
+The asymmetry is worth stating plainly: **cheat detection has the most to offer exactly where there is no
+server**, and that is also where nothing issues an identity or a seed. A server-driven match is the easy case
+and the least interesting one.
+
+### Attribution: which match is this file?
+
+Verification answers *"is this file honest"*. It does not answer *"which match is it"*, and the second
+question has its own axis in the verdict line — `match=<id>` or one of two reasons it cannot be said:
+
+| Value | Meaning | How to treat it |
+|---|---|---|
+| `match=<id>` | the issuer's key for this match instance | attributed |
+| `unattributed` | the payload carries no identity (a solo, P2P or lobbyless-server match authors its own config) | normal — but it cannot back a ranked result |
+| `legacy-payload` | the game's config payload is **shorter than the current layout**, so it predates a field | old, not suspicious — re-record it |
+
+**The runner does not report "an identity was expected and is missing".** Answering that requires knowing the
+match was lobby-issued, and nothing in the file says so — a lobby's config payload and a lobbyless server's
+have the same fields, and both stamp a room capacity. Inferring an issuer from a stamped capacity would mark
+every lobbyless-server and P2P-host recording as suspicious, which is the `legacy-payload` mistake pointed the
+other way. So `--verify` reports whether an identity is *present*; whether one was *owed* is a judgement for
+whoever holds the issue record — a submission service knows which matches it dispatched, and can compare its
+own list against the `match=` values coming back.
+
+**A file with no identity can be perfectly verified and still prove nothing about a specific match.** Without
+one, nothing stops a player from running a one-shot attempt several times and submitting only the best
+outcome — the file is honest each time. Reconstruction and signatures do not close this; only an identity
+issued *before* the match does.
+
+Games that use a lobby should carry that identity in `MatchConfigData`: the authority stamps it, the core
+propagates it to every peer (and spectator), and it lands in every peer's replay metadata — no format change.
+The replay's own `SessionId` is **not** that identity: it is a local `Guid.NewGuid()`, different in every
+peer's recording, and the service has never seen it.
+
+### The server's own recording
+
+A dedicated server records like any other peer — `EnableReplayRecording` defaults to on — but nothing saves
+it unless the game asks. In the Brawler sample that is `--save-replays <dir>`. Two reasons to turn it on:
+
+- **It is the only server-driven recording that can be *rebuilt* rather than restored.** A client receives
+  its initial state from the server, so a client's file carries no tick-0 roster and always replays
+  `tick0=restored`. The server built that world, so its file carries the roster.
+- **It is the authority's own record.** When a result is disputed, the client's file shows what that client
+  received; the server's shows what the authority actually simulated.
+
+Leaving it off is a legitimate choice — but then consider turning recording off too (`WithoutReplayRecording`
+on flows that own their session): the buffer grows for the whole match either way (~114 bytes per tick per
+room in the sample), and discarding it at the end is the one combination that pays the cost and gets nothing.
+
+### Booting the verifier correctly
+
+The component layout is frozen process-wide before any simulation exists, so the verifier builds it from
+the layout inputs the file records (`PrunedComponentTypeIds`, the maxCount overrides) **before**
+constructing anything. `ToSimulationConfig()` deliberately does not restore those two: they exist so a
+verifier can *start* correctly, and assigning them afterwards would change nothing while looking like a
+restore. A file recorded against a different layout is refused up front, since nothing derived from it
+would mean anything.
+
+One consequence: a process verifies replays of **one** layout. Feeding it a file with different layout
+inputs fails loudly rather than silently mis-verifying — batch verification should group by layout.

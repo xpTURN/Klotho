@@ -70,9 +70,9 @@ namespace xpTURN.Klotho.Replay
             _recorder.RecordTick(tick, commands);
         }
 
-        public IReplayData StopRecording(int totalTicks)
+        public IReplayData StopRecording(int totalTicks, ReplayEndReason reason = ReplayEndReason.Normal)
         {
-            var data = _recorder.StopRecording(totalTicks);
+            var data = _recorder.StopRecording(totalTicks, reason);
             _currentReplayData = data;
             return data;
         }
@@ -159,10 +159,27 @@ namespace xpTURN.Klotho.Replay
 
         public event Action<byte[], long> OnInitialStateSnapshotSet;
 
-        public void SetInitialStateSnapshot(byte[] snapshot, long hash)
+        public void SetInitialStateSnapshot(byte[] snapshot, long hash, int tick)
         {
-            _recorder.SetInitialStateSnapshot(snapshot);
+            _recorder.SetInitialStateSnapshot(snapshot, hash, tick);
+            // The event stays (snapshot, hash). The engine's broadcast cache labels what it stores with
+            // tick 0 and sends that label on the wire, so widening this event is not a free correction.
             OnInitialStateSnapshotSet?.Invoke(snapshot, hash);
+        }
+
+        public void SetInitialRoster(IReadOnlyList<int> roster)
+        {
+            _recorder.SetInitialRoster(roster);
+        }
+
+        public void SetInitialEntitlements(IReadOnlyList<byte[]> perRosterEntry)
+        {
+            _recorder.SetInitialEntitlements(perRosterEntry);
+        }
+
+        public void SetReproductionAnchors(long layoutFingerprint, long staticColliderFingerprint, long navFingerprint, long gameFingerprint)
+        {
+            _recorder.SetReproductionAnchors(layoutFingerprint, staticColliderFingerprint, navFingerprint, gameFingerprint);
         }
 
         public void SaveToFile(string filePath, bool dumpJson = false)
@@ -407,7 +424,9 @@ namespace xpTURN.Klotho.Replay
             {
                 // Atomicity: _currentReplayData is only assigned after every step above succeeds, so
                 // a partial failure leaves the previous _currentReplayData / _player state untouched.
-                throw new ReplayLoadException($"Replay deserialize failed: {filePath}", e);
+                // Carry the reason into the outer message: callers are documented to show e.Message
+                // (Docs/Replay.md §8), and "deserialize failed" alone hides "re-record this replay".
+                throw new ReplayLoadException($"Replay deserialize failed: {filePath} — {e.Message}", e);
             }
 
             _currentReplayData = replayData;

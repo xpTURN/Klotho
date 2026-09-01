@@ -6,7 +6,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.Core.Tests
 {
     /// <summary>
-    /// The local tick-0 hash the bootstrap-FullState check compares against (IMP105 C-8).
+    /// The local tick-0 hash the bootstrap-FullState check compares against.
     ///
     /// It used to be a by-product of the replay-recording branch: assigned only where a recording was
     /// being started, and never cleared. Recording defaults to on, so the common P2P path did seed it —

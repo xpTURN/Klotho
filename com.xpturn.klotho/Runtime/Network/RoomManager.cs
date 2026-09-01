@@ -118,6 +118,11 @@ namespace xpTURN.Klotho.Network
         private readonly Room[] _rooms;
         private int _activeRoomCount;
 
+        // One-shot latch for the shared-seed warning below. Plain field: rooms are created on a
+        // single thread (RoomRouter), same convention as _activeRoomCount. Room *updates* run on
+        // workers; creation does not.
+        private bool _sharedSeedWarned;
+
         // Drain metrics — indexed by (int)SessionPhase (size = SessionPhase enum value count + safety margin)
         private const int DRAIN_PHASE_BUCKETS = 8;
         private readonly long[] _drainTotals = new long[DRAIN_PHASE_BUCKETS];
@@ -239,6 +244,34 @@ namespace xpTURN.Klotho.Network
             var sessionConfig = _config.SessionConfigFactoryForMatch != null
                 ? _config.SessionConfigFactoryForMatch(matchCtx)
                 : _config.SessionConfigFactory();
+
+            // Two live rooms with the SAME pinned seed run the same match. Warn, don't refuse: pinning a
+            // seed is legitimate, and a single-room server never trips this — the test is a live
+            // co-tenant, not "the factory returned this before", so a room recreated after its
+            // match ended (the normal single-room cycle) stays silent.
+            //
+            // The test is the seed VALUE, not the instance. It used to be ReferenceEquals, which read the
+            // symptom off its commonest cause — WithSessionConfig(value) handing every room one object.
+            // But a per-match factory that clones a pinned config produces different instances carrying
+            // the same seed: identical matches, and the reference test would have gone quiet exactly when
+            // a server adopted the factory this warning recommends.
+            if (!_sharedSeedWarned && sessionConfig != null && sessionConfig.RandomSeed != 0)
+            {
+                for (int i = 0; i < _rooms.Length; i++)
+                {
+                    var other = _rooms[i];
+                    if (other == null || other.State == RoomState.Empty) continue;
+                    if (other.SessionConfig == null || other.SessionConfig.RandomSeed != sessionConfig.RandomSeed) continue;
+
+                    _sharedSeedWarned = true;
+                    _logger?.KWarning(
+                        $"[RoomManager] Room {roomId} runs with the same pinned RandomSeed ({sessionConfig.RandomSeed}) " +
+                        $"as live room {other.RoomId} — every such room plays the SAME match. Give each room its own " +
+                        $"seed from the per-match SessionConfig factory (WithSessionConfig(Func<MatchConfigContext, ...>)), " +
+                        $"or leave RandomSeed at 0 to have one drawn per match.");
+                    break;
+                }
+            }
 
             // maxEntities / maxCount overrides / prune-set are PROCESS-global layout inputs, not
             // per-room ones — but the config that carries them is per-room (the match factory is

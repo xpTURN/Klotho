@@ -71,5 +71,33 @@ namespace xpTURN.Klotho.Core.Tests
                 .Build();
             Assert.IsNotNull(setup);
         }
+
+        [Test] // recording off + save path → advisory: nothing will exist to save, and Stop warns every time.
+        public void Build_NoRecordingWithReplaySave_IsAdvisory()
+        {
+            var ex = Assert.Throws<FlowSetupValidationException>(() =>
+                NewBuilder()
+                    .WithTransport(new FakeTransport())
+                    .WithoutReplayRecording()
+                    .WithReplaySave("/tmp/never-written.rply")
+                    .Build(strict: true));
+            XAssert.Contains("WithoutReplayRecording", ex.Message);
+
+            // Advisory, not an error: the non-strict build still succeeds (it logs instead).
+            Assert.IsNotNull(NewBuilder()
+                .WithTransport(new FakeTransport())
+                .WithoutReplayRecording()
+                .WithReplaySave("/tmp/never-written.rply")
+                .Build());
+        }
+
+        [Test] // recording off ALONE is the intended solo configuration — it must not be flagged.
+        public void Build_NoRecordingWithoutReplaySave_Succeeds()
+        {
+            Assert.IsNotNull(NewBuilder()
+                .WithTransport(new FakeTransport())
+                .WithoutReplayRecording()
+                .Build(strict: true));
+        }
     }
 }

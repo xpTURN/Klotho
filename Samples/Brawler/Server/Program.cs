@@ -27,6 +27,9 @@ KlothoServerBootstrap.Initialize("Brawler");
 // Single room: dotnet run -- <port> <botCount> [logLevel]
 // Multi-room:  dotnet run -- --multi <port> <maxRooms> <botCount> [logLevel]
 // Test:        dotnet run -- --test
+// Verify:      dotnet run -- --verify <replay.rply> [--log=<level>]   (re-simulate a replay and compare it with the
+//                                   client's claimed result; exit 0 = verified, 10 = claim mismatch,
+//                                   20 = unverifiable, 30 = unreadable file — see BrawlerReplayVerifier)
 // Config:      dotnet run -- --config-dir <dir> ...  (auto-discovered from CWD or bin directory if not specified)
 // Flags:       --rtt-metrics  (enable RTT metrics for match identification)
 //              --advertise <host>  (game-server address the lobby hands to clients; default is the
@@ -35,6 +38,7 @@ KlothoServerBootstrap.Initialize("Brawler");
 bool isTest = args.Length > 0 && args[0] == "--test";
 bool memReport = args.Length > 0 && args[0] == "--memreport";
 bool multiRoom = args.Length > 0 && args[0] == "--multi";
+bool verify = args.Length > 0 && args[0] == "--verify";
 bool rttMetricsEnabled = Array.IndexOf(args, "--rtt-metrics") >= 0;
 
 if (isTest)
@@ -45,10 +49,14 @@ if (isTest)
     failures += SafeRunSuite("NormalEndLifecycleTests", NormalEndLifecycleTests.RunAll);
     failures += SafeRunSuite("BrawlerMatchConfigTests", BrawlerMatchConfigTests.RunAll);
     failures += SafeRunSuite("BrawlerMatchResultTests", BrawlerMatchResultTests.RunAll);
+    failures += SafeRunSuite("BrawlerReplayVerifierTests", BrawlerReplayVerifierTests.RunAll);
+    failures += SafeRunSuite("ReplayJoinSeedTests", ReplayJoinSeedTests.RunAll);
     return failures;
 }
 else if (memReport)
     return RunMemReport(args);
+else if (verify)
+    return RunVerify(args);
 else if (multiRoom)
     RunMultiRoom(args, rttMetricsEnabled);
 else
@@ -73,6 +81,26 @@ static int RunMemReport(string[] argv)
     return 0;
 }
 
+// --verify <replay.rply>: re-simulate a recorded match in THIS build and compare the result it derives
+// with the result the client claimed. Not a room server — no transport, no lobby, no threads.
+static int RunVerify(string[] argv)
+{
+    // Warning by default: a 5,000-tick playback at Information prints the game's whole per-tick chatter.
+    // `--log=<level>` opens it for a diagnostic run (e.g. `--log=Information` to read the seeded loadout
+    // masks). The split lives in the verifier (ParseArgs) so the rule "a `--` token is never a path" sits
+    // next to the loop that would otherwise open one as a replay; Run then receives a purely positional list.
+    var parsed = BrawlerReplayVerifier.ParseArgs(argv, KLogLevel.Warning);
+
+    // stderr, and before the factory exists: these complain about the very option that sets the level, so
+    // routing them through the logger could file them under the level the caller failed to select.
+    for (int i = 0; i < parsed.Warnings.Length; i++)
+        Console.Error.WriteLine(parsed.Warnings[i]);
+
+    using var loggerFactory = CreateLoggerFactory(parsed.Level);
+    var logger = loggerFactory.CreateLogger("Verify");
+    return BrawlerReplayVerifier.Run(parsed.Files, logger);
+}
+
 static int SafeRunSuite(string name, Func<int> run)
 {
     try { return run(); }
@@ -92,7 +120,6 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
     int botCount = args.Length > 1 ? int.Parse(args[1]) : 0;
     const int maxRooms = 1;
 
-    var assetPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerAssets.bytes");
 
     var logLevel = args.Length > 2 ? Enum.Parse<KLogLevel>(args[2]) : KLogLevel.Warning;
     using var loggerFactory = CreateLoggerFactory(logLevel);
@@ -117,64 +144,20 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
 #endif
     int tickIntervalMs = simConfig.TickIntervalMs;
     var maxPlayersPerRoom = sessionConfig.MaxPlayers;
+    string replaySaveDir = ParseReplaySaveDir(args);
     var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
 
     // RTT metrics (match identification)
     ServerNetworkService.RttMetricsEnabled = rttMetricsEnabled;
 
-    // Pre-load data — per-stage baked geometry (stage 1 = Stage01.*, stage 2 = Stage02.*; unmapped/0 → stage 1),
-    // so a lobby-selected stage is actually simulated, not just reported. Mirrors RunMultiRoom.
-    var stageColliders = new Dictionary<int, List<FPStaticCollider>>
-    {
-        [1] = FPStaticColliderSerializer.Load(Path.Combine(AppContext.BaseDirectory, "Data", "Stage01.StaticColliders.bytes")),
-        [2] = FPStaticColliderSerializer.Load(Path.Combine(AppContext.BaseDirectory, "Data", "Stage02.StaticColliders.bytes")),
-    };
-    var stageNavBytes = new Dictionary<int, byte[]>
-    {
-        [1] = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Data", "Stage01.NavMeshData.bytes")),
-        [2] = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Data", "Stage02.NavMeshData.bytes")),
-    };
-    List<FPStaticCollider> CollidersFor(int stageId) => stageColliders.TryGetValue(stageId, out var c) ? c : stageColliders[1];
-
-    // Per-stage nav, built ONCE here rather than per room. Rooms are created on the server loop's
-    // receive stage, so whatever a room construction costs is subtracted from every OTHER room's
-    // tick budget that cycle — see Docs/IMP/IMP96/Report-MultiRoomThreading.md §H-1. Deserialize and
-    // CreateSnapshot are exactly that kind of cost (a snapshot is a full base insertion, and the
-    // first one in the process also pays the JIT that prewarm absorbs), and both results are
-    // immutable, so they belong here and not in the room factory. This is also what the rebake API
-    // asks for: "rooms that share one stage snapshot should call CreateSnapshot once and construct
-    // an FPNavMeshRebakeContext per room instead."
-    int NavStageKey(int stageId) => stageNavBytes.ContainsKey(stageId) ? stageId : 1;
-    var stageNavMeshes = new Dictionary<int, FPNavMesh>();
-    var stageRebakeSnapshots = new Dictionary<int, FPNavMeshRebakeSnapshot>();
-    foreach (var stageNav in stageNavBytes)
-    {
-        var stageMesh = FPNavMeshSerializer.Deserialize(stageNav.Value);
-        stageNavMeshes[stageNav.Key] = stageMesh;
-        // A base the rebake refuses leaves this stage without a snapshot — its rooms still run,
-        // they just have no building placement. Same outcome as before, decided at boot instead of
-        // once per room.
-        try
-        {
-            stageRebakeSnapshots[stageNav.Key] = BrawlerBuildingShapes.CreateSnapshot(stageMesh, logger);
-        }
-        catch (Exception e)
-        {
-            logger.KWarning($"[BrawlerDedicatedServer] stage {stageNav.Key}: rebake snapshot unavailable — building placement disabled for this stage ({e.Message})");
-        }
-    }
-    FPNavMesh NavMeshFor(int stageId) => stageNavMeshes[NavStageKey(stageId)];
-    // Resolved through the SAME key as NavMeshFor: the snapshot has to be the one built from the
-    // mesh the room's nav systems query, or the rebake would carve a different base than the one
-    // being pathfound on.
-    FPNavMeshRebakeSnapshot RebakeSnapshotFor(int stageId) =>
-        stageRebakeSnapshots.TryGetValue(NavStageKey(stageId), out var s) ? s : null;
-
-    var dataAssets = DataAssetReader.LoadMixedCollectionFromBytes(assetPath);
-
-    IDataAssetRegistryBuilder registryBuilder = new DataAssetRegistry();
-    registryBuilder.RegisterRange(dataAssets);
-    var sharedRegistry = registryBuilder.Build();
+    // Baked content — one loader shared with the multi-room and --verify modes so all three read the
+    // same bytes (see BrawlerStageAssets for why that matters).
+    var assets = BrawlerStageAssets.Load(logger);
+    List<FPStaticCollider> CollidersFor(int stageId) => assets.CollidersFor(stageId);
+    FPNavMesh NavMeshFor(int stageId) => assets.NavMeshFor(stageId);
+    FPNavMeshRebakeSnapshot RebakeSnapshotFor(int stageId) => assets.RebakeSnapshotFor(stageId);
+    var dataAssets = assets.DataAssets;
+    var sharedRegistry = assets.Registry;
 
     // Single Transport
     var transport = new LiteNetLibTransport(logger, connectionKey: KLOTHO_CONNECTION_KEY);
@@ -200,7 +183,13 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
     }
     else
     {
-        var matchConfigData = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData { BotCount = botCount });
+        // MaxPlayers rides along with botCount: bot ids are numbered past it, so it is a tick-0 state input
+        // and a replay verifier rebuilding tick 0 has no sessionconfig.json to read it from.
+        var matchConfigData = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData
+        {
+            BotCount = botCount,
+            MaxPlayers = maxPlayersPerRoom,
+        });
         matchConfigSource = new StaticMatchConfigSource().Add(0, 1, matchConfigData);
     }
 
@@ -211,13 +200,20 @@ static void RunSingleRoom(string[] args, bool rttMetricsEnabled)
     var roomManagerConfig = new RoomManagerConfigBuilder((matchCtx, roomLogger) => new BrawlerServerCallbacks(roomLogger,
             CollidersFor(matchCtx.StageId),
             NavMeshFor(matchCtx.StageId),
-            maxPlayersPerRoom,
+            // Capacity from the room's own config when it carries one, so what built the world is what the
+            // replay records. A lobby-issued config does not stamp it (0) -> this server's own value.
+            MaxPlayersOf(matchCtx.MatchConfigData, maxPlayersPerRoom),
             BrawlerMatchConfig.Decode(matchCtx.MatchConfigData).BotCount,
             stageId: matchCtx.StageId,
-            rebakeSnapshot: RebakeSnapshotFor(matchCtx.StageId)))
+            rebakeSnapshot: RebakeSnapshotFor(matchCtx.StageId),
+            replaySaveDir: replaySaveDir,
+            matchInstanceId: MatchInstanceIdOf(matchCtx.MatchConfigData)))
         .WithRoomLimits(maxRooms, maxPlayersPerRoom, maxSpectatorsPerRoom)
         .WithSimulationConfig(simConfig)
-        .WithSessionConfig(sessionConfig)
+        // Per-match factory, not the shared instance: every room gets its own SessionConfig object, which
+        // is where a per-match seed goes when the lobby starts issuing one (matchCtx carries the payload).
+        // Cloning today changes no value — it removes the shared mutable object and opens the seam.
+        .WithSessionConfig(matchCtx => sessionConfig.Clone())
         .WithDerivedSimulation(sharedRegistry)
         .WithMatchConfigSource(matchConfigSource)
         .Build();
@@ -284,7 +280,6 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
     int maxRooms = args.Length > 2 ? int.Parse(args[2]) : 4;
     int botCount = args.Length > 3 ? int.Parse(args[3]) : 0;
 
-    var assetPath = Path.Combine(AppContext.BaseDirectory, "Data", "BrawlerAssets.bytes");
 
     var logLevel = args.Length > 4 ? Enum.Parse<KLogLevel>(args[4]) : KLogLevel.Warning;
     using var loggerFactory = CreateLoggerFactory(logLevel);
@@ -308,64 +303,20 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
 #endif
     int tickIntervalMs = simConfig.TickIntervalMs;
     var maxPlayersPerRoom = sessionConfig.MaxPlayers;
+    string replaySaveDir = ParseReplaySaveDir(args);
     var maxSpectatorsPerRoom = sessionConfig.MaxSpectators;
 
     // RTT metrics (match identification)
     ServerNetworkService.RttMetricsEnabled = rttMetricsEnabled;
 
-    // Pre-load data — shared across rooms (read-only). Per-stage baked geometry: stage 1 = Stage01.*,
-    // stage 2 = Stage02.* (an unmapped/0 stageId falls back to stage 1 = the default stage).
-    var stageColliders = new Dictionary<int, List<FPStaticCollider>>
-    {
-        [1] = FPStaticColliderSerializer.Load(Path.Combine(AppContext.BaseDirectory, "Data", "Stage01.StaticColliders.bytes")),
-        [2] = FPStaticColliderSerializer.Load(Path.Combine(AppContext.BaseDirectory, "Data", "Stage02.StaticColliders.bytes")),
-    };
-    var stageNavBytes = new Dictionary<int, byte[]>
-    {
-        [1] = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Data", "Stage01.NavMeshData.bytes")),
-        [2] = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Data", "Stage02.NavMeshData.bytes")),
-    };
-    List<FPStaticCollider> CollidersFor(int stageId) => stageColliders.TryGetValue(stageId, out var c) ? c : stageColliders[1];
-
-    // Per-stage nav, built ONCE here rather than per room. Rooms are created on the server loop's
-    // receive stage, so whatever a room construction costs is subtracted from every OTHER room's
-    // tick budget that cycle — see Docs/IMP/IMP96/Report-MultiRoomThreading.md §H-1. Deserialize and
-    // CreateSnapshot are exactly that kind of cost (a snapshot is a full base insertion, and the
-    // first one in the process also pays the JIT that prewarm absorbs), and both results are
-    // immutable, so they belong here and not in the room factory. This is also what the rebake API
-    // asks for: "rooms that share one stage snapshot should call CreateSnapshot once and construct
-    // an FPNavMeshRebakeContext per room instead."
-    int NavStageKey(int stageId) => stageNavBytes.ContainsKey(stageId) ? stageId : 1;
-    var stageNavMeshes = new Dictionary<int, FPNavMesh>();
-    var stageRebakeSnapshots = new Dictionary<int, FPNavMeshRebakeSnapshot>();
-    foreach (var stageNav in stageNavBytes)
-    {
-        var stageMesh = FPNavMeshSerializer.Deserialize(stageNav.Value);
-        stageNavMeshes[stageNav.Key] = stageMesh;
-        // A base the rebake refuses leaves this stage without a snapshot — its rooms still run,
-        // they just have no building placement. Same outcome as before, decided at boot instead of
-        // once per room.
-        try
-        {
-            stageRebakeSnapshots[stageNav.Key] = BrawlerBuildingShapes.CreateSnapshot(stageMesh, logger);
-        }
-        catch (Exception e)
-        {
-            logger.KWarning($"[BrawlerDedicatedServer] stage {stageNav.Key}: rebake snapshot unavailable — building placement disabled for this stage ({e.Message})");
-        }
-    }
-    FPNavMesh NavMeshFor(int stageId) => stageNavMeshes[NavStageKey(stageId)];
-    // Resolved through the SAME key as NavMeshFor: the snapshot has to be the one built from the
-    // mesh the room's nav systems query, or the rebake would carve a different base than the one
-    // being pathfound on.
-    FPNavMeshRebakeSnapshot RebakeSnapshotFor(int stageId) =>
-        stageRebakeSnapshots.TryGetValue(NavStageKey(stageId), out var s) ? s : null;
-
-    var dataAssets = DataAssetReader.LoadMixedCollectionFromBytes(assetPath);
-
-    IDataAssetRegistryBuilder registryBuilder = new DataAssetRegistry();
-    registryBuilder.RegisterRange(dataAssets);
-    var sharedRegistry = registryBuilder.Build();
+    // Baked content — one loader shared with the multi-room and --verify modes so all three read the
+    // same bytes (see BrawlerStageAssets for why that matters).
+    var assets = BrawlerStageAssets.Load(logger);
+    List<FPStaticCollider> CollidersFor(int stageId) => assets.CollidersFor(stageId);
+    FPNavMesh NavMeshFor(int stageId) => assets.NavMeshFor(stageId);
+    FPNavMeshRebakeSnapshot RebakeSnapshotFor(int stageId) => assets.RebakeSnapshotFor(stageId);
+    var dataAssets = assets.DataAssets;
+    var sharedRegistry = assets.Registry;
 
     // Guarantee ThreadPool minimum threads
     int minWorker = Math.Max(Environment.ProcessorCount, maxRooms + 2);
@@ -397,7 +348,11 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
         // Lobbyless: the CLI botCount is this authority's per-match dynamic config — serialized into each
         // room's opaque MatchConfigData so it propagates like stageId (rather than injected straight into
         // the callback). (In --lobby mode the lobby is the authority for match config; CLI botCount is ignored.)
-        var matchConfigData = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData { BotCount = botCount });
+        var matchConfigData = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData
+        {
+            BotCount = botCount,
+            MaxPlayers = maxPlayersPerRoom,
+        });
         var staticSource = new StaticMatchConfigSource();
         for (int r = 0; r < maxRooms; r++) staticSource.Add(r, 1 + (r % 2), matchConfigData);
         matchConfigSource = staticSource;
@@ -421,14 +376,19 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
     var roomManagerConfig = new RoomManagerConfigBuilder((matchCtx, roomLogger) => new BrawlerServerCallbacks(roomLogger,
             CollidersFor(matchCtx.StageId),
             NavMeshFor(matchCtx.StageId),
-            maxPlayersPerRoom,
+            MaxPlayersOf(matchCtx.MatchConfigData, maxPlayersPerRoom),
             BrawlerMatchConfig.Decode(matchCtx.MatchConfigData).BotCount,
             stageId: matchCtx.StageId,
+            replaySaveDir: replaySaveDir,
+            matchInstanceId: MatchInstanceIdOf(matchCtx.MatchConfigData),
             devAbortAfterMs: devAbortMs,
             rebakeSnapshot: RebakeSnapshotFor(matchCtx.StageId)))
         .WithRoomLimits(maxRooms, maxPlayersPerRoom, maxSpectatorsPerRoom)
         .WithSimulationConfig(simConfig)
-        .WithSessionConfig(sessionConfig)
+        // Per-match factory, not the shared instance: every room gets its own SessionConfig object, which
+        // is where a per-match seed goes when the lobby starts issuing one (matchCtx carries the payload).
+        // Cloning today changes no value — it removes the shared mutable object and opens the seam.
+        .WithSessionConfig(matchCtx => sessionConfig.Clone())
         .WithDerivedSimulation(sharedRegistry)
         .WithMatchConfigSource(matchConfigSource)
         .Build();
@@ -484,6 +444,36 @@ static void RunMultiRoom(string[] args, bool rttMetricsEnabled)
     roomReporter?.Dispose();
     redeemClient?.Dispose();
     logger.KInformation($"[BrawlerDedicatedServer] Server stopped.");
+}
+
+// --save-replays <dir>: write each room's replay when its recording stops. OFF by default — the engine
+// records either way, so this flag decides whether that buffer becomes an artifact or is discarded. The
+// server's file is the only SD recording with a tick-0 roster, so it is the only one --verify can REBUILD.
+static string ParseReplaySaveDir(string[] args)
+{
+    int i = Array.IndexOf(args, "--save-replays");
+    if (i < 0 || i + 1 >= args.Length) return null;
+    string dir = args[i + 1];
+    System.IO.Directory.CreateDirectory(dir);
+    return dir;
+}
+
+// The lobby's key for this match, or null when nothing issued one (lobbyless). Names the saved replay and,
+// more importantly, is what joins that file to the lobby's own record of the match.
+static string MatchInstanceIdOf(byte[] matchConfigData)
+{
+    string id = BrawlerMatchConfig.Decode(matchConfigData).MatchInstanceId.ToString();
+    return string.IsNullOrEmpty(id) ? null : id;
+}
+
+// Room capacity the world was built with. The room's own MatchConfigData carries it when the issuer stamped
+// one (this server's static source does); a lobby-issued config does not, and 0 means "fall back to mine".
+// It matters because bot ids are numbered past maxPlayers — a room that builds its world with a different
+// capacity than the one recorded cannot have its tick 0 rebuilt by --verify.
+static int MaxPlayersOf(byte[] matchConfigData, int fallback)
+{
+    int stamped = BrawlerMatchConfig.Decode(matchConfigData).MaxPlayers;
+    return stamped > 0 ? stamped : fallback;
 }
 
 // Dev lobby endpoint: --lobby host:port (default host localhost, port 9999). Presence of the flag ENABLES

@@ -39,6 +39,13 @@ namespace xpTURN.Klotho.Core
         // null path (default) disables saving — matches the always-relevant group's no-null-check style.
         public KlothoFlowSetupBuilder WithReplaySave(string path, bool dumpJson = false) { _s.ReplaySavePath = path; _s.ReplayDumpJson = dumpJson; return this; }
 
+        // ── Replay recording (host / guest sessions; on by default) ──
+        // Opt out for a long solo session that will never save a replay: the recorder's buffer grows
+        // with the match. Everything downstream of a recording — the file, the tick-0 snapshot
+        // injection, any later verification — goes with it, so this is deliberately not a knob you
+        // reach for by default. Build() flags "not recording" combined with WithReplaySave.
+        public KlothoFlowSetupBuilder WithoutReplayRecording() { _s.EnableReplayRecording = false; return this; }
+
         // ── Client handshake identity (guest / reconnect entry points) ──
         public KlothoFlowSetupBuilder WithHandshake(string appVersion, IDeviceIdProvider deviceIdProvider)
         {
@@ -145,6 +152,15 @@ namespace xpTURN.Klotho.Core
             if (_s.Transport == null && _s.DeviceIdProvider == null && _s.SpectatorTransportFactory == null && _s.IdentityProvider == null)
             {
                 const string msg = "Flow setup has no Transport (host/replay), no handshake identity (guest/reconnect), and no SpectatorTransportFactory — it can drive no connect entry point (replay-from-file is still possible).";
+                if (strict) throw new FlowSetupValidationException(msg);
+                _s.Logger?.KWarning($"[KlothoFlowSetupBuilder] {msg}");
+            }
+
+            // Advisory: recording off with a save path set. Nothing breaks — SaveToFile finds no data
+            // and logs — but it logs on every Stop, and the pairing says the author expected a file.
+            if (!_s.EnableReplayRecording && _s.ReplaySavePath != null)
+            {
+                const string msg = "WithoutReplayRecording is set together with WithReplaySave — there will be no replay to save, and Stop() will warn every time.";
                 if (strict) throw new FlowSetupValidationException(msg);
                 _s.Logger?.KWarning($"[KlothoFlowSetupBuilder] {msg}");
             }

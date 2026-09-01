@@ -15,7 +15,7 @@ using xpTURN.Klotho.Deterministic.Math;
 namespace xpTURN.Klotho.Core.Tests
 {
     /// <summary>
-    /// Error-correction deltas on the P2P path (IMP103 V-4).
+    /// Error-correction deltas on the P2P path.
     ///
     /// The three delta functions were reachable only from the SD client: CapturePreRollbackTransforms
     /// gated itself on <c>_pendingVerifiedQueue.Count</c>, a queue only the SD client fills. P2P renders
@@ -114,7 +114,7 @@ namespace xpTURN.Klotho.Core.Tests
         /// inside the band error correction exists for, the second equal to the median of its own session's
         /// non-zero corrections. The jump is the prediction error at that instant, not a function of what
         /// caused the resync — injecting a real Scale divergence instead of a bare hash salt moved it by
-        /// 1 cm (IMP103 #5).
+        /// 1 cm.
         /// </summary>
         [Test]
         public void Resync_ParksItsCorrection_ThenPublishesItPastTheFrameClear()
@@ -245,7 +245,7 @@ namespace xpTURN.Klotho.Core.Tests
         /// SpawnCharacterCommand from the very rollback being captured. So the first rollback of an SD
         /// session legitimately sees a world with no characters in it, and the first version of this guard
         /// latched a warning there: both Brawler SD clients printed it at tick 12, sixty-five log lines
-        /// before the first [EC][DIAG] proved the component was present all along (IMP103).
+        /// before the first [EC][DIAG] proved the component was present all along.
         /// </summary>
         [Test]
         public void NoTarget_OnTheFirstRollback_StaysQuiet()
@@ -330,7 +330,7 @@ namespace xpTURN.Klotho.Core.Tests
         /// ErrorCorrectionTargetComponent: nothing will ever be corrected, and until this warning the
         /// engine said nothing. The view-side check could not cover it — it warns on a delta-free stretch,
         /// which is also what a perfectly predicted session looks like, and it only runs when the flag it
-        /// tells you to check is already on (IMP103).
+        /// tells you to check is already on.
         /// </summary>
         [Test]
         public void RollbackWithNoCorrectionTarget_WarnsOnce()
@@ -421,7 +421,7 @@ namespace xpTURN.Klotho.Core.Tests
             AssertNoDelta(h, "no rollback happened, so there is nothing to correct");
         }
 
-        // ── T3 / T3': the frame-boundary Clear ──
+        // ── The frame-boundary Clear ──
 
         /// <summary>
         /// Deltas belong to the frame that produced them. The next frame must start clean, or the view's
@@ -502,8 +502,7 @@ namespace xpTURN.Klotho.Core.Tests
         /// function cannot see that queue, so that half rests on the existing SD suite staying green.
         /// </summary>
         /// <summary>
-        /// A yaw correction that crosses the +/-pi seam is the short way round, not the long way
-        /// (IMP105 follow-up).
+        /// A yaw correction that crosses the +/-pi seam is the short way round, not the long way.
         ///
         /// The engine reconstructs the rendered yaw on both sides of the rollback and subtracts. Both
         /// steps used to ignore the wrap, so a 20-degree turn from +170 to -170 measured as -340 — and
@@ -630,7 +629,7 @@ namespace xpTURN.Klotho.Core.Tests
 
         #endregion
 
-        // ── IMP105 C-3 / C-6: the per-frame clear must outlive every early return ──
+        // ── The per-frame clear must outlive every early return ──
 
         /// <summary>
         /// A frame that returns early at Paused must still have dropped the previous frame's delta.
@@ -725,7 +724,7 @@ namespace xpTURN.Klotho.Core.Tests
                 "the next session's entity 0 is not this session's entity 0");
         }
 
-        // ── IMP105 C-4 / C-5 / C-20: the baseline is single-use and the results add ──
+        // ── The baseline is single-use and the results add ──
 
         private static readonly MethodInfo CaptureMethod = typeof(KlothoEngine)
             .GetMethod("CapturePreRollbackTransforms", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -788,7 +787,7 @@ namespace xpTURN.Klotho.Core.Tests
 
         /// <summary>
         /// The compute consumes its baseline. This is what stops the unconditional compute call from
-        /// running on a stale one (C-20) — the capture beside it is gated on "a rollback runs this frame",
+        /// running on a stale one — the capture beside it is gated on "a rollback runs this frame",
         /// so on a frame where only a resync filled the maps there is nothing to stop it but this.
         /// </summary>
         [Test]
@@ -813,7 +812,7 @@ namespace xpTURN.Klotho.Core.Tests
         ///
         /// Today's assignment made this harmless by accident — it rewrote the same value. Once the deltas
         /// accumulate it is the only thing standing between a gated-off capture and a doubled correction,
-        /// so it is required by D-2 rather than merely nice to have.
+        /// so it is required rather than merely nice to have.
         /// </summary>
         [Test]
         public void ComputeWithoutACapture_ChangesNothing()

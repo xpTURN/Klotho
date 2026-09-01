@@ -8,7 +8,7 @@ using xpTURN.Klotho.ECS;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// The render-candidate gate for adopted platform views (IMP105 C-11).
+    /// The render-candidate gate for adopted platform views.
     ///
     /// Platform entities exist in every Brawler session, but their visual is a scene-placed object the
     /// factory adopts — there is no platform prefab to instantiate. With nothing placed, saying "yes, render
@@ -147,7 +147,7 @@ namespace xpTURN.Klotho.View.Tests
 
         /// <summary>
         /// Which scene object adopts which entity has to be decided by the caller's array order, not by
-        /// whatever FindObjectsByType happened to return (IMP105 C-12).
+        /// whatever FindObjectsByType happened to return.
         ///
         /// The factory takes from the TAIL, so BrawlerViewSync sorts descending and the first entity
         /// gets the first name. Neither half is meaningful alone: flip the pop order without flipping
@@ -173,11 +173,11 @@ namespace xpTURN.Klotho.View.Tests
         }
 
         /// <summary>
-        /// Adoption must place the view where the entity is (IMP105 C-13).
+        /// Adoption must place the view where the entity is.
         ///
         /// Every other spawn path does: base.CreateAsync reads the entity's transform and hands it to
         /// Instantiate / Pool.Rent so a view never appears at the prefab's authored position or at its
-        /// previous occupant's (IMP104 W-7). Adopting returns before any of that, so the scene-placed
+        /// previous occupant's. Adopting returns before any of that, so the scene-placed
         /// object stayed wherever the level designer left it until the first ApplyTransform — and for a
         /// view whose position line never runs (DisableUpdate / DisablePositionUpdate) that is forever.
         /// </summary>

@@ -25,13 +25,13 @@ namespace xpTURN.Klotho
         /// Splitting this across separate position and rotation calls cost four ring lookups, four
         /// <see cref="Occupies"/> calls and four RenderClock assemblies per entity per frame — RenderClock
         /// is a property that rebuilds its struct on every access, and each function read
-        /// <c>VerifiedBaseTick</c> and <c>VerifiedAlpha</c> from it separately (IMP103 D-2/N-*).
+        /// <c>VerifiedBaseTick</c> and <c>VerifiedAlpha</c> from it separately.
         ///
         /// <see cref="Occupied"/> is the part the view cannot get anywhere else: it says whether the
         /// entity is on the Verified timeline the render is actually reading, which is a different
         /// question from whether it is alive on the live Predicted frame. Gating the snapshot path on the
         /// latter froze a view for the whole SD lead whenever prediction destroyed an entity the server
-        /// had not yet confirmed dead (IMP103 D-2).
+        /// had not yet confirmed dead.
         /// </summary>
         public struct SnapshotPose
         {
@@ -41,7 +41,7 @@ namespace xpTURN.Klotho
             /// Verified frame), in which case the pose is the oldest such frame's, held single-endpoint
             /// style. That shadow case is the spawn warmup: the view exists as soon as the newest
             /// Verified frame carries the entity, while the window is still InterpolationDelayTicks
-            /// behind its birth (IMP103 D-2(f)).
+            /// behind its birth.
             /// </summary>
             public bool Occupied;
 
@@ -83,7 +83,7 @@ namespace xpTURN.Klotho
             // and a backward move of LastVerifiedTick (desync ladder, FullState restore, spectator resync)
             // lands AFTER AdvanceVerifiedRenderTime has already run for the frame — it sits at the top of
             // Update, the assignments come later in that same Update, and views read in LateUpdate. So the
-            // base is stale-high for exactly one frame, and this is the check that covers it (IMP103 #13).
+            // base is stale-high for exactly one frame, and this is the check that covers it.
             if (hasA && baseTick     > engine.LastVerifiedTick) hasA = false;
             if (hasB && baseTick + 1 > engine.LastVerifiedTick) hasB = false;
 
@@ -109,8 +109,8 @@ namespace xpTURN.Klotho
                 // fallback, whose sole candidate (L) is this scan's last. Scan length is at most
                 // delay + 9 (the live base can trail the target by the 10-tick snap guard), each step an
                 // array lookup. Where the window is empty for any other reason, the range collapses on
-                // its own: session start (L <= 0) and a backward L move (IMP103 #13) make it empty, a
-                // dead entity matches nothing — Occupies is version-aware (V-6), so a reused slot does
+                // its own: session start (L <= 0) and a backward L move make it empty, a
+                // dead entity matches nothing — Occupies is version-aware, so a reused slot does
                 // not resurrect it — and frames the ring no longer holds skip to the oldest retained,
                 // which is still the closest authoritative pose to the window. The empty return below is
                 // therefore load-bearing, not defensive.
@@ -124,7 +124,7 @@ namespace xpTURN.Klotho
                 // be hundreds there, per snapshot view, every step a ring lookup that is guaranteed to
                 // miss for everything the ring no longer holds. Clamping skips exactly those and changes
                 // nothing else: the scan takes the first OCCUPIED frame going up, and a frame outside the
-                // ring cannot be it (IMP105 P-1).
+                // ring cannot be it.
                 int oldestRetained = newest - engine.SimulationConfig.GetSnapshotCapacity() + 1;
                 int from = baseTick + 2;
                 if (from < oldestRetained) from = oldestRetained;
@@ -166,7 +166,7 @@ namespace xpTURN.Klotho
             result.BaseRotation = ToYawRotation(ta.Rotation);
 
             // (e) FIRST, before the lerp: holding ta is what puts the jump on the tick boundary. Reordering
-            // this after (a) would lerp across the discontinuity and undo IMP103 V-5.
+            // this after (a) would lerp across the discontinuity, which is what the branch prevents.
             if (Teleported(ta, tb))
             {
                 result.Teleported = true;

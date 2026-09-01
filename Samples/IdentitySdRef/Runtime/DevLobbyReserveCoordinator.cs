@@ -49,7 +49,7 @@ namespace xpTURN.Klotho.Samples.Identity.Sd
         // id's trailing ASCII digit to pick a stage, and an instance id ends in a hex token char, so a leak flips
         // the stage for half of all matches — silently. Both call sites are covered by a recording-policy test
         // (StagePolicy_ReceivesRendezvousMatchId_*); ADD ONE ALONGSIDE ANY NEW PUSH PATH.
-        private readonly Func<string, int, (int stageId, byte[] payload)> _configPolicy;
+        private readonly Func<MatchConfigRequest, (int stageId, byte[] payload)> _configPolicy;
         private readonly long _ticketValidityMs;
         private readonly long _ackTimeoutMs;
         private readonly IKLogger _logger;
@@ -57,16 +57,43 @@ namespace xpTURN.Klotho.Samples.Identity.Sd
         private readonly Dictionary<int, Pending> _pending = new Dictionary<int, Pending>(); // by push requestId
         private int _pushRequestSeq;
 
+        /// <summary>
+        /// What the lobby knows about a match when it builds that match's config payload.
+        ///
+        /// <para><b>Stage selection reads <see cref="MatchId"/>, never <see cref="InstanceId"/>.</b> The dev
+        /// policy derives the stage from the id's trailing ASCII digit, and an instance id ends in a hex token
+        /// digit — reading the wrong one silently flips the stage for half of all matches.</para>
+        ///
+        /// <para><b>Why the instance id and the capacity are here at all.</b> They are inputs a replay verifier
+        /// needs and cannot obtain: the instance id is the only key that joins an uploaded replay to the
+        /// lobby's own record of that match, and the capacity is tick-0 state (bot ids are numbered past it).
+        /// Both must ride the config payload, because that is what reaches every peer and lands in every
+        /// peer's replay file.</para>
+        /// </summary>
+        public readonly struct MatchConfigRequest
+        {
+            /// <summary>Rendezvous key. The stage comes from THIS.</summary>
+            public readonly string MatchId;
+            public readonly int RoomId;
+            /// <summary>This match instance's key (<c>{matchId}#{token}</c>) — new on every re-reservation.</summary>
+            public readonly string InstanceId;
+            /// <summary>Assigned server's MaxPlayersPerRoom. <c>0</c> = unknown; consumers fall back locally.</summary>
+            public readonly int Capacity;
+
+            public MatchConfigRequest(string matchId, int roomId, string instanceId, int capacity)
+            { MatchId = matchId; RoomId = roomId; InstanceId = instanceId; Capacity = capacity; }
+        }
+
         public DevLobbyReserveCoordinator(DevLobbyCore core, Func<long> nowMs, Func<string> newNonce,
                                           Action<int, byte[]> send,
-                                          Func<string, int, (int, byte[])> configPolicy,
+                                          Func<MatchConfigRequest, (int, byte[])> configPolicy,
                                           long ticketValidityMs, long ackTimeoutMs, IKLogger logger = null)
         {
             _core = core;
             _nowMs = nowMs;
             _newNonce = newNonce;
             _send = send;
-            _configPolicy = configPolicy ?? ((_, roomId) => (1 + (roomId % 2), (byte[])null));
+            _configPolicy = configPolicy ?? (req => (1 + (req.RoomId % 2), (byte[])null));
             _ticketValidityMs = ticketValidityMs;
             _ackTimeoutMs = ackTimeoutMs;
             _logger = logger;
@@ -108,9 +135,12 @@ namespace xpTURN.Klotho.Samples.Identity.Sd
             if (assign.FreshReserve)
             {
                 // The stage policy reads the RENDEZVOUS matchId, never the instance id: it selects the stage from
-                // the id's trailing ASCII digit, and an instance id ends in a hex token digit — leaking it here
-                // silently flips the stage for half of all matches. The instance id goes on the wire only.
-                (int stageId, byte[] payload) = _configPolicy(matchId, assign.RoomId);
+                // the id's trailing ASCII digit, and an instance id ends in a hex token digit — reading the wrong
+                // one silently flips the stage for half of all matches. Both ids are handed over (the policy
+                // stamps the instance id INTO the payload, which is how a replay gets its match identity) and
+                // MatchConfigRequest's doc comment is where that separation is pinned.
+                (int stageId, byte[] payload) = _configPolicy(
+                    new MatchConfigRequest(matchId, assign.RoomId, assign.InstanceId, assign.Capacity));
                 int pushId = ++_pushRequestSeq;
                 var pending = new Pending
                 {
@@ -212,9 +242,12 @@ namespace xpTURN.Klotho.Samples.Identity.Sd
         /// client already holds its ticket, so the dedi's ReserveAck lands on no pending and is ignored.</summary>
         public void RePushReservations(string serverId, int serverPeerId)
         {
-            foreach (var (roomId, matchId, instanceId, expiresAt) in _core.ActiveRoomReservations(serverId))
+            foreach (var (roomId, matchId, instanceId, expiresAt, capacity) in _core.ActiveRoomReservations(serverId))
             {
-                (int stageId, byte[] payload) = _configPolicy(matchId, roomId); // rendezvous key → stage (see HandleIssue)
+                // Same request the original push built — including the instance id, so the re-pushed payload
+                // carries the SAME identity the dedi already materialized (see the id note below).
+                (int stageId, byte[] payload) = _configPolicy(
+                    new MatchConfigRequest(matchId, roomId, instanceId, capacity));
                 // Re-push the SAME instance id: if a client already joined, the dedi's entry is materialized and a
                 // different id would trip its match-conflict check (ReserveNakMatchConflict) against ourselves.
                 _send(serverPeerId, LobbyWire.EncodeReservePush(++_pushRequestSeq, roomId, instanceId, stageId, payload, expiresAt));

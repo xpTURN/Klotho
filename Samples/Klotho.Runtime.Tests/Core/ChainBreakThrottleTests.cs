@@ -9,7 +9,7 @@ using xpTURN.Klotho.Helper.Tests;
 namespace xpTURN.Klotho.Core.Tests
 {
     /// <summary>
-    /// How often a stalled input chain is allowed to say so (IMP103).
+    /// How often a stalled input chain is allowed to say so.
     ///
     /// The throttle claimed "at most once per 1s" but keyed that on the stalled tick, and the dominant
     /// case — a peer's input arriving one tick late — advances the stalled tick every tick, so the guard

@@ -353,7 +353,7 @@ These drive `DynamicInputDelayPolicy` (§9.6) and are server-authoritative.
 
 | Field | Default | Unit | Description |
 | ---- | ---- | ---- | ---- |
-| RandomSeed | 0 | int | If 0, auto-generated via `Environment.TickCount` (host) |
+| RandomSeed | 0 | int | Authored request. If 0, the authority generates one **at match start**; any other value is used as-is (negatives included). Never overwritten with the effective seed — read `IKlothoEngine.RandomSeed` for that. |
 | MaxPlayers | 4 | count | Max players in a room |
 | MaxSpectators | 0 | count | Max spectators allowed in the session. Combined with MaxPlayers as the transport-level capacity (`MaxPlayersPerRoom + MaxSpectatorsPerRoom`) for spectator admission. 0 means spectators are not admitted. |
 | MinPlayers | 2 | count | Min players required to start. Range: 1 ≤ MinPlayers ≤ MaxPlayers (clamped at SessionConfigLoader.Load and KlothoSession.Create with a warning log; SD start gate also clamps to MaxPlayersPerRoom at runtime). |
@@ -1550,35 +1550,86 @@ Idle → Playing → Paused → Playing
 
 ### 10.2 ReplayData File Format
 
-The file is stored uncompressed, self-framed by the leading 4 bytes `RPLY` magic; the loader (`ReplaySystem`) requires it.
+The file is stored uncompressed, self-framed by the leading 4 bytes `RPLY` magic; the loader
+(`ReplaySystem`) requires it. `ReplayMetadata.CURRENT_VERSION` is **5**, and the loader demands equality —
+any other version is rejected rather than parsed with the current layout ([Replay.md §7](Replay.md) rule 5).
 
-- **Format**: leading 4 bytes `RPLY` (0x52504C59) followed by the payload below
-
-Payload:
+Commands are **not** interleaved with tick headers. They live in one contiguous stream, and a trailing
+offset table is the index into it — that is what makes seeking a lookup rather than a scan.
 
 ```
-┌──────────────────────────────────────┐
-│ uint   MagicNumber = 0x52504C59      │  "RPLY" (uncompressed path only)
-├──────────────────────────────────────┤
-│ Metadata:                            │
-│   int    Version (currently 1)       │
-│   string SessionId (GUID)            │
-│   long   RecordedAt (DateTime ticks) │
-│   long   DurationMs                  │
-│   int    TotalTicks                  │
-│   int    PlayerCount                 │
-│   int    TickIntervalMs              │
-│   int    RandomSeed                  │
-├──────────────────────────────────────┤
-│ int TickCount                        │
-│ for each tick:                       │
-│   int Tick                           │
-│   int CommandCount                   │
-│   for each command:                  │
-│     int    CommandDataLength         │
-│     byte[] CommandData               │
-└──────────────────────────────────────┘
+┌─ 4 ─────────────────────────────────────────────────────────────────────┐
+│ uint  MagicNumber = 0x52504C59                 "RPLY"                   │
+├─ variable ──────────────────────────────────────────────────────────────┤
+│ Metadata:                                                               │
+│   int    Version                               = CURRENT_VERSION (5)    │
+│   string SessionId                             local GUID, per peer     │
+│   long   RecordedAt (DateTime ticks) · long DurationMs                  │
+│   int    TotalTicks · int PlayerCount · int TickIntervalMs              │
+│   int    RandomSeed                                                     │
+│   ── SimulationConfig — restored by ToSimulationConfig() ──────────────  │
+│   int    InputDelayTicks · int MaxRollbackTicks · int SyncCheckInterval │
+│   bool   UsePrediction                         one byte                 │
+│   int    MaxEntities · int Mode (NetworkMode)                           │
+│   int    HardToleranceMs · int InputResendIntervalMs                    │
+│   int    MaxUnackedInputs · int ServerSnapshotRetentionTicks            │
+│   int    EventDispatchWarnMs · int TickDriftWarnMultiplier              │
+│   int    StageId · blob MatchConfigData        opaque, game-defined     │
+│   ── game slot ───────────────────────────────────────────────────────  │
+│   blob   GameCustomData                        e.g. the result claim    │
+│   ── the tick-0 world ────────────────────────────────────────────────  │
+│   blob   InitialStateSnapshot                  SerializeFullState(0)    │
+│   ── reproduction anchors + completion marker ────────────────────────  │
+│   long   LayoutFingerprint · long StaticColliderFingerprint             │
+│   long   NavFingerprint · long GameFingerprint                          │
+│   long   InitialStateHash · int InitialStateTick                        │
+│   int    EndReason (ReplayEndReason)                                    │
+│   ── tick-0 roster, and per-player verified data parallel to it ──────  │
+│   int    n · int InitialRoster[n]              empty ⇒ built elsewhere  │
+│   int    m · int InitialEntitlementLengths[m]                           │
+│   blob   InitialEntitlementData                concatenated, sliced by  │
+│                                                the lengths above       │
+│   ── layout inputs: recorded, NOT restored ──────────────────────────   │
+│   int    p · int PrunedComponentTypeIds[p]                              │
+│   int    q · int ComponentMaxCountTypeIds[q]                            │
+│           int ComponentMaxCountValues[q]                                │
+├─ 4 ─────────────────────────────────────────────────────────────────────┤
+│ int  TickCount            entries in the offset table                   │
+├─ 4 ─────────────────────────────────────────────────────────────────────┤
+│ int  StreamSize           bytes of command stream                       │
+├─ StreamSize ────────────────────────────────────────────────────────────┤
+│ command stream — one chunk per recorded tick:                           │
+│   int    CommandCount                                                   │
+│   for each command:                                                     │
+│     int    Size                 bytes in the record below               │
+│     int    CommandTypeId · int PlayerId · int Tick                      │
+│     byte[] Payload              Size − 12, per command type             │
+├─ TickCount × 12 ────────────────────────────────────────────────────────┤
+│ offset table:  int Tick · int Offset · int Length      × TickCount       │
+└─────────────────────────────────────────────────────────────────────────┘
+
+blob   = int length + that many bytes (length 0 ⇒ nothing follows)
+string = int UTF-8 byte count + those bytes
+all integers little-endian; no padding, no per-section checksum
 ```
+
+A tick's commands are `stream[Offset .. Offset + Length)`. The stream itself is not self-framed, which has
+three consequences for any reader:
+
+- **The table is the index; do not scan the stream.** Chunk order is *recording* order. It is ascending in
+  a match that never corrected, but a rollback re-records ticks and breaks that.
+- **The stream may hold dead bytes.** A re-record of the same serialized length overwrites in place (this
+  is what stops a rollback-heavy match from inflating the buffer); a different length is appended and the
+  superseded bytes stay. Only what the table points at is live, and `StreamSize` counts both.
+- **Trailing bytes are ignored, not rejected.** The loader reads exactly what the header describes, so
+  anything appended past the offset table is neither parsed nor refused; file length attests to nothing.
+
+Measured shape (Brawler, 4,982 ticks, two players at tick 0 plus one late joiner): 783,682 bytes total —
+~1.9 KB metadata of which 1,511 bytes is the tick-0 snapshot, a 721,962-byte stream at ~145 B/tick, and a
+59,784-byte offset table. Nothing is compressed on the way out (gzip: 12×).
+
+> See [Replay.md §3](Replay.md) for the same layout from a game developer's side, and §10 there for what a
+> server-side verifier can and cannot conclude from these fields.
 
 ### 10.3 Playback Features
 

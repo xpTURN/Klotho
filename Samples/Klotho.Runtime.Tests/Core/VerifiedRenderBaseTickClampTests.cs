@@ -9,7 +9,7 @@ using xpTURN.Klotho.Helper.Tests;
 namespace xpTURN.Klotho.Core.Tests
 {
     /// <summary>
-    /// VerifiedBaseTick upper-bound clamp (IMP103 V-2).
+    /// VerifiedBaseTick upper-bound clamp.
     ///
     /// Invariant: <c>VerifiedBaseTick &lt;= max(0, LastVerifiedTick - 1)</c>.
     /// The snapshot interpolator lerps frame <c>base</c> against frame <c>base + 1</c>, so both
@@ -149,7 +149,7 @@ namespace xpTURN.Klotho.Core.Tests
         /// breaks the derivation — base+1 = 1 still exceeds LastVerifiedTick = 0, so "both endpoints
         /// Verified" is NOT achieved. Only one Verified frame exists, so interpolation is impossible
         /// by definition. Covering it exactly needs the interpolator-side LastVerifiedTick check,
-        /// which this change deliberately leaves to the V-6 patch. This test asserts the limitation
+        /// which this change deliberately leaves to the interpolator. This test asserts the limitation
         /// so nobody later reads the invariant as a stronger guarantee than it is.
         /// </summary>
         [Test]

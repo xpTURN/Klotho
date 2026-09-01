@@ -11,7 +11,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// Teleports on the snapshot interpolation path (IMP103 V-5). Two independent defects:
+    /// Teleports on the snapshot interpolation path. Two independent defects:
     ///
     ///   1. ApplyTransform's teleport branch snapped to UninterpolatedPosition — the PREDICTED frame.
     ///      The snapshot path renders the verified window, which has not reached the teleport tick when

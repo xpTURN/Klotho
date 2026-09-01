@@ -45,7 +45,7 @@ namespace Brawler
             // but the moment platforms carry their own authoring — a mesh, a scale, a VFX — the visual
             // and the collision geometry stop agreeing. Sorting by name fixes the pairing to something
             // the scene author controls; descending, because the factory pops from the tail, so the
-            // first entity gets the first name (IMP105 C-12).
+            // first entity gets the first name.
             //
             // Note the scan is process-wide: an additively loaded scene that also holds PlatformViews
             // contributes here too. That is intended for the stage view scene, which is exactly how the

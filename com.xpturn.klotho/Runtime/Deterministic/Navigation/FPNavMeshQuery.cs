@@ -192,7 +192,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // The five lines below are Trace, not Debug. This runs per agent per move step, so at Debug it
         // emitted three lines for every ordinary step — 96-98% of a Brawler session log, which buries
         // every other diagnostic the level exists to show. Trace keeps them one level away for when the
-        // walk itself is what you are debugging (IMP105 follow-up).
+        // walk itself is what you are debugging.
         public (FPVector3 resultPos, int resultTri) MoveAlongSurfaceWithVisited(
             FPVector3 startPos, FPVector3 endPos, int startTri, FP64 multiFloorYThreshold,
             int[] outVisited, out int visitedCount)

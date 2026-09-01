@@ -4,6 +4,7 @@ using xpTURN.Klotho.Logging;
 
 using xpTURN.Klotho.Input;
 using xpTURN.Klotho.Network;
+using xpTURN.Klotho.Replay;
 
 namespace xpTURN.Klotho.Core
 {
@@ -98,7 +99,12 @@ namespace xpTURN.Klotho.Core
 
         /// <summary>
         /// Event handler for ReplaySystem.OnInitialStateSnapshotSet.
-        /// When the game code calls SetInitialStateSnapshot(data, hash), fills _cachedFullState* based on tick 0.
+        /// When the game code calls SetInitialStateSnapshot(data, hash, tick), fills _cachedFullState* based on tick 0.
+        /// The tick is deliberately NOT taken from the caller here: _cachedFullStateTick goes out on the wire
+        /// (SendFullStateResponse in the SD bootstrap-timeout path), so relabelling it would change a wire value.
+        /// It is harmless today because the only sender is the SD SERVER, whose snapshot really is tick 0 — an
+        /// SD client's mid-match snapshot is mislabelled in this cache but never sent. The replay file records
+        /// the true tick separately (IReplayMetadata.InitialStateTick).
         /// The SD Server later reuses this cache in BroadcastFullState at the tail of HandleGameStart.
         /// On P2P / SD Client the cache is not broadcast, but it is always set for consistency and future reuse.
         /// </summary>
@@ -554,7 +560,9 @@ namespace xpTURN.Klotho.Core
             if (!_replaySystem.IsRecording) return;
             if (reason != ApplyReason.CorrectiveReset && reason != ApplyReason.ResyncRequest) return;
             int truncateAt = preResetTotalTicks < 0 ? 0 : preResetTotalTicks;
-            _replaySystem.StopRecording(truncateAt);
+            _replaySystem.StopRecording(truncateAt, reason == ApplyReason.CorrectiveReset
+                ? ReplayEndReason.CorrectiveReset
+                : ReplayEndReason.ResyncRequest);
             _logger?.KWarning($"[KlothoEngine][Replay] truncated at {reason}: resetTick={resetTick}, totalTicks={truncateAt}");
         }
 
@@ -605,30 +613,55 @@ namespace xpTURN.Klotho.Core
         /// peer with no environment source at all reports 0 and receivers skip it, exactly as the
         /// combined path treats "not provided".
         /// </summary>
-        private long ComputeLocalEnvironmentFingerprintRaw()
+        private long ComputeLocalEnvironmentFingerprintRaw() => GetFingerprintBreakdown().Environment;
+
+        /// <summary>
+        /// The four fingerprint terms this peer can report, resolved once. Three consumers need them: the
+        /// environment fold above, the static-mismatch diagnostic in CheckStaticGeometryFingerprint, and the
+        /// replay recording's anchor capture. Each term keeps whatever sentinel its own source defines —
+        /// notably FPNavAgentSystem returns 0 only when there is no mesh and normalizes its own
+        /// 0 -&gt; 1 otherwise — so callers must NOT re-normalize per term. 0 stays "not provided".
+        /// </summary>
+        private readonly struct FingerprintBreakdown
         {
+            public readonly long Layout;
+            public readonly long StaticCollider;
+            public readonly long Nav;
+            public readonly long Game;
+
+            public FingerprintBreakdown(long layout, long staticCollider, long nav, long game)
+            {
+                Layout = layout;
+                StaticCollider = staticCollider;
+                Nav = nav;
+                Game = game;
+            }
+
+            /// <summary>Environment half — registry deliberately excluded (see the Ready-path split).</summary>
+            public long Environment => StaticCollider ^ Nav ^ Game;
+        }
+
+        private FingerprintBreakdown GetFingerprintBreakdown()
+        {
+            long layout = xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
+
             if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation ecs)
-                return 0;
+                return new FingerprintBreakdown(layout, 0, 0, 0);
 
-            long fp = 0;
             var svc = ecs.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
-            if (svc != null)
-                fp ^= svc.GetStaticFingerprint();
-
             var nav = ecs.GetSystem<xpTURN.Klotho.Deterministic.Navigation.INavFingerprintSource>();
-            long navFp = nav != null ? nav.GetNavFingerprint() : 0;
-            fp ^= navFp;
-
             // The game's own slot. The two sources above are things the engine can see for
             // itself; this is for what it cannot — a shape catalog, a tuning table, an asset id
             // map: data that must be identical across builds and is deliberately outside the
             // state hash. Without it a game with such data has nowhere to put it but inside one
             // of the engine's terms, which then reports its divergence as a navmesh problem.
             var game = ecs.GetSystem<xpTURN.Klotho.ECS.IGameFingerprintSource>();
-            if (game != null)
-                fp ^= game.GetGameFingerprint();
 
-            return fp;
+            return new FingerprintBreakdown(
+                layout,
+                svc?.GetStaticFingerprint() ?? 0,
+                nav?.GetNavFingerprint() ?? 0,
+                game?.GetGameFingerprint() ?? 0);
         }
 
         /// <summary>
@@ -657,17 +690,12 @@ namespace xpTURN.Klotho.Core
             _staticMismatchLogged = true;
             // Break the fold down so the reader can tell WHICH source diverged by comparing this
             // line with the peer's, instead of only knowing that the XOR differs.
-            var colliderSvc = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)
-                ?.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
-            var navSrc = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)
-                ?.GetSystem<xpTURN.Klotho.Deterministic.Navigation.INavFingerprintSource>();
-            var gameSrc = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)
-                ?.GetSystem<xpTURN.Klotho.ECS.IGameFingerprintSource>();
+            var fp = GetFingerprintBreakdown();
             _logger?.KError(
                 $"[KlothoEngine] Static environment mismatch: server=0x{serverStaticFingerprint:X16} local=0x{localFp:X16} " +
-                $"— local sources: registry(types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount})=0x{xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint:X16} " +
-                $"colliders=0x{(colliderSvc?.GetStaticFingerprint() ?? 0):X16} nav=0x{(navSrc?.GetNavFingerprint() ?? 0):X16} " +
-                $"game=0x{(gameSrc?.GetGameFingerprint() ?? 0):X16}. " +
+                $"— local sources: registry(types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount})=0x{fp.Layout:X16} " +
+                $"colliders=0x{fp.StaticCollider:X16} nav=0x{fp.Nav:X16} " +
+                $"game=0x{fp.Game:X16}. " +
                 $"Compare each against the peer's: a registry difference means different builds (e.g. Unity Editor vs player build); " +
                 $"a game difference is whatever that game folded in (shape catalog, tuning tables); " +
                 $"otherwise check RegisterSystems static load / post-FullState rebake");

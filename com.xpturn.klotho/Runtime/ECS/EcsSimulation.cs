@@ -208,7 +208,13 @@ namespace xpTURN.Klotho.ECS
                 _systemRunner.RunCommandSystems(ref _frame, cmd);
 
                 if (cmd is Core.PlayerJoinCommand joinCmd)
+                {
+                    // Order is load-bearing: the join notification seeds join-time world state from this
+                    // player's verified data, so that data has to be adopted first. On playback the command
+                    // is the only source — there is no network service to ask.
+                    OnPlayerJoinedEntitlement?.Invoke(joinCmd.JoinedPlayerId, joinCmd.Entitlement);
                     OnPlayerJoined(joinCmd.JoinedPlayerId, _frame.Tick);
+                }
             }
 
             // Phase.Update → PostUpdate → LateUpdate
@@ -697,6 +703,17 @@ namespace xpTURN.Klotho.ECS
         }
 
         public event Action<int> OnPlayerJoinedNotification;
+
+        /// <summary>
+        /// A join command's per-player verified data (entitlement bytes, or null when none was issued),
+        /// raised immediately BEFORE <see cref="OnPlayerJoinedNotification"/>.
+        ///
+        /// <para>Separate from the notification because that one is an <c>ISimulation</c> contract every
+        /// simulation double implements; this is the ECS path's extra, and only the engine listens. It
+        /// exists so a replay — which has no network service to ask — can seed join-time world state from
+        /// the same bytes the live match used.</para>
+        /// </summary>
+        public event Action<int, byte[]> OnPlayerJoinedEntitlement;
 
         public void OnPlayerJoined(int playerId, int tick)
         {

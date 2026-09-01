@@ -21,7 +21,7 @@ namespace xpTURN.Klotho.Core
         // Bitmask of which active-player slots were missing at the last logged break, and how many breaks
         // have been swallowed since. The mask is what makes the throttle work on the common case: the
         // frontier normally advances one tick per tick, so keying the throttle on the tick alone never
-        // suppressed anything (IMP103).
+        // suppressed anything.
         private ulong _lastChainBreakMissingMask;
         private int _chainBreakSuppressed;
         private int _chainBreakSuppressedFromTick = -1;
@@ -129,7 +129,7 @@ namespace xpTURN.Klotho.Core
             // whenever the missing set changes. The old form also required `tick == _lastLoggedTick`, which
             // made it vacuous for the dominant case — an input arriving one tick late advances the stalled
             // tick every tick, so the guard never held and every tick produced a WARN. A 2s
-            // dynamic-delay warmup at 25ms therefore printed ~80 lines (IMP103).
+            // dynamic-delay warmup at 25ms therefore printed ~80 lines.
             long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             bool causeChanged = missingMask != _lastChainBreakMissingMask;
             if (!causeChanged && nowMs - _lastChainBreakLogMs < 1000)

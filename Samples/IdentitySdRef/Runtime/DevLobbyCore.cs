@@ -206,9 +206,9 @@ namespace xpTURN.Klotho.Samples.Identity.Sd
         /// must re-learn on reconnect (re-push). One entry per room: (roomId, matchId, instanceId, latest ticket
         /// expiry). Both keys are returned: the re-push carries the instance id, while the stage policy is still
         /// evaluated against the rendezvous matchId.</summary>
-        public List<(int roomId, string matchId, string instanceId, long expiresAt)> ActiveRoomReservations(string serverId)
+        public List<(int roomId, string matchId, string instanceId, long expiresAt, int capacity)> ActiveRoomReservations(string serverId)
         {
-            var result = new List<(int, string, string, long)>();
+            var result = new List<(int, string, string, long, int)>();
             lock (_lock)
             {
                 if (!_registry.Servers.TryGetValue(serverId, out var srv)) return result;
@@ -221,7 +221,7 @@ namespace xpTURN.Klotho.Samples.Identity.Sd
                         if (string.Equals(kv.Value.ServerId, serverId, StringComparison.Ordinal)
                             && kv.Value.RoomId == roomId && kv.Value.ExpiresAt > exp)
                             exp = kv.Value.ExpiresAt;
-                    result.Add((roomId, slot.SessionId, slot.InstanceId, exp));
+                    result.Add((roomId, slot.SessionId, slot.InstanceId, exp, srv.MaxPlayersPerRoom));
                 }
             }
             return result;
@@ -317,13 +317,17 @@ namespace xpTURN.Klotho.Samples.Identity.Sd
             public readonly bool AckPending;    // the assigned room is reserved-but-unconfirmed (awaiting ReserveAck)
             public readonly string InstanceId;  // the assigned room's match-instance key; consumed on the
                                                 // FreshReserve path (the only one that pushes to the dedi)
+            public readonly int Capacity;       // the assigned server's MaxPlayersPerRoom. Rides along because
+                                                // the match config the lobby issues has to carry it: bot ids are
+                                                // numbered past the capacity, so it is tick-0 state and a replay
+                                                // verifier rebuilding tick 0 has no SessionConfig to read it from.
             private AssignResult(bool ok, string serverId, int roomId, string host, int port,
-                                 int serverPeerId, bool freshReserve, bool ackPending, string instanceId)
+                                 int serverPeerId, bool freshReserve, bool ackPending, string instanceId, int capacity)
             { Ok = ok; ServerId = serverId; RoomId = roomId; Host = host; Port = port;
-              ServerPeerId = serverPeerId; FreshReserve = freshReserve; AckPending = ackPending; InstanceId = instanceId; }
-            public static readonly AssignResult Full = new AssignResult(false, null, -1, string.Empty, 0, -1, false, false, null);
+              ServerPeerId = serverPeerId; FreshReserve = freshReserve; AckPending = ackPending; InstanceId = instanceId; Capacity = capacity; }
+            public static readonly AssignResult Full = new AssignResult(false, null, -1, string.Empty, 0, -1, false, false, null, 0);
             public static AssignResult Assigned(LobbyRoomRegistry.ServerEntry srv, int roomId, string instanceId, bool freshReserve, bool ackPending)
-                => new AssignResult(true, srv.ServerId, roomId, srv.Host, srv.Port, srv.PeerId, freshReserve, ackPending, instanceId);
+                => new AssignResult(true, srv.ServerId, roomId, srv.Host, srv.Port, srv.PeerId, freshReserve, ackPending, instanceId, srv.MaxPlayersPerRoom);
         }
 
         // ── Redeem (game server → lobby). Authoritative: nonce consume, expiry, match↔server binding. ──

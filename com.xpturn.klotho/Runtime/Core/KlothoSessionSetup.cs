@@ -143,5 +143,11 @@ namespace xpTURN.Klotho.Core
         public string ReplaySavePath { get; set; } = null;
         /// <summary>Whether the replay save also dumps a JSON sidecar.</summary>
         public bool ReplayDumpJson { get; set; } = false;
+
+        /// <summary>
+        /// Whether the engine records a replay. Default true. Stamped by KlothoSessionFlow from
+        /// <c>KlothoFlowSetup.EnableReplayRecording</c>; per-peer and never on the wire.
+        /// </summary>
+        public bool EnableReplayRecording { get; set; } = true;
     }
 }

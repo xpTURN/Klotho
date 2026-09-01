@@ -6,7 +6,7 @@ using xpTURN.Klotho.ECS;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// Prefab-authored vs Factory-decided ViewFlags (IMP103 V-3).
+    /// Prefab-authored vs Factory-decided ViewFlags.
     ///
     /// Spawn used to assign the factory's answer straight onto the view. The factory can only express two
     /// of the sixteen combinations, so that assignment destroyed whatever else the prefab had authored —
@@ -40,7 +40,7 @@ namespace xpTURN.Klotho.View.Tests
                 factoryFlags: ViewFlags.None);
 
             Assert.That(got, Is.EqualTo(ViewFlags.DisableUpdate | ViewFlags.DisablePositionUpdate),
-                "assigning the factory answer used to wipe prefab authoring — that is the V-3 defect");
+                "assigning the factory answer used to wipe prefab authoring");
         }
 
         /// <summary>The factory's own bit is applied on top without disturbing the prefab's.</summary>
@@ -75,7 +75,7 @@ namespace xpTURN.Klotho.View.Tests
         /// <summary>
         /// A factory that decides more per entity must widen the mask; the flag then behaves as
         /// factory-owned in both directions. This is the seam that keeps a wider override from being
-        /// silently dropped — the same class of loss V-3 was.
+        /// silently dropped — the same class of loss as wiping prefab authoring.
         /// </summary>
         [Test]
         public void WidenedMask_LetsTheFactoryOwnMoreFlags()

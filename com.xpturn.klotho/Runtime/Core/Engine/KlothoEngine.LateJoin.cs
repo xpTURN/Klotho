@@ -133,6 +133,10 @@ namespace xpTURN.Klotho.Core
             cmd.PlayerId = _networkService.LocalPlayerId;
             cmd.Tick = joinTick;
             cmd.JoinedPlayerId = playerId;
+            // Assigned unconditionally, null included: the pool hands back instances without clearing
+            // fields, so skipping this on a player with no entitlement would carry the PREVIOUS joiner's
+            // bytes into this join — and every node would seed that player's world from them.
+            cmd.Entitlement = GetPlayerEntitlement(playerId);
 
             if (_simConfig.Mode == NetworkMode.ServerDriven)
             {

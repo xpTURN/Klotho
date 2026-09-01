@@ -26,9 +26,52 @@ namespace xpTURN.Klotho.Core
         #region Replay Methods
 
         /// <summary>
+        /// How playback obtains tick 0.
+        /// </summary>
+        public enum ReplayInitialState
+        {
+            /// <summary>Restore the recorded snapshot. The default, and what a viewer wants.</summary>
+            RestoreSnapshot,
+
+            /// <summary>
+            /// Rebuild tick 0 from the recorded roster, seed and config instead of trusting the recorded
+            /// bytes, then report whether it matches the recorded hash. For a verifier: the snapshot in a
+            /// file is the client's own claim about where the match started, and re-simulating from it
+            /// proves nothing about that starting point. Requires game callbacks (OnInitializeWorld runs)
+            /// and a recorded roster; without a roster this falls back to RestoreSnapshot.
+            /// </summary>
+            Reconstruct,
+        }
+
+        /// <summary>Whether the last <see cref="StartReplay(IReplayData, ReplayInitialState)"/> actually
+        /// rebuilt tick 0 (false = the snapshot was restored, including the roster-less fallback).</summary>
+        public bool ReplayTick0Reconstructed { get; private set; }
+
+        /// <summary>Hash of the tick-0 state playback ended up with — compare against
+        /// <c>IReplayMetadata.InitialStateHash</c>. Meaningful in both modes.</summary>
+        public long ReplayTick0Hash { get; private set; }
+
+        /// <summary>
+        /// Hash of the state the simulation holds right now, folded exactly the way
+        /// <see cref="ReplayTick0Hash"/> is — so the two are comparable, and so a value taken after
+        /// playback covers every component the match result does not project.
+        ///
+        /// <para>Read it to compare two runs of the SAME file. It is a DIFFERENTIAL signal, not a claim
+        /// check: no end hash is recorded, so there is nothing in the file to check it against. What it
+        /// buys is the case the result comparison is blind to — a re-simulation that diverged mid-match
+        /// can still arrive at the same winner, and then a broken playback verifies green.</para>
+        /// </summary>
+        public long CurrentStateHash => _simulation?.GetStateHash() ?? 0;
+
+        /// <summary>
         /// Starts replay playback.
         /// </summary>
-        public void StartReplay(IReplayData replayData)
+        public void StartReplay(IReplayData replayData) => StartReplay(replayData, ReplayInitialState.RestoreSnapshot);
+
+        /// <summary>
+        /// Starts replay playback, choosing how tick 0 is obtained.
+        /// </summary>
+        public void StartReplay(IReplayData replayData, ReplayInitialState initialState)
         {
             if (replayData == null)
             {
@@ -48,12 +91,45 @@ namespace xpTURN.Klotho.Core
             // Initialize simulation with the replay seed
             _simulation.Initialize();
 
-            // Restore initial state snapshot - via RestoreFromFullState instead of OnInitializeWorld
-            var snapshot = replayData.Metadata.InitialStateSnapshot;
-            if (snapshot == null || snapshot.Length == 0)
-                throw new InvalidDataException(
-                    "[Replay] InitialStateSnapshot missing - corrupted file or snapshot was not injected during recording");
-            _simulation.RestoreFromFullState(snapshot);
+            // Per-player verified data the recording carried. Loaded before tick 0 either way: the rebuild
+            // reads it while seeding, and the restore path needs it from the first join tick onward.
+            LoadReplayEntitlements(replayData.Metadata);
+
+            // Tick 0: rebuild it, or restore what the recording carried.
+            var roster = replayData.Metadata.InitialRoster;
+            bool reconstruct = initialState == ReplayInitialState.Reconstruct && roster != null && roster.Count > 0;
+
+            if (initialState == ReplayInitialState.Reconstruct && !reconstruct)
+            {
+                // Not an error: a recording that did not build tick 0 carries no roster (an SD client's
+                // initial state came from the server). Falling back keeps playback working; the caller is
+                // told so it can say which of the two it got.
+                _logger?.KWarning(
+                    $"[KlothoEngine][Replay] Reconstruct requested but the file carries no initial roster - falling back to the recorded snapshot. This recording did not build its own tick 0.");
+            }
+
+            if (reconstruct)
+            {
+                // Same construction the live path runs, through the same method — participants in the
+                // recorded order, then seed, match-end, OnInitializeWorld, nav correction. Order is
+                // state-hash input, which is why this calls BuildInitialWorld rather than repeating it.
+                _activePlayerIds.Clear();
+                for (int i = 0; i < roster.Count; i++)
+                    _activePlayerIds.Add(roster[i]);
+
+                BuildInitialWorld();
+            }
+            else
+            {
+                var snapshot = replayData.Metadata.InitialStateSnapshot;
+                if (snapshot == null || snapshot.Length == 0)
+                    throw new InvalidDataException(
+                        "[Replay] InitialStateSnapshot missing - corrupted file or snapshot was not injected during recording");
+                _simulation.RestoreFromFullState(snapshot);
+            }
+
+            ReplayTick0Reconstructed = reconstruct;
+            ReplayTick0Hash = _simulation.GetStateHash();
 
             // Save initial snapshot
             SaveSnapshot(0);
@@ -70,7 +146,44 @@ namespace xpTURN.Klotho.Core
             _viewCallbacks?.OnGameStart(this);
             OnGameStart?.Invoke();
 
+            LogReplayReproductionContext(replayData.Metadata);
+
             _logger?.KInformation($"[KlothoEngine][Replay] started: {replayData.Metadata.TotalTicks} ticks, {replayData.Metadata.DurationMs}ms");
+        }
+
+        /// <summary>
+        /// Reports what this replay was recorded against, so a divergence can be attributed rather than
+        /// merely observed. The layout inputs are printed, not applied — the component layout is frozen
+        /// process-wide long before a replay loads, so a mismatch here means "boot a process built this
+        /// way", not "this run will fix itself".
+        /// </summary>
+        private void LogReplayReproductionContext(IReplayMetadata meta)
+        {
+            if (_logger == null) return;
+
+            if (meta.InitialStateTick != 0)
+            {
+                _logger.KWarning(
+                    $"[KlothoEngine][Replay] InitialStateSnapshot was taken at tick={meta.InitialStateTick}, but playback " +
+                    $"starts its own clock at tick 0 while the restored frame carries the recorded tick. Command ticks and " +
+                    $"progress are relative to the recorded lineage, so seek/progress on this file read off by that offset. " +
+                    $"(Only SD clients that received their initial FullState mid-match produce this.)");
+            }
+
+            _logger.KInformation(
+                $"[KlothoEngine][Replay] recorded against: layout=0x{meta.LayoutFingerprint:X16} " +
+                $"colliders=0x{meta.StaticColliderFingerprint:X16} nav=0x{meta.NavFingerprint:X16} " +
+                $"game=0x{meta.GameFingerprint:X16} (0 = not provided); snapshotHash=0x{meta.InitialStateHash:X16} " +
+                $"tick={meta.InitialStateTick}; endReason={meta.EndReason}; " +
+                $"prunedTypes={meta.PrunedComponentTypeIds.Count} maxCountOverrides={meta.ComponentMaxCountTypeIds.Count} " +
+                $"(layout inputs are reported, NOT applied — the layout is already frozen)");
+
+            if (meta.EndReason == ReplayEndReason.Unspecified)
+            {
+                _logger.KWarning(
+                    $"[KlothoEngine][Replay] endReason is {ReplayEndReason.Unspecified} — whatever ended this recording " +
+                    $"did not stamp one. A short replay cannot be told apart from a truncated one here.");
+            }
         }
 
         /// <summary>
@@ -196,6 +309,37 @@ namespace xpTURN.Klotho.Core
         public void SaveReplayToFile(string filePath, bool dumpJson = false)
         {
             _replaySystem.SaveToFile(filePath, dumpJson);
+        }
+
+        /// <summary>
+        /// Slices the file's roster-parallel per-player record into the table
+        /// <see cref="GetPlayerEntitlement"/> falls back to when no network service can answer.
+        ///
+        /// <para>An empty record is normal — a match with no issuer really has none — so this simply leaves
+        /// the table empty rather than treating it as a fault. A length list that disagrees with the roster
+        /// never reaches here: the file layer refuses it as corruption.</para>
+        /// </summary>
+        private void LoadReplayEntitlements(IReplayMetadata meta)
+        {
+            _replayEntitlements = null;
+
+            var roster = meta.InitialRoster;
+            var lengths = meta.InitialEntitlementLengths;
+            if (roster == null || lengths == null || lengths.Count == 0) return;
+
+            var data = meta.InitialEntitlementData;
+            int offset = 0;
+            int count = System.Math.Min(lengths.Count, roster.Count);
+            for (int i = 0; i < count; i++)
+            {
+                int len = lengths[i];
+                if (len <= 0) continue;
+                if (data == null || offset + len > data.Length) break;
+                var bytes = new byte[len];
+                System.Buffer.BlockCopy(data, offset, bytes, 0, len);
+                SetReplayEntitlement(roster[i], bytes);
+                offset += len;
+            }
         }
 
         /// <summary>

@@ -11,7 +11,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// How long a snapshot-bound view outlives its entity (IMP103, view-despawn grace).
+    /// How long a snapshot-bound view outlives its entity.
     ///
     /// The EVU decided lifetime from the Verified frame while the view rendered the window the render
     /// clock points at, and that clock converges to <c>LastVerifiedTick - InterpolationDelayTicks</c>.
@@ -85,7 +85,7 @@ namespace xpTURN.Klotho.View.Tests
         public void TearDown()
         {
             // Cleanup first: OnDestroy only unsubscribes, so destroying the updater's GameObject leaves
-            // every view it created alive in the shared EditMode scene (IMP105 T-1).
+            // every view it created alive in the shared EditMode scene.
             if (_evu != null) _evu.Cleanup();
             if (_evuGo != null) Object.DestroyImmediate(_evuGo);
             if (_factory != null) Object.DestroyImmediate(_factory);
@@ -212,7 +212,7 @@ namespace xpTURN.Klotho.View.Tests
         }
 
         /// <summary>
-        /// T9 / F-11 — two in-flight spawns for one slot do not cancel each other.
+        /// Two in-flight spawns for one slot do not cancel each other.
         ///
         /// The overlap window is where this lives: while the Verified frame still carries v1 and the
         /// live frame already holds v2, one reconcile dispatches BOTH. The pre-fix completion guard was
@@ -459,7 +459,7 @@ namespace xpTURN.Klotho.View.Tests
             }
         }
 
-        // ── IMP105 C-2: the registry follows the view on screen, not the entity ──
+        // ── The registry follows the view on screen, not the entity ──
 
         /// <summary>
         /// Owner-bearing twin of <see cref="BuildHistory"/>. Additive on purpose: the shared builder is
@@ -495,7 +495,7 @@ namespace xpTURN.Klotho.View.Tests
         /// The grace used to unbind on entry, and nothing rebound on the way out: Register has exactly one
         /// call site (the end of SpawnViewAsync) and TrySpawn skips a view that is still alive. So the
         /// player stayed unmapped for the rest of the match — in Brawler that is the camera letting go of
-        /// the local character and never taking it back (IMP105 C-2).
+        /// the local character and never taking it back.
         /// </summary>
         [Test]
         public void ResurrectedView_StaysRegistered()

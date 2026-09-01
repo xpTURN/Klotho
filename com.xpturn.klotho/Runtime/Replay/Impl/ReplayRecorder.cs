@@ -13,7 +13,14 @@ namespace xpTURN.Klotho.Replay
     {
         private IKLogger _logger;
         private ReplayData _replayData;
-        private byte[] _pendingInitialSnapshot;   // snapshot set before StartRecording; flushed on start
+        // Snapshot + anchors set before StartRecording (SD client: the initial FullState can land during
+        // Countdown); flushed on start. The hash and tick travel WITH the bytes — keeping only the bytes
+        // here would drop both on exactly that path, and no P2P test would ever see it.
+        private byte[] _pendingInitialSnapshot;
+        private long _pendingInitialHash;
+        private int _pendingInitialTick;
+        private bool _hasPendingAnchors;
+        private long _pendingLayoutFp, _pendingColliderFp, _pendingNavFp, _pendingGameFp;
         private ReplayState _state = ReplayState.Idle;
         private int _currentTick;
         private readonly ICommandFactory _commandFactory;
@@ -49,8 +56,15 @@ namespace xpTURN.Klotho.Replay
             // may be applied during Countdown, ahead of StartRecording).
             if (_pendingInitialSnapshot != null)
             {
-                _replayData.SetInitialStateSnapshot(_pendingInitialSnapshot);
+                _replayData.SetInitialStateSnapshot(_pendingInitialSnapshot, _pendingInitialHash, _pendingInitialTick);
                 _pendingInitialSnapshot = null;
+                _pendingInitialHash = 0;
+                _pendingInitialTick = 0;
+            }
+            if (_hasPendingAnchors)
+            {
+                _replayData.SetReproductionAnchors(_pendingLayoutFp, _pendingColliderFp, _pendingNavFp, _pendingGameFp);
+                _hasPendingAnchors = false;
             }
 
             _currentTick = 0;
@@ -73,7 +87,7 @@ namespace xpTURN.Klotho.Replay
             _currentTick = tick;
         }
 
-        public IReplayData StopRecording(int totalTicks)
+        public IReplayData StopRecording(int totalTicks, ReplayEndReason reason = ReplayEndReason.Normal)
         {
             if (_state != ReplayState.Recording)
             {
@@ -81,12 +95,12 @@ namespace xpTURN.Klotho.Replay
                 return null;
             }
 
-            _replayData.FinalizeRecording(totalTicks);
+            _replayData.FinalizeRecording(totalTicks, reason);
             _state = ReplayState.Idle;
             
             var result = _replayData;
             
-            _logger?.KInformation($"[ReplayRecorder] Recording stopped - total ticks: {result.Metadata.TotalTicks}, duration: {result.Metadata.DurationMs}ms");
+            _logger?.KInformation($"[ReplayRecorder] Recording stopped - total ticks: {result.Metadata.TotalTicks}, duration: {result.Metadata.DurationMs}ms, endReason: {reason}");
             
             OnRecordingStopped?.Invoke(result);
             
@@ -112,18 +126,57 @@ namespace xpTURN.Klotho.Replay
         }
 
         /// <summary>
-        /// Sets the initial state snapshot on the recording replay.
-        /// Must be called after StartRecording for it to be persisted.
+        /// Sets the initial state snapshot, its hash and the tick it was taken at on the recording replay.
+        /// Arriving before StartRecording is retained rather than dropped.
         /// </summary>
-        public void SetInitialStateSnapshot(byte[] data)
+        public void SetInitialStateSnapshot(byte[] data, long hash, int tick)
         {
             if (_replayData == null)
             {
                 // Retain until StartRecording instead of dropping silently.
                 _pendingInitialSnapshot = data;
+                _pendingInitialHash = hash;
+                _pendingInitialTick = tick;
                 return;
             }
-            _replayData.SetInitialStateSnapshot(data);
+            _replayData.SetInitialStateSnapshot(data, hash, tick);
+        }
+
+        /// <summary>
+        /// Records the roster the tick-0 world was built from. No pending buffer: the engine calls this
+        /// after StartRecording (unlike the initial snapshot, which an SD client can deliver earlier), so a
+        /// null _replayData here means recording is off and there is nothing to record onto.
+        /// </summary>
+        public void SetInitialRoster(IReadOnlyList<int> roster)
+        {
+            _replayData?.SetInitialRoster(roster);
+        }
+
+        /// <summary>
+        /// Records the per-player verified data tick 0 was built from. Same no-pending rule as the roster:
+        /// the engine calls this after StartRecording, so a null _replayData means recording is off.
+        /// </summary>
+        public void SetInitialEntitlements(IReadOnlyList<byte[]> perRosterEntry)
+        {
+            _replayData?.SetInitialEntitlements(perRosterEntry);
+        }
+
+        /// <summary>
+        /// Sets the reproduction anchors on the recording replay. Same retain-until-start rule as the
+        /// snapshot, and for the same reason: the two are set together.
+        /// </summary>
+        public void SetReproductionAnchors(long layoutFingerprint, long staticColliderFingerprint, long navFingerprint, long gameFingerprint)
+        {
+            if (_replayData == null)
+            {
+                _hasPendingAnchors = true;
+                _pendingLayoutFp = layoutFingerprint;
+                _pendingColliderFp = staticColliderFingerprint;
+                _pendingNavFp = navFingerprint;
+                _pendingGameFp = gameFingerprint;
+                return;
+            }
+            _replayData.SetReproductionAnchors(layoutFingerprint, staticColliderFingerprint, navFingerprint, gameFingerprint);
         }
 
         /// <summary>

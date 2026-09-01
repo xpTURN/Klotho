@@ -8,7 +8,7 @@ namespace xpTURN.Klotho
     /// it covers the whole enum — nothing is lost by overwriting. The consequence is that a value
     /// serialized on a prefab is <b>discarded there</b>; it only takes effect on creation paths that
     /// bypass EVU (a view wired directly, see <c>EntityView</c>). Contrast <see cref="ViewFlags"/>: a
-    /// bitfield the Factory only partly decides, and therefore merges instead of replacing (IMP104 W-6).
+    /// bitfield the Factory only partly decides, and therefore merges instead of replacing.
     /// </summary>
     public enum BindBehaviour
     {

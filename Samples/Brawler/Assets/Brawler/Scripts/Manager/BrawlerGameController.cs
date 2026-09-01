@@ -176,7 +176,30 @@ namespace Brawler
         // only when SD lobby is enabled at runtime (see builder block); null otherwise.
         private SdLobbyIssueProvider _identityProvider;
 
-        private string _replayPath = Application.dataPath + "/../Replays/brawler.rply";
+        private string _replayPath = GetUserDataPath("Replays/brawler.rply");
+
+        /// <summary>
+        /// Resolves a user-data path (replays and the like) uniformly across platforms. The root differs
+        /// between the Editor and a build, so the path assembly is collected in this one place.
+        /// <para>Editor: the project root (the parent of Assets) — somewhere a Finder/Explorer window can
+        /// open directly. Builds (Windows/iOS/Android): Application.persistentDataPath — the install
+        /// folder is read-only or sandboxed, so this is the only location writing is guaranteed.</para>
+        /// <para>relativePath is relative to that root ('/' separators are fine). This only builds the
+        /// path string; it does not create directories — each writer (ReplaySystem, RollingFileSink)
+        /// creates its own on first write.</para>
+        /// </summary>
+        private static string GetUserDataPath(string relativePath)
+        {
+#if UNITY_EDITOR
+            string root = System.IO.Path.Combine(Application.dataPath, "..");
+#else
+            string root = Application.persistentDataPath;
+#endif
+            if (string.IsNullOrEmpty(relativePath))
+                return System.IO.Path.GetFullPath(root);
+
+            return System.IO.Path.GetFullPath(System.IO.Path.Combine(root, relativePath));
+        }
 
         private void CreateLogger()
         {
@@ -184,6 +207,7 @@ namespace Brawler
                 level: _logLevel,
                 filePrefix: "Client",
                 categoryName: "Client",
+                directory: GetUserDataPath("Logs"), // same user-data root as the replay, on every platform
                 timestampFormat: "HH:mm:ss.fff"); // date dropped (it's in the filename); hour kept
 
 #if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
@@ -531,10 +555,16 @@ namespace Brawler
             // setting up front rather than silently mutating the USimulationConfig ScriptableObject
             // (Editor play mode persists such mutations back to the .asset file, corrupting the
             // user's saved setting).
-            // P2P host authors the per-match dynamic config (botCount) into MatchConfigData so it propagates
-            // to the guest. MatchConfigData is runtime-only (not a serialized field), so this in-memory set
-            // does NOT persist to the .asset — unlike StageId (SerializeField), no clone is needed.
-            byte[] matchConfigData = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData { BotCount = _brawlerSettings._botCount });
+            // P2P host authors the per-match dynamic config (botCount, room capacity) into MatchConfigData so
+            // it propagates to the guest. MatchConfigData is runtime-only (not a serialized field), so this
+            // in-memory set does NOT persist to the .asset — unlike StageId (SerializeField), no clone is needed.
+            // MaxPlayers rides along because bot ids are numbered past it: it is a tick-0 state input, and a
+            // replay verifier rebuilding tick 0 has no SessionConfig to read it from.
+            byte[] matchConfigData = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData
+            {
+                BotCount = _brawlerSettings._botCount,
+                MaxPlayers = InitialMaxPlayersGuess(),
+            });
             ISimulationConfig simulationConfig;
             if (_simulationConfig != null)
             {
@@ -794,7 +824,13 @@ namespace Brawler
             // No propagated config (null) → fall back to the Inspector value (lobbyless/pure-client, no-regression).
             // Effective consumer is the authority (P2P host / SD server); SD guests get bots via FullState.
             byte[] matchCfg = simCfg?.MatchConfigData;
-            int botCount = matchCfg != null ? BrawlerMatchConfig.Decode(matchCfg).BotCount : _brawlerSettings._botCount;
+            var matchCfgData = BrawlerMatchConfig.Decode(matchCfg);
+            int botCount = matchCfg != null ? matchCfgData.BotCount : _brawlerSettings._botCount;
+            // Capacity from the authority's config when it stamped one. Bot ids are numbered past maxPlayers,
+            // so this is tick-0 state: taking it from the propagated config instead of the local SessionConfig
+            // is what makes every peer (and a verifier) build the same bots. 0 = not stamped -> local value.
+            if (matchCfgData.MaxPlayers > 0)
+                maxPlayers = matchCfgData.MaxPlayers;
             _simCallbacks = new BrawlerSimulationCallbacks(
                 _input, colliders, navMesh,
                 maxPlayers, botCount, stageId: _resolvedStageId);
@@ -1056,8 +1092,35 @@ namespace Brawler
             _logger?.KInformation(
                 $"[Brawler] Match ended: tick={tick}, winner={endEvt.WinnerPlayerId}, reason={endEvt.Reason}");
 
+            StampReplayClaim(tick, endEvt);
+
             // KlothoSession path: the scheduler runs inside Session.Update — game side no-op.
             // Spectator path: the same Session-internal scheduler also fires.
+        }
+
+        /// <summary>
+        /// Writes what THIS client says happened into the replay, while the recording is still open.
+        ///
+        /// <para>The auto-shutdown grace is that window: the match ends here, and Stop() — which finalizes
+        /// the recording and saves the file — runs seconds later. A verifier re-simulates the recorded
+        /// inputs to derive the authoritative result and compares it against this claim; with no claim
+        /// there is nothing to compare, since a re-simulation always agrees with itself. So a claimless
+        /// replay is UNVERIFIABLE, not verified.</para>
+        ///
+        /// <para>The replay surface lives on the concrete engine (IKlothoEngine deliberately keeps it out
+        /// of the canonical contract), hence the explicit reach. Every way this can come up empty — a
+        /// spectator, or a recording a desync recovery already truncated — correctly leaves the claim out
+        /// rather than writing a claim about a match this replay does not contain.</para>
+        /// </summary>
+        private void StampReplayClaim(int tick, IMatchEndEvent endEvt)
+        {
+            var replay = (_session?.Engine as KlothoEngine)?.ReplaySystem;
+            if (replay == null || !replay.IsRecording) return;
+
+            replay.SetGameCustomData(
+                BrawlerReplayClaim.Encode(endEvt.WinnerPlayerId, tick, endEvt.Reason));
+            _logger?.KInformation(
+                $"[Brawler] Replay claim stamped: winner={endEvt.WinnerPlayerId}, endTick={tick}, reason={endEvt.Reason}");
         }
 
         public void OnMatchReset(ResetReason reason)

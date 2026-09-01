@@ -71,9 +71,9 @@ namespace xpTURN.Klotho.Core
             // No error-correction pair here: a spectator has no LocalPlayerId, so every view is assigned
             // the snapshot interpolation path, and that path deliberately skips the rollback delta —
             // verified-frame interpolation already renders the authoritative state. Deltas computed here
-            // would have no consumer (IMP103 V-4), which is why CapturePreRollbackTransforms now skips
-            // spectators outright rather than leaving the resync path to park deltas nobody drains
-            // (IMP105 C-6). The per-frame clear runs in Update, ahead of this method's own early return.
+            // would have no consumer, which is why CapturePreRollbackTransforms now skips
+            // spectators outright rather than leaving the resync path to park deltas nobody drains.
+            // The per-frame clear runs in Update, ahead of this method's own early return.
             bool batchArrived = _spectatorLastConfirmedTick > _prevSpectatorLastConfirmedTick;
             if (batchArrived)
             {

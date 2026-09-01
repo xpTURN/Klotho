@@ -20,7 +20,7 @@ namespace xpTURN.Klotho.Godot
 
         // Keyed by EntityRef.ToId() — (Index, Version) packed — so a dying view and the new occupant
         // of the same entity slot coexist. That is what makes the despawn grace in DestroyStale
-        // possible; see the Unity EntityViewUpdater for the full reasoning (IMP103).
+        // possible; see the Unity EntityViewUpdater for the full reasoning.
         private readonly Dictionary<long, EntityViewNode> _viewsByEntity = new();
         private readonly Dictionary<int, int>             _presentEntityVersions = new();
         // Verified tick at which a snapshot-bound view was first found absent. No key = not dying.
@@ -81,7 +81,7 @@ namespace xpTURN.Klotho.Godot
             foreach (var kvp in _viewsByEntity)
             {
                 // A view inside its despawn grace gets no tick callback — its entity is already gone
-                // from the Verified frame. Interpolation keeps running in ProcessViews (IMP103 D-4).
+                // from the Verified frame. Interpolation keeps running in ProcessViews.
                 if (_despawnVerifiedTick.ContainsKey(kvp.Key)) continue;
                 if (IsGone(kvp.Value)) continue;   // reclaimed by the scan in the next Reconcile
                 kvp.Value.InternalUpdateView();
@@ -170,7 +170,7 @@ namespace xpTURN.Klotho.Godot
 
             // Factory refused the spawn. Silence here means the entity stays collectable and the next
             // Reconcile asks again — forever, with no line to say why it has no visual. Latched: the
-            // state that produces it does not change tick to tick (IMP105 C-19).
+            // state that produces it does not change tick to tick.
             if (view == null)
             {
                 if (!_warnedFactoryRefusedSpawn)
@@ -220,7 +220,7 @@ namespace xpTURN.Klotho.Godot
         // freeing one by hand. A freed Node's C# wrapper is NOT null, so `== null` answers the wrong
         // question here; IsInstanceValid answers the right one. Note a QueueFree'd node is still valid
         // and still safe to call into, which is why IsQueuedForDeletion has no business in this test.
-        // Unity's copy calls the same predicate IsGone and asks `view == null` (IMP105 C-16).
+        // Unity's copy calls the same predicate IsGone and asks `view == null`.
         private static bool IsGone(EntityViewNode view) => !GodotObject.IsInstanceValid(view);
 
         // Latched: the state lasts as long as the entry, so an unlatched warning would be one per frame.
@@ -242,7 +242,7 @@ namespace xpTURN.Klotho.Godot
         // grace on the snapshot path. A CSP view draws the Predicted frame so its lifetime criterion
         // and its render position are the same tick; a snapshot view draws the window the render clock
         // points at, which converges to LastVerifiedTick - InterpolationDelayTicks, so it has to
-        // outlive its entity's disappearance from the Verified frame by that much (IMP103).
+        // outlive its entity's disappearance from the Verified frame by that much.
         //
         // The Version comparison below is new here — this adapter used to test presence by Index
         // alone, which meant a reused slot never produced a stale verdict and the whole burden sat on
@@ -258,7 +258,7 @@ namespace xpTURN.Klotho.Godot
                 var view = kvp.Value;
 
                 // Freed from outside: stale by definition, and marking it here is what keeps the other
-                // loops' exposure down to a single tick instead of forever (IMP105 C-16).
+                // loops' exposure down to a single tick instead of forever.
                 if (IsGone(view)) { _staleKeys.Add(kvp.Key); continue; }
 
                 if (view.BindBehaviour == BindBehaviour.Verified)
@@ -277,8 +277,8 @@ namespace xpTURN.Klotho.Godot
                         // No unbind here (there used to be one). The registry maps a player to the view on
                         // screen, and a view inside its grace is still on screen. Unbinding at grace entry
                         // left a resurrected view unmapped for the rest of the match, because Register has
-                        // exactly one call site (end of TrySpawn) which a still-alive view never reaches
-                        // (IMP105 C-2). Waiting is safe: Unregister is instance-guarded, so a respawn that
+                        // exactly one call site (end of TrySpawn) which a still-alive view never reaches.
+                        // Waiting is safe: Unregister is instance-guarded, so a respawn that
                         // claims the slot first wins over this view's unbind at the stale destroy below.
                     }
 
@@ -299,7 +299,7 @@ namespace xpTURN.Klotho.Godot
                 var view = _viewsByEntity[key];
 
                 // The bookkeeping still runs — TryUnregisterPlayerView reads the cached owner, a
-                // managed field, so a freed view can and must still be unbound (IMP105 C-16).
+                // managed field, so a freed view can and must still be unbound.
                 if (IsGone(view))
                 {
                     WarnExternallyDestroyedViewOnce();

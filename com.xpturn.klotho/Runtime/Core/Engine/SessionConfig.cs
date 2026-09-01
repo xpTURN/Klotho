@@ -71,5 +71,47 @@ namespace xpTURN.Klotho.Core
 
         /// <inheritdoc />
         public int ClientShutdownGraceMs { get; set; } = 4500;
+
+        /// <summary>
+        /// A copy of this config, for a caller that needs its own instance — a room that must not share
+        /// state with its neighbours, an entry point that adjusts a value without writing to the caller's
+        /// object. Mirrors <c>SimulationConfig.Clone</c>, and is memberwise so a field added later is
+        /// copied without anyone remembering to add it here.
+        ///
+        /// <para>Distinct from <see cref="CopyOf"/>, which converts ANY <see cref="ISessionConfig"/>
+        /// (a Unity ScriptableObject, say) into a mutable SessionConfig and therefore has to name every
+        /// field. Prefer this one when the source is already a SessionConfig.</para>
+        /// </summary>
+        public SessionConfig Clone() => (SessionConfig)MemberwiseClone();
+
+        /// <summary>
+        /// A field-for-field copy of any <see cref="ISessionConfig"/>, as a mutable SessionConfig.
+        ///
+        /// <para>Exists so an entry point can adjust a config without writing to the caller's object.
+        /// That matters more than it sounds: the Unity inspector config is a ScriptableObject, and a
+        /// value written into one during play mode outlives play mode — a single-player entry that
+        /// forced MinPlayers = 1 in place would leave the shared config at 1 for the next multiplayer
+        /// match. SimulationConfig has Clone for the same reason; this is that gap closed.</para>
+        /// </summary>
+        internal static SessionConfig CopyOf(ISessionConfig src) => new SessionConfig
+        {
+            RandomSeed = src.RandomSeed,
+            MaxPlayers = src.MaxPlayers,
+            MinPlayers = src.MinPlayers,
+            MaxSpectators = src.MaxSpectators,
+            AllowLateJoin = src.AllowLateJoin,
+            LateJoinDelayTicks = src.LateJoinDelayTicks,
+            ReconnectTimeoutMs = src.ReconnectTimeoutMs,
+            ValidationTimeoutMs = src.ValidationTimeoutMs,
+            ReconnectMaxRetries = src.ReconnectMaxRetries,
+            LateJoinDelaySafety = src.LateJoinDelaySafety,
+            RttSanityMaxMs = src.RttSanityMaxMs,
+            MinStallAbortTicks = src.MinStallAbortTicks,
+            CountdownDurationMs = src.CountdownDurationMs,
+            AbortGraceMs = src.AbortGraceMs,
+            EndGracePolicy = src.EndGracePolicy,
+            EndGraceMs = src.EndGraceMs,
+            ClientShutdownGraceMs = src.ClientShutdownGraceMs,
+        };
     }
 }

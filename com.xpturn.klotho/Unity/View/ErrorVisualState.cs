@@ -29,7 +29,7 @@ namespace xpTURN.Klotho
     /// that hides the rollback jump: the view renders (corrected position + smoothed), so it only stays
     /// where the player last saw it while smoothed tracks the accumulated delta closely. Lowering the
     /// rate makes the offset shallower on arrival and exposes more of the jump — at 20 a 0.3m correction
-    /// would show 0.23m of it immediately (IMP103 D-5).
+    /// would show 0.23m of it immediately.
     /// </summary>
     [Serializable]
     public struct ErrorVisualState
@@ -191,8 +191,8 @@ namespace xpTURN.Klotho
             // used to sit beside it, asking whether the entity carried ErrorCorrectionTargetComponent — but
             // it was gated on having received a delta at least once, and deltas are only produced for
             // entities that carry it, so the gate was already the answer. The reachable question ("nobody
-            // wired it anywhere") is the engine's, and CapturePreRollbackTransforms detects it directly
-            // (IMP103). Steady input predicting perfectly is what the warning actually fired on.
+            // wired it anywhere") is the engine's, and CapturePreRollbackTransforms detects it directly.
+            // Steady input predicting perfectly is what the warning actually fired on.
             if (rollbackDelta.sqrMagnitude > 0f || rollbackYawDelta != 0f)
             {
                 float deltaMag = rollbackDelta.magnitude;

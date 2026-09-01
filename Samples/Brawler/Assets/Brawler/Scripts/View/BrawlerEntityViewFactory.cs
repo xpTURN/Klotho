@@ -38,7 +38,7 @@ namespace Brawler
         // the render decision flip the moment the last one is adopted, and EVU reads that decision every
         // tick: the entity drops out of CollectPresent, DestroyStale sees it missing and destroys the live
         // view, Destroy hands it back, the count goes up, and the next tick spawns it again — a
-        // spawn/destroy oscillation that is worse than the silent retry it was meant to fix (IMP105 C-11).
+        // spawn/destroy oscillation that is worse than the silent retry it was meant to fix.
         private bool _hasPlacedPlatforms;
 
         // One warning per session for "a platform entity wanted a view and there was none left".
@@ -100,7 +100,7 @@ namespace Brawler
                 // permanent loop: CreateAsync finds no instance to adopt, falls through to the base path,
                 // ResolvePrefab has no platform branch and returns null, EVU discards the spawn and
                 // re-dispatches on the very next tick — forever, and without a single log line to say why
-                // the platform is invisible (IMP105 C-11). The answer is stable for the whole session, so
+                // the platform is invisible. The answer is stable for the whole session, so
                 // it cannot oscillate the way a remaining-count gate would.
                 if (!_hasPlacedPlatforms)
                 {
@@ -136,7 +136,7 @@ namespace Brawler
                     // entity is — and a view that never runs the position line (DisableUpdate /
                     // DisablePositionUpdate) would stay there forever. Platforms here do run it, so this
                     // only closes the gap before the first ApplyTransform, but the asymmetry is the
-                    // defect: every other spawn path already places the view (IMP105 C-13).
+                    // defect: every other spawn path already places the view.
                     if (TryGetSpawnPose(frame, entity, out Vector3 spawnPos, out Quaternion spawnRot))
                         placed.transform.SetPositionAndRotation(spawnPos, spawnRot);
                     placed.gameObject.SetActive(true);

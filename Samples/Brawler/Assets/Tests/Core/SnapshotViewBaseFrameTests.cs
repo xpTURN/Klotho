@@ -11,7 +11,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// What a snapshot-interpolated view is allowed to read (IMP103 D-2).
+    /// What a snapshot-interpolated view is allowed to read.
     ///
     /// The view head used to gate BOTH render paths on the live Predicted frame. For the CSP path that is
     /// right — its whole basis is this frame. For the snapshot path it is not: that path renders the
@@ -129,7 +129,7 @@ namespace xpTURN.Klotho.View.Tests
         /// warmup-source change: it puts the newest Verified frame right at the window's far endpoint, so
         /// "the window has no data" and "the newest Verified frame has no data" coincide. Decoupling them
         /// is the whole point of the spawn-gap case — the window sits `delay` ticks behind the newest
-        /// frame, so the newest frame can hold an entity the window has never seen (IMP103).
+        /// frame, so the newest frame can hold an entity the window has never seen.
         ///
         /// The parameter is additive on purpose: the five tests written before it must keep asserting
         /// exactly what they asserted, or they stop being guards.
@@ -208,7 +208,7 @@ namespace xpTURN.Klotho.View.Tests
         private static FPVector3 ToFp(Vector3 v)
             => new FPVector3(FP64.FromFloat(v.x), FP64.FromFloat(v.y), FP64.FromFloat(v.z));
 
-        // ── The D-2 case ──
+        // ── What the snapshot path may read ──
 
         /// <summary>
         /// The defect. Prediction destroyed the entity; the verified window still holds it on both
@@ -327,7 +327,7 @@ namespace xpTURN.Klotho.View.Tests
         /// The reason demoting the predicted check is not the same as dropping it. The handle is stale and
         /// its slot now belongs to a different entity; `Frame.Has` forwards Index alone, so a fallback
         /// that skipped `Entities.IsAlive` would happily hand this view the NEW occupant's live position —
-        /// the "stale view reads the new one" direction of IMP103 V-6.
+        /// the "stale view reads the new one" direction of a version-blind lookup.
         /// </summary>
         [Test]
         public void StaleSnapshotViewOnRecycledSlot_DoesNotFallBackOntoTheNewOccupant()
@@ -364,11 +364,11 @@ namespace xpTURN.Klotho.View.Tests
         /// The spawn gap. The entity was born at a Verified tick the render window has not reached yet, so
         /// the window holds nothing for it. Rendering the live Predicted pose here — what the code
         /// originally did — put the view lead+delay ticks ahead of its own timeline and then snapped it
-        /// backward the moment the window arrived (IMP103, view-lifetime window).
+        /// backward the moment the window arrived.
         ///
         /// This fixture has exactly one Verified frame carrying the entity, so the birth pose and the
         /// newest Verified pose coincide — which is why this test survived the source changing under it
-        /// twice (newest-verified fallback, then the D-2(f) shadow scan) without its assertions moving.
+        /// twice (newest-verified fallback, then the shadow scan) without its assertions moving.
         /// The name used to say "UsesTheNewestVerifiedPose"; the mechanism is the scan now, and the
         /// tests that distinguish the two need an entity that MOVES after birth (below).
         /// </summary>
@@ -394,10 +394,10 @@ namespace xpTURN.Klotho.View.Tests
             finally { Object.DestroyImmediate(go); }
         }
 
-        // ── The warmup shadow scan (IMP103 D-2(f)) ──
+        // ── The warmup shadow scan ──
 
         /// <summary>
-        /// The residual jump D-2(f) exists for. The newest-verified fallback ADVANCED with pose(L) during
+        /// The residual jump the shadow scan exists for. The newest-verified fallback ADVANCED with pose(L) during
         /// warmup, then snapped back by max(0, delay - 2) ticks of motion when the window reached the
         /// birth. The scan holds the birth pose instead — the pose the window will show first — so there
         /// is nothing to snap back from. RED on the pre-scan code: this renders MovedPose(3), the newest.
@@ -424,8 +424,7 @@ namespace xpTURN.Klotho.View.Tests
         /// <summary>
         /// The root follows the held pose too. Uninterpolated*'s contract is the render window's alpha=0
         /// endpoint — it follows the RENDER, sitting delay ticks stale in steady state — so during warmup
-        /// it takes the same held pose, not the newest Verified one. The first draft of this plan asserted
-        /// the opposite and the occupied path's own code refuted it (D-2(f) F-4).
+        /// it takes the same held pose, not the newest Verified one.
         /// </summary>
         [Test]
         public void WarmupBeforeBirth_UninterpolatedFollowsTheHeldPose()
@@ -511,7 +510,7 @@ namespace xpTURN.Klotho.View.Tests
         /// <summary>
         /// The L cap, exercised where it matters: after a backward LastVerifiedTick move the frames at
         /// L+1 .. B+1 still exist in the ring, still carry the entity, and are exactly the predicted,
-        /// rollback-mutable snapshots IMP103 #13 taught this function to refuse. A scan without the cap
+        /// rollback-mutable snapshots this function refuses. A scan without the cap
         /// would hand one of them back. The scan range B+2..L is empty here, so the newest-verified
         /// fallback — whose only remaining firing case this is — serves pose(L).
         /// </summary>
@@ -534,7 +533,7 @@ namespace xpTURN.Klotho.View.Tests
             finally { Object.DestroyImmediate(go); }
         }
 
-        // ── The verified boundary (IMP103 #13) ──
+        // ── The verified boundary ──
 
         /// <summary>
         /// Session start, <c>LastVerifiedTick == 0</c>. Only one Verified frame exists, so the far endpoint

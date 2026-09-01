@@ -11,21 +11,22 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// The two defects left on the CSP lerp's two endpoints (IMP103 V-7 · V-8). Both are silent: the
+    /// The two defects left on the CSP lerp's two endpoints. Both are silent: the
     /// motion is smooth and the frames exist, so nothing about the picture says it is wrong.
     ///
-    ///   V-7 — teleports were only recognised through <c>HasEntityTeleported</c>, whose set is filled by
-    ///         ComputeErrorDeltas alone. That runs only when error correction is on AND a rollback
-    ///         happened in the same frame, and even then it answers "re-simulation introduced a teleport",
-    ///         not "the game teleported this tick". So an ordinary respawn was lerped across — for the
-    ///         whole tick interval, in every configuration, EnableErrorCorrection or not.
+    ///   Teleport detection — teleports were only recognised through <c>HasEntityTeleported</c>, whose
+    ///         set is filled by ComputeErrorDeltas alone. That runs only when error correction is on AND
+    ///         a rollback happened in the same frame, and even then it answers "re-simulation introduced
+    ///         a teleport", not "the game teleported this tick". So an ordinary respawn was lerped
+    ///         across — for the whole tick interval, in every configuration, EnableErrorCorrection or not.
     ///
-    ///   V-8 — the prev endpoint was read with <c>Has</c> alone. Index-only, so a slot recycled inside one
+    ///   The prev endpoint — it was read with <c>Has</c> alone. Index-only, so a slot recycled inside one
     ///         tick answers about the previous occupant, and the new view lerps out of a stranger's
-    ///         position. V-6 fixed the live frame and the two verified frames; this endpoint was missed.
+    ///         position. The version check had already reached the live frame and the two verified
+    ///         frames; this endpoint was missed.
     ///
-    /// The V-8 fixture deliberately leaves TeleportTick equal on both occupants, so the V-7 guard cannot
-    /// mask it by snapping.
+    /// The recycled-slot fixture deliberately leaves TeleportTick equal on both occupants, so the
+    /// teleport guard cannot mask it by snapping.
     /// </summary>
     [TestFixture]
     public class CspPathTeleportAndPrevGuardTests
@@ -57,7 +58,7 @@ namespace xpTURN.Klotho.View.Tests
                     TickIntervalMs = TickIntervalMs,
                     MaxRollbackTicks = 8,
                     MaxEntities = MaxEntities,
-                    // Left at its default (false) on purpose: V-7 must hold for games that never enable it.
+                    // Left at its default (false) on purpose: the guard must hold for games that never enable it.
                     EnableErrorCorrection = false,
                 },
                 new SessionConfig());
@@ -89,7 +90,7 @@ namespace xpTURN.Klotho.View.Tests
             return go;
         }
 
-        // ── V-7: an ordinary teleport must not be lerped, with error correction off ──
+        // ── An ordinary teleport must not be lerped, with error correction off ───────
 
         private static readonly Vector3 BeforeTeleport = new Vector3(-40f, 0f, 0f);
         private static readonly Vector3 AfterTeleport  = new Vector3(40f, 0f, 0f);
@@ -116,7 +117,7 @@ namespace xpTURN.Klotho.View.Tests
         }
 
         /// <summary>
-        /// The V-7 case. Error correction is off, so the old flag could never fire; the view must still
+        /// Error correction is off, so the old flag could never fire; the view must still
         /// refuse to walk between the two poses. Pre-fix this lerps and lands 40 units away from both.
         /// </summary>
         [Test]
@@ -200,7 +201,7 @@ namespace xpTURN.Klotho.View.Tests
         /// — so before the guard every entity that had never teleported took the teleport branch on the
         /// session's first rendered tick, and kept taking it for as long as the tick cursor sat there
         /// (a stall right after tick 0 widens that window). Pre-fix this snaps to the live pose instead of
-        /// the midpoint (IMP105 C-1).
+        /// the midpoint.
         /// </summary>
         [Test]
         public void CspUnstampedEntity_AtTickOne_StillInterpolates()
@@ -226,7 +227,7 @@ namespace xpTURN.Klotho.View.Tests
             finally { Object.DestroyImmediate(go); }
         }
 
-        // ── V-8: the prev endpoint must reject a stranger in a recycled slot ──
+        // ── The prev endpoint must reject a stranger in a recycled slot ───────
 
         private static readonly Vector3 OldOccupantPos = new Vector3(-50f, 0f, -50f);
         private static readonly Vector3 NewOccupantPos = new Vector3(50f, 0f, 50f);
@@ -237,7 +238,7 @@ namespace xpTURN.Klotho.View.Tests
         /// snapshot for tick 1 was taken on entry, so it still holds the old occupant — alive, with a
         /// transform — under the index the new entity now owns.
         ///
-        /// Both occupants keep TeleportTick 0 so the V-7 guard sees no discontinuity and cannot mask this.
+        /// Both occupants keep TeleportTick 0 so the teleport guard sees no discontinuity and cannot mask this.
         /// </summary>
         private EntityRef BuildSameTickRecycleHistory()
         {
@@ -260,7 +261,7 @@ namespace xpTURN.Klotho.View.Tests
         }
 
         /// <summary>
-        /// The V-8 case. Pre-fix, `prev.Has` answers about the old occupant and the new view lerps out of
+        /// Pre-fix, `prev.Has` answers about the old occupant and the new view lerps out of
         /// its position — a full tick of travel across the map.
         /// </summary>
         [Test]

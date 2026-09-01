@@ -11,11 +11,11 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Benchmarks
 {
     /// <summary>
-    /// What the per-tick view reconcile costs, and specifically what R-10's prefilter buys (IMP103 #7).
+    /// What the per-tick view reconcile costs, and specifically what the prefilter buys.
     ///
     /// The despawn-grace fix replaced a dictionary lookup in `DestroyStale`'s per-view loop with
     /// `_factory.TryGetBindBehaviour` — a virtual call plus a component lookup — and that loop runs over
-    /// every view every tick. R-10's answer was a prefilter: `_presentEntityVersions[index]` matching the
+    /// every view every tick. The answer was a prefilter: `_presentEntityVersions[index]` matching the
     /// view's Version means the entity was collected this tick, which is sound in the positive direction
     /// only, so a hit ends the question and a miss falls through to the real query.
     ///
@@ -100,7 +100,7 @@ namespace xpTURN.Klotho.View.Benchmarks
         public void TearDown()
         {
             // Cleanup first: OnDestroy only unsubscribes, so destroying the updater's GameObject leaves
-            // every view it created alive in the shared EditMode scene (IMP105 T-1).
+            // every view it created alive in the shared EditMode scene.
             if (_evu != null) _evu.Cleanup();
             if (_evuGo != null) Object.DestroyImmediate(_evuGo);
             if (_factory != null) Object.DestroyImmediate(_factory);

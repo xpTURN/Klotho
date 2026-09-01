@@ -5,6 +5,7 @@ using xpTURN.Klotho.Logging;              // KLoggerFactory, KLogLevel, IKLogger
 using xpTURN.Klotho.Network;              // DeliveryMethod
 using xpTURN.Klotho.LiteNetLib;           // LiteNetLibTransport
 using xpTURN.Klotho.Samples.Identity;     // BcEd25519Backend, LobbyTicket
+using xpTURN.Klotho.ECS;                  // FixedString64 (match-config identity budget)
 using xpTURN.Klotho.Samples.Identity.Sd;  // DevLobbyCore, SdDevIdentity, LobbyWire, RedeemResult
 using Brawler;                            // BrawlerMatchConfig / BrawlerMatchConfigData (MatchConfigData codec)
 using xpTURN.Samples.DevLobby;            // DevMatchStagePolicy (+ DevFailingMatchResultSink under DEBUG)
@@ -75,15 +76,34 @@ var coordinator = new DevLobbyReserveCoordinator(
 
 // Dev stage policy. The stage selection itself lives in DevMatchStagePolicy — pure, and therefore unit-tested;
 // only the Brawler-coupled payload assembly stays here.
-static (int stageId, byte[] payload) MatchStagePolicy(string matchId, int roomId)
+static (int stageId, byte[] payload) MatchStagePolicy(DevLobbyReserveCoordinator.MatchConfigRequest req)
 {
-    int stage = DevMatchStagePolicy.StageFor(matchId);
+    // The stage comes from the RENDEZVOUS matchId, never the instance id — the instance id ends in a hex
+    // token digit and would flip the stage for half of all matches (see MatchConfigRequest).
+    int stage = DevMatchStagePolicy.StageFor(req.MatchId);
     // Dev policy: botCount = stage (a stage-2 match gets 2 bots), so the lobby exercises the MatchConfigData
     // channel too, not just stageId. MatchConfigData is produced via Brawler's own codec (BrawlerMatchConfig
     // .Encode) — the dedi/client read it with the same codec, so there is no hand-rolled wire layout to keep
     // in sync. (This couples the dev lobby to the Brawler sample's config type; see the csproj Compile note.)
     int botCount = stage;
-    byte[] payload = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData { BotCount = botCount });
+
+    // The two inputs a replay verifier cannot obtain on its own. The capacity is tick-0 state (bot ids are
+    // numbered past it) and the instance id is the only key that joins an uploaded replay to this match.
+    // Both ride the payload because that is what reaches every peer and lands in every peer's replay file.
+    //
+    // An id that does not fit is REFUSED, not truncated: FixedString64 cuts silently at 62 bytes, and two
+    // ids cut to the same value would merge two different matches in the verification record.
+    var instanceId = FixedString64.FromString(req.InstanceId ?? string.Empty);
+    if (instanceId.ToString() != (req.InstanceId ?? string.Empty))
+        throw new InvalidOperationException(
+            $"Match instance id does not fit the match config ({req.InstanceId}) — 62 UTF-8 bytes is the budget.");
+
+    byte[] payload = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData
+    {
+        BotCount = botCount,
+        MaxPlayers = req.Capacity,
+        MatchInstanceId = instanceId,
+    });
     return (stage, payload);
 }
 

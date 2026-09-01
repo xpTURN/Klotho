@@ -995,10 +995,18 @@ namespace xpTURN.Klotho.Network
             long startTime = _sharedClock.SharedNow + _sessionConfig.CountdownDurationMs;
             _gameStartTime = startTime;
 
+            // SessionConfig.RandomSeed is the AUTHORED request, not an effective value: 0 means
+            // "pick one", anything else is honoured. The substitution lives here rather than at
+            // session build time so the field never turns into the last match's seed — otherwise a
+            // second CreateRoom on this service would read it back and replay the first seed.
+            int effectiveSeed = _sessionConfig.RandomSeed != 0
+                ? _sessionConfig.RandomSeed
+                : Environment.TickCount;
+
             var msg = new GameStartMessage
             {
                 StartTime = startTime,
-                RandomSeed = Environment.TickCount,
+                RandomSeed = effectiveSeed,
                 MaxPlayers = _players.Count,
                 MinPlayers = _sessionConfig.MinPlayers,
                 MaxSpectators = _sessionConfig.MaxSpectators,
@@ -1592,10 +1600,16 @@ namespace xpTURN.Klotho.Network
             // Apply server-authoritative SessionConfig fields in place. Engine and NetworkService
             // share the same SessionConfig reference, so mutating the instance propagates to both
             // readers automatically. Match-start one-shot; SessionConfig stays immutable afterward.
-            // Host self-dispatch: msg values originate from _sessionConfig, so this is effectively a no-op.
+            // These are EFFECTIVE values, not the authored ones. Two consequences worth knowing:
+            //   • RandomSeed is deliberately absent. The config field is the authored request and
+            //     must stay that way — StartGame reads it, so writing the effective seed back would
+            //     make the next match on this service repeat this one's seed. Effective seed lives
+            //     on this service's RandomSeed property and on Engine.RandomSeed.
+            //   • MaxPlayers narrows to the confirmed roster (msg carries _players.Count, not the
+            //     authored cap), and OnInitializeWorld spawns that many tick-0 entities — so this
+            //     write feeds the state hash. It is NOT a no-op on the host either.
             if (_sessionConfig is SessionConfig cfg)
             {
-                cfg.RandomSeed = msg.RandomSeed;
                 cfg.MaxPlayers = msg.MaxPlayers;
                 cfg.MinPlayers = msg.MinPlayers;
                 cfg.MaxSpectators = msg.MaxSpectators;

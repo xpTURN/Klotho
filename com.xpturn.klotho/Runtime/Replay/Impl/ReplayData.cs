@@ -12,7 +12,10 @@ namespace xpTURN.Klotho.Replay
     [Serializable]
     public class ReplayMetadata : IReplayMetadata
     {
-        public const int CURRENT_VERSION = 1;
+        // Bumped to 5 for the tick-0 entitlements. Every change to the metadata layout bumps this. There is no version branch in the codec, so a
+        // number reused across two layouts cannot be told apart and the older file is misparsed rather than
+        // refused — which is why 2 is skipped: it was issued by an earlier build and files carrying it exist.
+        public const int CURRENT_VERSION = 5;
 
         public int Version { get; set; } = CURRENT_VERSION;
         public string SessionId { get; set; }
@@ -51,6 +54,70 @@ namespace xpTURN.Klotho.Replay
 
         public byte[] InitialStateSnapshot { get; set; }
 
+        /// <summary>Hash of <see cref="InitialStateSnapshot"/>, as produced with the bytes.</summary>
+        public long InitialStateHash { get; set; }
+
+        /// <summary>Tick the snapshot was taken at. 0 for a tick-0 bootstrap; an SD client that received
+        /// its initial FullState mid-match records that tick here.</summary>
+        public int InitialStateTick { get; set; }
+
+        // --- Reproduction anchors (recorded when the snapshot is set, so they describe the same instant) ---
+
+        public long LayoutFingerprint { get; set; }
+        public long StaticColliderFingerprint { get; set; }
+        public long NavFingerprint { get; set; }
+        public long GameFingerprint { get; set; }
+
+        // --- Completion marker ---
+
+        public ReplayEndReason EndReason { get; set; } = ReplayEndReason.Unspecified;
+
+        /// <summary>
+        /// The roster the tick-0 world was BUILT from, in creation order — not the match's current
+        /// participants. Late joiners must never be appended: the participant entities are created by
+        /// walking this list, so its order is state-hash input and only the order used at tick 0 reproduces
+        /// that world.
+        ///
+        /// <para>Empty means "this recording did not build tick 0" — an SD client receives its initial state
+        /// as a server FullState and has no evidence of the order the server built with. So a non-empty
+        /// roster is exactly the signal "this replay can be reconstructed", with no separate flag.</para>
+        /// </summary>
+        public List<int> InitialRoster { get; set; } = new List<int>();
+
+        /// <summary>
+        /// Per-player verified data the game read while BUILDING tick 0 — the entitlement bytes, laid out
+        /// index-parallel to <see cref="InitialRoster"/> as concatenated bytes plus per-entry lengths (the
+        /// same shape the roster-propagation messages use).
+        ///
+        /// <para><b>Why the file has to carry it.</b> A game may seed tick-0 state from data only the
+        /// authority verified — a loadout from an entitlement, say. The engine reads that through the
+        /// network service, and a replay session has none, so on playback it decodes as "nothing was
+        /// issued" and the rebuilt world silently differs. Entity and component COUNTS match; only values
+        /// move, so the failure looks like a determinism bug rather than a missing input.</para>
+        ///
+        /// <para><b>Empty is a valid record</b>, not a missing one: a match with no issuer really has no
+        /// entitlements. The format version, not this field, is what tells an old file from a new one.</para>
+        /// </summary>
+        public byte[] InitialEntitlementData { get; set; }
+
+        /// <summary>Per-entry byte counts for <see cref="InitialEntitlementData"/>, index-parallel to
+        /// <see cref="InitialRoster"/>. A count that disagrees with the roster is a corrupted file — the
+        /// slices would hand each player someone else's data.</summary>
+        public List<int> InitialEntitlementLengths { get; set; } = new List<int>();
+
+        // --- Layout-determining config: RECORDED ONLY, never restored (see ToSimulationConfig) ---
+
+        public List<int> PrunedComponentTypeIds { get; set; } = new List<int>();
+        public List<int> ComponentMaxCountTypeIds { get; set; } = new List<int>();
+        public List<int> ComponentMaxCountValues { get; set; } = new List<int>();
+
+        IReadOnlyList<int> IReplayMetadata.InitialRoster => InitialRoster;
+        byte[] IReplayMetadata.InitialEntitlementData => InitialEntitlementData;
+        IReadOnlyList<int> IReplayMetadata.InitialEntitlementLengths => InitialEntitlementLengths;
+        IReadOnlyList<int> IReplayMetadata.PrunedComponentTypeIds => PrunedComponentTypeIds;
+        IReadOnlyList<int> IReplayMetadata.ComponentMaxCountTypeIds => ComponentMaxCountTypeIds;
+        IReadOnlyList<int> IReplayMetadata.ComponentMaxCountValues => ComponentMaxCountValues;
+
         public ReplayMetadata()
         {
             SessionId = Guid.NewGuid().ToString("N");
@@ -77,6 +144,30 @@ namespace xpTURN.Klotho.Replay
             TickDriftWarnMultiplier = config.TickDriftWarnMultiplier;
             StageId = config.StageId;
             MatchConfigData = config.MatchConfigData;
+
+            // Layout-determining inputs. Recorded so a verifier can be BOOTED with them; deliberately
+            // not restored on playback (ToSimulationConfig) — the layout is frozen process-wide long
+            // before a replay loads, so assigning them there would only look like a restore.
+            // Sorted by typeId, unlike the wire codec: the wire's receiver rebuilds a dict so order is
+            // irrelevant there, but this file is read for comparison and diffing.
+            PrunedComponentTypeIds.Clear();
+            if (config.PrunedComponentTypeIds != null)
+            {
+                foreach (var id in config.PrunedComponentTypeIds)
+                    PrunedComponentTypeIds.Add(id);
+                PrunedComponentTypeIds.Sort();
+            }
+
+            ComponentMaxCountTypeIds.Clear();
+            ComponentMaxCountValues.Clear();
+            if (config.ComponentMaxCountOverrides != null && config.ComponentMaxCountOverrides.Count > 0)
+            {
+                foreach (var kv in config.ComponentMaxCountOverrides)
+                    ComponentMaxCountTypeIds.Add(kv.Key);
+                ComponentMaxCountTypeIds.Sort();
+                for (int i = 0; i < ComponentMaxCountTypeIds.Count; i++)
+                    ComponentMaxCountValues.Add(config.ComponentMaxCountOverrides[ComponentMaxCountTypeIds[i]]);
+            }
         }
 
         /// <summary>
@@ -101,6 +192,11 @@ namespace xpTURN.Klotho.Replay
                 TickDriftWarnMultiplier = TickDriftWarnMultiplier,
                 StageId = StageId,
                 MatchConfigData = MatchConfigData,
+                // PrunedComponentTypeIds / ComponentMaxCount* are deliberately NOT restored. They are
+                // process-global layout inputs, frozen before any replay is loaded, so assigning them
+                // here would change nothing while signalling "restored" — the resulting run would
+                // reproduce under a different layout and only the fingerprint mismatch would say so.
+                // They are metadata for booting a verifier, not config for this process.
             };
         }
 
@@ -109,14 +205,24 @@ namespace xpTURN.Klotho.Replay
             int sessionIdBytes = System.Text.Encoding.UTF8.GetByteCount(SessionId ?? string.Empty);
             // Version(4) + SessionId(4+UTF8) + RecordedAt(8) + DurationMs(8) + TotalTicks(4) + PlayerCount(4) + TickIntervalMs(4) + RandomSeed(4)
             int size = 4 + (4 + sessionIdBytes) + 8 + 8 + 4 + 4 + 4 + 4;
-            // Additional SimulationConfig fields (12 fields × 4 bytes + 1 bool via int = 52 bytes)
+            // Additional SimulationConfig fields: 11 int32 + 1 bool(1 byte). Counted as 12 x 4 —
+            // 3 bytes over, which is harmless (SpanWriter only throws when the estimate is UNDER).
             size += 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4;
             // GameCustomData length prefix (4) + data
             size += 4 + (GameCustomData?.Length ?? 0);
             // InitialStateSnapshot length prefix (4) + data
             size += 4 + (InitialStateSnapshot?.Length ?? 0);
-            // V2: StageId(4) + MatchConfigData length prefix(4) + data
+            // StageId(4) + MatchConfigData length prefix(4) + data
             size += 4 + 4 + (MatchConfigData?.Length ?? 0);
+            // Anchors: 4 fingerprints (8 each) + InitialStateHash(8) + InitialStateTick(4) + EndReason(4)
+            size += 8 * 5 + 4 + 4;
+            // Initial roster: count(4) + ids
+            size += 4 + 4 * InitialRoster.Count;
+            size += 4 + 4 * InitialEntitlementLengths.Count;          // lengths
+            size += 4 + (InitialEntitlementData?.Length ?? 0);        // concatenated bytes
+            // Layout inputs: pruned count(4) + ids, maxCount count(4) + ids + values
+            size += 4 + 4 * PrunedComponentTypeIds.Count;
+            size += 4 + 8 * ComponentMaxCountTypeIds.Count;
             return size;
         }
 
@@ -163,6 +269,40 @@ namespace xpTURN.Klotho.Replay
             writer.WriteInt32(snapshotLen);
             if (snapshotLen > 0)
                 writer.WriteRawBytes(InitialStateSnapshot);
+
+            // Reproduction anchors + completion marker
+            writer.WriteInt64(LayoutFingerprint);
+            writer.WriteInt64(StaticColliderFingerprint);
+            writer.WriteInt64(NavFingerprint);
+            writer.WriteInt64(GameFingerprint);
+            writer.WriteInt64(InitialStateHash);
+            writer.WriteInt32(InitialStateTick);
+            writer.WriteInt32((int)EndReason);
+
+            // Roster the tick-0 world was built from (empty = built elsewhere, cannot be reconstructed)
+            writer.WriteInt32(InitialRoster.Count);
+            for (int i = 0; i < InitialRoster.Count; i++)
+                writer.WriteInt32(InitialRoster[i]);
+
+            // Roster-parallel per-player verified data: lengths first, then the concatenated bytes.
+            writer.WriteInt32(InitialEntitlementLengths.Count);
+            for (int i = 0; i < InitialEntitlementLengths.Count; i++)
+                writer.WriteInt32(InitialEntitlementLengths[i]);
+            int entLen = InitialEntitlementData?.Length ?? 0;
+            writer.WriteInt32(entLen);
+            if (entLen > 0)
+                writer.WriteRawBytes(InitialEntitlementData);
+
+            // Layout-determining config (recorded only)
+            writer.WriteInt32(PrunedComponentTypeIds.Count);
+            for (int i = 0; i < PrunedComponentTypeIds.Count; i++)
+                writer.WriteInt32(PrunedComponentTypeIds[i]);
+
+            writer.WriteInt32(ComponentMaxCountTypeIds.Count);
+            for (int i = 0; i < ComponentMaxCountTypeIds.Count; i++)
+                writer.WriteInt32(ComponentMaxCountTypeIds[i]);
+            for (int i = 0; i < ComponentMaxCountTypeIds.Count; i++)
+                writer.WriteInt32(ComponentMaxCountValues[i]);
         }
 
         public void Deserialize(ref SpanReader reader)
@@ -205,6 +345,44 @@ namespace xpTURN.Klotho.Replay
             int snapshotLen = reader.ReadInt32();
             if (snapshotLen > 0 && reader.Remaining >= snapshotLen)
                 InitialStateSnapshot = reader.ReadRawBytes(snapshotLen).ToArray();
+
+            // Reproduction anchors + completion marker
+            LayoutFingerprint = reader.ReadInt64();
+            StaticColliderFingerprint = reader.ReadInt64();
+            NavFingerprint = reader.ReadInt64();
+            GameFingerprint = reader.ReadInt64();
+            InitialStateHash = reader.ReadInt64();
+            InitialStateTick = reader.ReadInt32();
+            EndReason = (ReplayEndReason)reader.ReadInt32();
+
+            // Roster the tick-0 world was built from
+            InitialRoster.Clear();
+            int rosterCount = reader.ReadInt32();
+            for (int i = 0; i < rosterCount; i++)
+                InitialRoster.Add(reader.ReadInt32());
+
+            InitialEntitlementLengths.Clear();
+            int entCount = reader.ReadInt32();
+            for (int i = 0; i < entCount; i++)
+                InitialEntitlementLengths.Add(reader.ReadInt32());
+            int entBytes = reader.ReadInt32();
+            InitialEntitlementData = entBytes > 0 && reader.Remaining >= entBytes
+                ? reader.ReadRawBytes(entBytes).ToArray()
+                : null;
+
+            // Layout-determining config
+            PrunedComponentTypeIds.Clear();
+            int prunedCount = reader.ReadInt32();
+            for (int i = 0; i < prunedCount; i++)
+                PrunedComponentTypeIds.Add(reader.ReadInt32());
+
+            ComponentMaxCountTypeIds.Clear();
+            ComponentMaxCountValues.Clear();
+            int maxCountCount = reader.ReadInt32();
+            for (int i = 0; i < maxCountCount; i++)
+                ComponentMaxCountTypeIds.Add(reader.ReadInt32());
+            for (int i = 0; i < maxCountCount; i++)
+                ComponentMaxCountValues.Add(reader.ReadInt32());
         }
     }
 
@@ -240,7 +418,7 @@ namespace xpTURN.Klotho.Replay
         }
 
         /// <summary>
-        /// Sets game-specific custom metadata (V3). Can be injected at any point during recording.
+        /// Sets game-specific custom metadata. Can be injected at any point during recording.
         /// </summary>
         public void SetGameCustomData(byte[] data)
         {
@@ -248,12 +426,75 @@ namespace xpTURN.Klotho.Replay
         }
 
         /// <summary>
-        /// Sets the initial state snapshot. Can be injected at any point during recording.
-        /// On playback, restored via RestoreFromFullState instead of OnInitializeWorld.
+        /// Sets the initial state snapshot with the hash and the tick it was taken at. Can be injected at
+        /// any point during recording. On playback, restored via RestoreFromFullState instead of
+        /// OnInitializeWorld.
         /// </summary>
-        public void SetInitialStateSnapshot(byte[] data)
+        public void SetInitialStateSnapshot(byte[] data, long hash, int tick)
         {
             _metadata.InitialStateSnapshot = data;
+            _metadata.InitialStateHash = hash;
+            _metadata.InitialStateTick = tick;
+        }
+
+        /// <summary>
+        /// Records the roster the tick-0 world was built from, in creation order. Only a recording that
+        /// actually built that world calls this — see <see cref="ReplayMetadata.InitialRoster"/>.
+        /// </summary>
+        public void SetInitialRoster(IReadOnlyList<int> roster)
+        {
+            _metadata.InitialRoster.Clear();
+            if (roster == null) return;
+            for (int i = 0; i < roster.Count; i++)
+                _metadata.InitialRoster.Add(roster[i]);
+        }
+
+        /// <summary>
+        /// Records the per-player verified data the tick-0 world was built from, in roster order. The
+        /// caller passes one entry per <see cref="ReplayMetadata.InitialRoster"/> slot (null where a player
+        /// had none); the concat + lengths layout is built here so exactly one place knows it.
+        ///
+        /// <para>Call it beside <c>SetInitialRoster</c> and from the same peer — the two are index-parallel
+        /// and a file carrying one without the other cannot be sliced.</para>
+        /// </summary>
+        public void SetInitialEntitlements(IReadOnlyList<byte[]> perRosterEntry)
+        {
+            _metadata.InitialEntitlementLengths.Clear();
+            _metadata.InitialEntitlementData = null;
+            if (perRosterEntry == null || perRosterEntry.Count == 0) return;
+
+            int total = 0;
+            for (int i = 0; i < perRosterEntry.Count; i++)
+            {
+                int len = perRosterEntry[i]?.Length ?? 0;
+                _metadata.InitialEntitlementLengths.Add(len);
+                total += len;
+            }
+            if (total == 0) return;   // every player had none — lengths alone carry that, no payload needed
+
+            var data = new byte[total];
+            int offset = 0;
+            for (int i = 0; i < perRosterEntry.Count; i++)
+            {
+                var entry = perRosterEntry[i];
+                if (entry == null || entry.Length == 0) continue;
+                Buffer.BlockCopy(entry, 0, data, offset, entry.Length);
+                offset += entry.Length;
+            }
+            _metadata.InitialEntitlementData = data;
+        }
+
+        /// <summary>
+        /// Sets the reproduction anchors — the four fingerprint terms describing the code and content this
+        /// recording ran against. Written when the initial snapshot is set so both describe the same instant
+        /// (the navigation term moves with runtime rebakes).
+        /// </summary>
+        public void SetReproductionAnchors(long layoutFingerprint, long staticColliderFingerprint, long navFingerprint, long gameFingerprint)
+        {
+            _metadata.LayoutFingerprint = layoutFingerprint;
+            _metadata.StaticColliderFingerprint = staticColliderFingerprint;
+            _metadata.NavFingerprint = navFingerprint;
+            _metadata.GameFingerprint = gameFingerprint;
         }
 
         /// <summary>
@@ -262,7 +503,7 @@ namespace xpTURN.Klotho.Replay
         public void Initialize(int playerCount, ISimulationConfig simConfig, int randomSeed)
         {
             _metadata.PlayerCount = playerCount;
-            _metadata.CopySimulationConfigFrom(simConfig);  // Bulk copy of 13 fields (restored on playback via ToSimulationConfig())
+            _metadata.CopySimulationConfigFrom(simConfig);  // 15 fields restored on playback + 2 layout inputs recorded only
             _metadata.RandomSeed = randomSeed;
             _metadata.RecordedAt = DateTime.UtcNow.Ticks;
             _tickOffsets.Clear();
@@ -317,10 +558,11 @@ namespace xpTURN.Klotho.Replay
         /// <summary>
         /// Finalizes the recording
         /// </summary>
-        public void FinalizeRecording(int totalTicks)
+        public void FinalizeRecording(int totalTicks, ReplayEndReason endReason)
         {
             _metadata.TotalTicks = totalTicks;
             _metadata.DurationMs = (long)_metadata.TotalTicks * _metadata.TickIntervalMs;
+            _metadata.EndReason = endReason;
         }
 
         public IReadOnlyList<ICommand> GetCommandsForTick(int tick)
@@ -376,8 +618,28 @@ namespace xpTURN.Klotho.Replay
 
             _metadata.Deserialize(ref reader);
 
-            if (_metadata.Version > ReplayMetadata.CURRENT_VERSION)
-                throw new InvalidDataException($"Unsupported replay version: {_metadata.Version}");
+            // != , not >: a lower version is a DIFFERENT layout, not an older-but-readable one —
+            // this format has no version branch, so letting it through means silent misparsing.
+            if (_metadata.Version != ReplayMetadata.CURRENT_VERSION)
+                throw new InvalidDataException(
+                    $"Unsupported replay version {_metadata.Version} (this build reads {ReplayMetadata.CURRENT_VERSION}). " +
+                    "Replay files are not backward compatible — re-record this replay.");
+
+            // PlayerCount and InitialRoster record the same thing twice. Empty roster is the one legal
+            // disagreement ("this recording did not build tick 0"); any other is a corrupted file, and
+            // letting it through means reconstructing a world with the wrong number of participants.
+            // Checked after the version guard so an older file still gets the version message.
+            if (_metadata.InitialRoster.Count != 0 && _metadata.InitialRoster.Count != _metadata.PlayerCount)
+                throw new InvalidDataException(
+                    $"Replay metadata is inconsistent: InitialRoster has {_metadata.InitialRoster.Count} entries but PlayerCount is {_metadata.PlayerCount}.");
+
+            // The per-player data is sliced by roster index, so a count that disagrees would hand each
+            // player someone else's bytes. Empty is legal (no issuer); anything else must line up.
+            if (_metadata.InitialEntitlementLengths.Count != 0
+                && _metadata.InitialEntitlementLengths.Count != _metadata.InitialRoster.Count)
+                throw new InvalidDataException(
+                    $"Replay metadata is inconsistent: {_metadata.InitialEntitlementLengths.Count} entitlement entries "
+                    + $"but InitialRoster has {_metadata.InitialRoster.Count}.");
 
             int tickCount = reader.ReadInt32();
             int bufferSize = reader.ReadInt32();

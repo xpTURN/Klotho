@@ -3,14 +3,23 @@ namespace xpTURN.Klotho.Core
     /// <summary>
     /// Per-session mutable configuration. Determined by the host when the game starts.
     /// Propagated to guests via GameStartMessage. For Late Join, supplemented via LateJoinAcceptMessage.
+    /// <para><see cref="RandomSeed"/> is the exception: it is an authored request that the authority
+    /// reads at match start, never a value written back here.</para>
     /// </summary>
     public interface ISessionConfig
     {
         // --- Determinism ---
 
         /// <summary>
-        /// Deterministic random seed. All peers must initialize the RNG with the same seed to guarantee determinism.
-        /// If 0, the host generates one automatically.
+        /// Deterministic random seed — the <b>authored request</b>, not the value the match ran with.
+        /// All peers must initialize the RNG with the same seed to guarantee determinism.
+        /// <para>0 means "pick one": the authority (P2P host / dedicated server) generates a seed when
+        /// the match starts. Any other value is honoured as-is; negative values are fine, so the only
+        /// seed you cannot pin explicitly is 0 itself.</para>
+        /// <para>This field is never overwritten with the effective value on the authority — reading it
+        /// back after match start gives you what was authored (commonly 0), NOT the seed in play. For
+        /// the effective seed read <c>IKlothoEngine.RandomSeed</c> or
+        /// <c>ILockstepNetworkService.RandomSeed</c>.</para>
         /// </summary>
         int RandomSeed { get; }
 

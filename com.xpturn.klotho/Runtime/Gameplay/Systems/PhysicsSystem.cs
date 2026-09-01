@@ -24,7 +24,9 @@ namespace xpTURN.Klotho.ECS.Systems
         private EntityRef[] _bodyEntities;
         private int _bodyCount;
 
-        // contact/trigger snapshot buffers — copied immediately after Step()
+        // contact/trigger snapshot buffers — copied immediately after Step().
+        // Visualizer-only. The copy is capped at these lengths (FPPhysicsWorld.CopyCapped), so a
+        // body count that produces more contacts than fit drops the tail instead of throwing.
         private FPContact[] _contactBuf       = new FPContact[256];
         private FPContact[] _staticContactBuf = new FPContact[256];
         private (int, int)[] _triggerBuf      = new (int, int)[64];

@@ -5,7 +5,7 @@ using xpTURN.Klotho.Network;
 namespace xpTURN.Klotho.Core.Tests
 {
     /// <summary>
-    /// A P2P host validating its own SimulationConfig (IMP103 #14).
+    /// A P2P host validating its own SimulationConfig.
     ///
     /// KlothoEngine.Initialize decides whether a caller is authoritative by reading
     /// IKlothoNetworkService.IsHost — but for a P2P host that flag only becomes true in
@@ -59,7 +59,7 @@ namespace xpTURN.Klotho.Core.Tests
         }
 
         /// <summary>
-        /// The upper bound moved 3 → 4 (IMP103). The frame-time budget is
+        /// The upper bound moved 3 → 4. The frame-time budget is
         /// `(delay − 2) × tickMs`, so a 16 ms tick — which `SimulationConfigGuide` §4.2 recommends for
         /// 60 Hz fighting/action, and which both SD sample servers ship — cannot cover a 16.67 ms frame
         /// at 3. The old cap made that configuration unreachable, and the guide's own §4.1/§4.3

@@ -80,6 +80,26 @@ effect," and it is the lever of optimization.
 is pinned at `maxEntities` (e.g. 256)."** Reduce it two ways — **fewer slots (`maxCount`)** or **drop the type
 outright (pruning)**.
 
+### Reservation is per-tick *time*, not only bytes
+
+Both levers buy tick time as well as memory, which is easy to miss when the guide is read as a memory
+document. The ring saves a frame **every tick** with `Frame.CopyFrom`, and that is a single `Buffer.BlockCopy`
+over the **whole heap** — `_heapSize`, the reserved extent — not over the live components. So the per-tick
+copy cost tracks **reservation**, and a type you never spawn is copied in full on every tick, forever.
+(`CalculateHash` is the opposite: it walks the dense arrays, so it tracks *content* and a zero-population type
+costs nothing.)
+
+Reported from the field ([#7](https://github.com/xpTURN/Klotho/issues/7)): a 6.31 MiB heap where
+`NavAgentComponent` (unused) took 44% and `PhysicsBodyComponent` another 16.8% — pruning both took the heap to
+**2.45 MiB, a 61% cut**. Because the copy is one `BlockCopy` over the reserved extent, expect the per-tick copy
+time to fall in roughly that same proportion.
+
+**On absolute microseconds**: the reporter's per-tick figures were taken in the Editor, and they later noted
+that debug guards inflated them (their own estimate: up to ~7×), so we do not quote them here. The *ratio* is
+the load-bearing claim and it follows from the mechanism; the absolute cost depends on your build and hardware.
+Measure it in a player build alongside the `[Mem]` report when you are sizing caps — the byte savings in that
+table are also microseconds off every tick.
+
 ---
 
 ## 2. Measuring Runtime Usage (measure first, don't guess)

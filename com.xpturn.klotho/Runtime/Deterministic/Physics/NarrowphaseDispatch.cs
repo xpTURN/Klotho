@@ -15,26 +15,30 @@ namespace xpTURN.Klotho.Deterministic.Physics
 
         public static bool Test(ref FPSphereShape a, ref FPBoxShape b, out FPContact contact)
         {
-            return CollisionTests.SphereBox(ref a, ref b, out contact);
+            // SphereBox returns box→sphere (arg2→arg1); the contract is A→B.
+            bool hit = CollisionTests.SphereBox(ref a, ref b, out contact);
+            if (hit) contact = contact.Flipped();
+            return hit;
         }
 
         public static bool Test(ref FPBoxShape a, ref FPSphereShape b, out FPContact contact)
         {
-            bool hit = CollisionTests.SphereBox(ref b, ref a, out contact);
-            if (hit) contact = contact.Flipped();
-            return hit;
+            // SphereBox(b, a) already reads box(A)→sphere(B) — no correction.
+            return CollisionTests.SphereBox(ref b, ref a, out contact);
         }
 
         public static bool Test(ref FPSphereShape a, ref FPCapsuleShape b, out FPContact contact)
         {
-            return CollisionTests.SphereCapsule(ref a, ref b, out contact);
+            // SphereCapsule returns capsule→sphere (arg2→arg1); the contract is A→B.
+            bool hit = CollisionTests.SphereCapsule(ref a, ref b, out contact);
+            if (hit) contact = contact.Flipped();
+            return hit;
         }
 
         public static bool Test(ref FPCapsuleShape a, ref FPSphereShape b, out FPContact contact)
         {
-            bool hit = CollisionTests.SphereCapsule(ref b, ref a, out contact);
-            if (hit) contact = contact.Flipped();
-            return hit;
+            // SphereCapsule(b, a) already reads capsule(A)→sphere(B) — no correction.
+            return CollisionTests.SphereCapsule(ref b, ref a, out contact);
         }
 
         public static bool Test(ref FPBoxShape a, ref FPBoxShape b, out FPContact contact)
@@ -80,7 +84,11 @@ namespace xpTURN.Klotho.Deterministic.Physics
                         return hit;
                     }
                 case (ShapeType.Sphere, ShapeType.Capsule):
-                    return CollisionTests.SphereCapsule(ref a.sphere, ref b.capsule, out contact);
+                    {
+                        bool hit = CollisionTests.SphereCapsule(ref a.sphere, ref b.capsule, out contact);
+                        if (hit) contact = contact.Flipped();
+                        return hit;
+                    }
                 case (ShapeType.Box, ShapeType.Sphere):
                     {
                         bool hit = CollisionTests.SphereBox(ref b.sphere, ref a.box, out contact);
@@ -91,11 +99,7 @@ namespace xpTURN.Klotho.Deterministic.Physics
                 case (ShapeType.Box, ShapeType.Capsule):
                     return CollisionTests.BoxCapsule(ref a.box, ref b.capsule, out contact);
                 case (ShapeType.Capsule, ShapeType.Sphere):
-                    {
-                        bool hit = CollisionTests.SphereCapsule(ref b.sphere, ref a.capsule, out contact);
-                        if (hit) contact = contact.Flipped();
-                        return hit;
-                    }
+                    return CollisionTests.SphereCapsule(ref b.sphere, ref a.capsule, out contact);
                 case (ShapeType.Capsule, ShapeType.Box):
                     {
                         bool hit = CollisionTests.BoxCapsule(ref b.box, ref a.capsule, out contact);
@@ -105,13 +109,13 @@ namespace xpTURN.Klotho.Deterministic.Physics
                 case (ShapeType.Capsule, ShapeType.Capsule):
                     return CollisionTests.CapsuleCapsule(ref a.capsule, ref b.capsule, out contact);
                 case (ShapeType.Sphere, ShapeType.Mesh):
-                    return CollisionTests.SphereMesh(ref a.sphere, ref b.mesh, meshDataB, out contact);
-                case (ShapeType.Mesh, ShapeType.Sphere):
                     {
-                        bool hit = CollisionTests.SphereMesh(ref b.sphere, ref a.mesh, meshDataA, out contact);
+                        bool hit = CollisionTests.SphereMesh(ref a.sphere, ref b.mesh, meshDataB, out contact);
                         if (hit) contact = contact.Flipped();
                         return hit;
                     }
+                case (ShapeType.Mesh, ShapeType.Sphere):
+                    return CollisionTests.SphereMesh(ref b.sphere, ref a.mesh, meshDataA, out contact);
                 case (ShapeType.Box, ShapeType.Mesh):
                     return CollisionTests.BoxMesh(ref a.box, ref b.mesh, meshDataB, out contact);
                 case (ShapeType.Mesh, ShapeType.Box):
@@ -121,13 +125,13 @@ namespace xpTURN.Klotho.Deterministic.Physics
                         return hit;
                     }
                 case (ShapeType.Capsule, ShapeType.Mesh):
-                    return CollisionTests.CapsuleMesh(ref a.capsule, ref b.mesh, meshDataB, out contact);
-                case (ShapeType.Mesh, ShapeType.Capsule):
                     {
-                        bool hit = CollisionTests.CapsuleMesh(ref b.capsule, ref a.mesh, meshDataA, out contact);
+                        bool hit = CollisionTests.CapsuleMesh(ref a.capsule, ref b.mesh, meshDataB, out contact);
                         if (hit) contact = contact.Flipped();
                         return hit;
                     }
+                case (ShapeType.Mesh, ShapeType.Capsule):
+                    return CollisionTests.CapsuleMesh(ref b.capsule, ref a.mesh, meshDataA, out contact);
                 default:
                     contact = default;
                     return false;
@@ -142,21 +146,21 @@ namespace xpTURN.Klotho.Deterministic.Physics
             switch (a.type, b.type)
             {
                 case (ShapeType.Sphere, ShapeType.Mesh):
-                    return CollisionTests.SphereMeshMulti(ref a.sphere, ref b.mesh, meshDataB, buffer, maxContacts);
+                    {
+                        int cnt = CollisionTests.SphereMeshMulti(ref a.sphere, ref b.mesh, meshDataB, buffer, maxContacts);
+                        for (int i = 0; i < cnt; i++) buffer[i] = buffer[i].Flipped();
+                        return cnt;
+                    }
                 case (ShapeType.Mesh, ShapeType.Sphere):
-                    {
-                        int cnt = CollisionTests.SphereMeshMulti(ref b.sphere, ref a.mesh, meshDataA, buffer, maxContacts);
-                        for (int i = 0; i < cnt; i++) buffer[i] = buffer[i].Flipped();
-                        return cnt;
-                    }
+                    return CollisionTests.SphereMeshMulti(ref b.sphere, ref a.mesh, meshDataA, buffer, maxContacts);
                 case (ShapeType.Capsule, ShapeType.Mesh):
-                    return CollisionTests.CapsuleMeshMulti(ref a.capsule, ref b.mesh, meshDataB, buffer, maxContacts);
-                case (ShapeType.Mesh, ShapeType.Capsule):
                     {
-                        int cnt = CollisionTests.CapsuleMeshMulti(ref b.capsule, ref a.mesh, meshDataA, buffer, maxContacts);
+                        int cnt = CollisionTests.CapsuleMeshMulti(ref a.capsule, ref b.mesh, meshDataB, buffer, maxContacts);
                         for (int i = 0; i < cnt; i++) buffer[i] = buffer[i].Flipped();
                         return cnt;
                     }
+                case (ShapeType.Mesh, ShapeType.Capsule):
+                    return CollisionTests.CapsuleMeshMulti(ref b.capsule, ref a.mesh, meshDataA, buffer, maxContacts);
                 case (ShapeType.Box, ShapeType.Mesh):
                     return CollisionTests.BoxMeshMulti(ref a.box, ref b.mesh, meshDataB, buffer, maxContacts);
                 case (ShapeType.Mesh, ShapeType.Box):

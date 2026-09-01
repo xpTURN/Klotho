@@ -11,7 +11,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// Entity-slot recycling across the interpolation window (IMP103 V-6).
+    /// Entity-slot recycling across the interpolation window.
     ///
     /// `Frame.Has` and `GetReadOnly` forward `entity.Index` alone, so a handle whose slot was recycled
     /// answers about the NEW occupant and reports true. `Frame.TryRead`'s remarks state the rule that
@@ -118,7 +118,7 @@ namespace xpTURN.Klotho.View.Tests
         }
 
         /// <summary>
-        /// The V-6 case. The new occupant's view asks for a frame from before it existed; the slot there
+        /// The new occupant's view asks for a frame from before it existed; the slot there
         /// belongs to the old occupant. Version-blind, that returns the old occupant's position — this
         /// test fails on the pre-fix code with exactly that value.
         /// </summary>

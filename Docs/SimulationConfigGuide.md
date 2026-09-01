@@ -198,7 +198,13 @@ Many units · low input frequency · rollback impractical (simulation cost too h
 
 **Tuning notes:**
 - A small `SyncCheckInterval` is fine despite the traffic cost (the absolute frequency is low because ticks themselves are slow).
-- When raising `MaxEntities`, also measure ECS component memory and hash cost.
+- When raising `MaxEntities`, also measure ECS component memory and hash cost — the per-tick frame copy is bound by *reservation*, not by live entities ([ECSMemoryOptimization.md](ECSMemoryOptimization.md#reservation-is-per-tick-time-not-only-bytes)).
+- **`MaxEntities` is not a navigation budget.** The built-in navigation layer is sized for tens of agents, not thousands, and it does not fail loudly when you pass that:
+  - `FPNavAgentSystem.ResolveCollisions` resolves **at most `MAX_AGENTS` (64)** agents per tick — beyond that, the remaining agents are simply not separated (no error, no log).
+  - ORCA neighbour selection scans **every agent for every agent** each tick (O(N²), uncapped) — this is the first thing to bind as unit counts grow.
+  - Pathfinding has a **per-call** cap (`MAX_ITERATIONS` 4096) and a per-agent repath cooldown, but **no per-tick global budget** — a mass order can put every unit into A* on the same tick.
+  - A path corridor is capped at `MAX_CORRIDOR` (128) triangles, and the fixed array behind it is most of `NavAgentComponent`'s 708-byte footprint.
+  These are compile-time constants on purpose: they are determinism inputs (they change simulation results, and `MAX_CORRIDOR` changes the hashed component layout), so they cannot be turned into plain per-peer settings. For unit counts in the hundreds or more, plan on a game-side movement layer (flow fields, a spatial hash, a bounded path-request queue) over the deterministic primitives rather than on the stock agent system.
 
 ### 3.5 Tactics / Strategy — Non-Real-Time
 

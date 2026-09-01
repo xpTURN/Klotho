@@ -45,6 +45,20 @@ namespace xpTURN.Klotho.Core
         public bool ReplayDumpJson { get; set; }
 
         /// <summary>
+        /// Whether the engine records a replay for host / guest sessions. Default true — recording is
+        /// what the replay file, the tick-0 snapshot injection, and any later server-side verification
+        /// are all made of, so turning it off is opt-out, never opt-in.
+        ///
+        /// Per-peer and never on the wire: recording is a local decision about this machine's memory
+        /// and disk, unlike the SessionConfig fields the host imposes on everyone.
+        ///
+        /// Set false for a long-running solo session that will never save a replay — the recorder's
+        /// buffer grows with the match and is only bounded by its end. Pair it with a null
+        /// ReplaySavePath; Build() flags the combination of "not recording" and "save on Stop".
+        /// </summary>
+        public bool EnableReplayRecording { get; set; } = true;
+
+        /// <summary>
         /// Invoked once sim/session config are known. The game builds Sim/View callbacks
         /// sized against the supplied configs. For Normal guest the supplied <c>sessionCfg</c>
         /// is the seed value (the live session is reseeded from GameStartMessage shortly after).
@@ -57,13 +71,15 @@ namespace xpTURN.Klotho.Core
         /// Optional. When set, the framework calls this factory and broadcasts the returned
         /// <see cref="PlayerConfigBase"/> via <see cref="KlothoSession.SendPlayerConfig"/>
         /// on guest entry paths (Normal join / LateJoin / cold-start Reconnect through
-        /// <c>CreateForConnection</c>).
+        /// <c>CreateForConnection</c>) and on <c>StartLocal</c>.
         ///
         /// Host is intentionally NOT auto-sent: <c>FireOnSessionCreated</c> fires before
         /// <c>HostGame</c> assigns <c>IsHost</c> / <c>LocalPlayerId</c>, so the host has no
         /// authoritative identity at that point. Host code must call
         /// <c>session.SendPlayerConfig(...)</c> manually after <c>HostGame</c> + <c>Transport.Listen</c>
-        /// succeed.
+        /// succeed. <c>StartLocal</c> is exempt from that reasoning rather than from the rule: it
+        /// controls its own ordering and fires the callback after <c>HostGame</c> (and before
+        /// <c>SetReady</c>), so a solo player's selection is in place for tick 0.
         ///
         /// Skipped on replay / spectator (no NetworkService).
         ///

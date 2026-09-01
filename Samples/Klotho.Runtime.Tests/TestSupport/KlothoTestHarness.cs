@@ -30,6 +30,11 @@ namespace xpTURN.Klotho.Helper.Tests
         private CommandFactory _commandFactory;
         private IKLogger _logger;
         private SimulationConfig _simulationConfig = new SimulationConfig();
+        // Factory, not a value: CreatePeer serves host AND guests, and SessionConfig has no Clone
+        // (SimulationConfig does), so a single instance would be shared across peers — a guest's
+        // GameStart write-back would then land on the host's config. Default stays authored-0 so
+        // existing tests see the same behaviour as before.
+        private Func<SessionConfig> _sessionConfigFactory = () => new SessionConfig();
 
         private static readonly FieldInfo _gameStartTimeField = typeof(KlothoNetworkService)
             .GetField("_gameStartTime", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -67,6 +72,13 @@ namespace xpTURN.Klotho.Helper.Tests
         public KlothoTestHarness WithSimulationConfig(SimulationConfig config)
         {
             _simulationConfig = config;
+            return this;
+        }
+
+        /// <summary>Authors the SessionConfig each peer is built with. Called once per peer.</summary>
+        public KlothoTestHarness WithSessionConfig(Func<SessionConfig> factory)
+        {
+            _sessionConfigFactory = factory;
             return this;
         }
 
@@ -436,7 +448,7 @@ namespace xpTURN.Klotho.Helper.Tests
             {
                 Transport = new TestTransport(),
                 NetworkService = new KlothoNetworkService(),
-                Engine = new KlothoEngine(_simulationConfig, new SessionConfig()),
+                Engine = new KlothoEngine(_simulationConfig, _sessionConfigFactory()),
                 Simulation = new TestSimulation(),
             };
 
@@ -452,7 +464,7 @@ namespace xpTURN.Klotho.Helper.Tests
                 if (capturedPeer.Engine.IsReplayMode) return;
                 if (!capturedPeer.Engine.ReplaySystem.IsRecording) return;
                 var (data, hash) = capturedPeer.Simulation.SerializeFullStateWithHash();
-                capturedPeer.Engine.ReplaySystem.SetInitialStateSnapshot(data, hash);
+                capturedPeer.Engine.ReplaySystem.SetInitialStateSnapshot(data, hash, capturedPeer.Engine.CurrentTick);
             };
 
             return peer;

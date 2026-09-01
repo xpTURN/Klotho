@@ -24,7 +24,7 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
         }
 
         [Test]
-        public void BoxSphere_FlipsCorrectly()
+        public void BoxSphere_NormalPointsAToB()
         {
             var box = new FPBoxShape(new FPVector3(5, 5, 5), FPVector3.Zero);
             var sphere = new FPSphereShape(FP64.FromFloat(2.0f), new FPVector3(6, 0, 0));
@@ -32,8 +32,8 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
             bool hit = NarrowphaseDispatch.Test(ref box, ref sphere, out FPContact contact);
 
             Assert.IsTrue(hit);
-            // Flipped: normal points from B (sphere) to A (box), i.e. -X
-            Assert.AreEqual(-1.0f, contact.normal.x.ToFloat(), EPSILON);
+            // A→B: from the box at the origin toward the sphere at +X
+            Assert.AreEqual(1.0f, contact.normal.x.ToFloat(), EPSILON);
         }
 
         #endregion
@@ -102,7 +102,7 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
         }
 
         [Test]
-        public void FPCollider_CapsuleSphere_FlipsCorrectly()
+        public void FPCollider_CapsuleSphere_NormalPointsAToB()
         {
             var a = FPCollider.FromCapsule(new FPCapsuleShape(FP64.FromFloat(3.0f), FP64.FromFloat(1.0f), FPVector3.Zero));
             var b = FPCollider.FromSphere(new FPSphereShape(FP64.FromFloat(2.0f), new FPVector3(2, 0, 0)));
@@ -110,7 +110,8 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
             bool hit = NarrowphaseDispatch.Test(ref a, ref b, out FPContact contact);
 
             Assert.IsTrue(hit);
-            Assert.AreEqual(-1.0f, contact.normal.x.ToFloat(), EPSILON);
+            // A→B: from the capsule at the origin toward the sphere at +X
+            Assert.AreEqual(1.0f, contact.normal.x.ToFloat(), EPSILON);
         }
 
         [Test]

@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using xpTURN.Klotho.Logging;
 using System.Collections.Generic;
@@ -24,6 +25,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
         private readonly int _maxPlayers;
         private readonly int _botCount;
         private readonly int _stageId;
+        private readonly string _replaySaveDir;    // null → this room does not write a replay (the default)
+        private readonly string _matchInstanceId;  // lobby key for this match, or null; names the saved file
 #if DEBUG
         private readonly long _devAbortAfterMs; // DEV: >0 → StateDivergence-abort N ms into the match (abort-path e2e)
         private IKlothoEngine _engine;          // captured at OnInitializeWorld for the dev abort trigger
@@ -47,7 +50,9 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
                                         List<IDataAsset> dataAssets = null,
                                         int stageId = 0,
                                         long devAbortAfterMs = 0,
-                                        FPNavMeshRebakeSnapshot rebakeSnapshot = null)
+                                        FPNavMeshRebakeSnapshot rebakeSnapshot = null,
+                                        string replaySaveDir = null,
+                                        string matchInstanceId = null)
         {
             _logger = logger;
             _staticColliders = staticColliders;
@@ -58,6 +63,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
             _maxPlayers = maxPlayers;
             _botCount = botCount;
             _stageId = stageId;
+            _replaySaveDir = replaySaveDir;
+            _matchInstanceId = matchInstanceId;
 #if DEBUG
             _devAbortAfterMs = devAbortAfterMs;
 #endif
@@ -129,7 +136,56 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
 #if DEBUG
             _engine = engine; // capture for the dev abort trigger (called before any tick)
 #endif
+            ArmReplaySave(engine);
             BrawlerSimSetup.InitializeWorldState(engine, _maxPlayers, _botCount);
+        }
+
+        /// <summary>
+        /// Writes this room's replay when recording stops. Opt-in (<c>--save-replays</c>): the engine records
+        /// either way, so a server that never saves pays the buffer and gets nothing — that is the state this
+        /// exists to end. The server's file is the only SD recording that carries a tick-0 roster (a client
+        /// receives its initial state from us), which makes it the only one a verifier can REBUILD rather than
+        /// restore, and it is the authority's own record when a result is disputed.
+        ///
+        /// <para>Hooked here because <c>OnInitializeWorld</c> is where a room first sees its engine, and it
+        /// runs before any tick — well before <c>StopRecording</c>. The handler holds no state of its own: the
+        /// recorder hands the finished data to <c>ReplaySystem</c>, which sets CurrentReplayData before this
+        /// fires, so saving through the system writes exactly the recording that just ended.</para>
+        /// </summary>
+        private void ArmReplaySave(IKlothoEngine engine)
+        {
+            if (string.IsNullOrEmpty(_replaySaveDir)) return;
+            if (engine is not KlothoEngine concrete || concrete.ReplaySystem == null) return;
+
+            // A room that ran without a lobby has no instance id; name the file after the seed so two matches
+            // in one process cannot collide. NEVER a fixed name — that is how a match erases its predecessor.
+            string name = string.IsNullOrEmpty(_matchInstanceId)
+                ? $"stage{_stageId}-seed{engine.RandomSeed}.rply"
+                : SanitizeFileName(_matchInstanceId) + ".rply";
+            string path = System.IO.Path.Combine(_replaySaveDir, name);
+
+            concrete.ReplaySystem.OnRecordingStopped += _ =>
+            {
+                try
+                {
+                    concrete.ReplaySystem.SaveToFile(path);
+                }
+                catch (Exception e)
+                {
+                    // A room must not die because the disk did. The match result is already reported.
+                    _logger?.KError(e, $"[BrawlerServerCallbacks] replay save failed: {path}");
+                }
+            };
+        }
+
+        /// <summary>The lobby's instance id is <c>{matchId}#{token}</c>; '#' and friends are not file names.</summary>
+        private static string SanitizeFileName(string s)
+        {
+            var invalid = System.IO.Path.GetInvalidFileNameChars();
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char c in s)
+                sb.Append(Array.IndexOf(invalid, c) >= 0 || c == '#' ? '_' : c);
+            return sb.ToString();
         }
 
         public void OnPollInput(int playerId, int tick, ICommandSender sender)

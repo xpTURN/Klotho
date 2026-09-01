@@ -103,7 +103,7 @@ namespace xpTURN.Klotho
         /// <see cref="FactoryOwnedFlags"/>, the prefab keeps everything else.
         ///
         /// A plain assignment would clobber the prefab's bits — the factory can only express two of the
-        /// sixteen combinations, so overwriting destroys unrelated authoring (that was IMP103 V-3). A
+        /// sixteen combinations, so overwriting destroys unrelated authoring. A
         /// plain OR is not the fix either: it would let a prefab that ticked
         /// <c>EnableSnapshotInterpolation</c> force the verified path onto a locally-owned entity and
         /// render the local player several ticks late. Masking is what keeps both halves honest.
@@ -141,7 +141,7 @@ namespace xpTURN.Klotho
         /// guard a spectator watching a P2P session matched its own fallback against the host's entity and
         /// rendered that one predicted: running ahead of every other entity and snapping on rollback.
         /// `PlayerViewRegistry.IsActuallyLocal` already disambiguated the same collision the same way; this
-        /// is that guard, in the one place both the render path and the binding are decided (IMP103).
+        /// is that guard, in the one place both the render path and the binding are decided.
         ///
         /// <paramref name="hasOwner"/> exists so the no-owner case shares this expression instead of
         /// duplicating it. A sentinel ownerId would have been the alternative and is deliberately avoided:
@@ -180,7 +180,7 @@ namespace xpTURN.Klotho
             // The first ApplyTransform normally corrects that within the same frame, but it never runs
             // for a view whose flags skip the position line (DisableUpdate / DisablePositionUpdate), and
             // it runs a frame late for a pool that completes asynchronously. The interpolation child is
-            // already cleared by InternalActivate; this is the root's half of the same fix (IMP104 W-7).
+            // already cleared by InternalActivate; this is the root's half of the same fix.
             bool hasPose = TryGetSpawnPose(frame, entity, out Vector3 spawnPos, out Quaternion spawnRot);
 
             if (Pool != null)
@@ -210,7 +210,7 @@ namespace xpTURN.Klotho
         /// <c>protected</c> because an override that returns a view WITHOUT calling base — adopting a
         /// scene-placed object is the usual reason — skips the pose write above and has no other way to
         /// ask the same question. Returns false for an entity with no transform; leave the pose alone
-        /// then (IMP105 C-13).
+        /// then.
         /// </summary>
         protected static bool TryGetSpawnPose(Frame frame, EntityRef entity, out Vector3 pos, out Quaternion rot)
         {

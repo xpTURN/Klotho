@@ -11,7 +11,7 @@ using xpTURN.Klotho.Logging;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// The error-visual gate (IMP103 D-1) and the dead accumulation it removes (D-3).
+    /// The error-visual gate and the dead accumulation it removes.
     ///
     /// Godot puts the whole error-visual pipeline behind EnableErrorCorrection and says so in a comment
     /// ("non-EC games pay nothing"); Unity ran it unconditionally. The flag defaults to false, so every
@@ -20,7 +20,8 @@ namespace xpTURN.Klotho.View.Tests
     /// though that path deliberately never applies the result.
     ///
     /// The gate is easy to aim wrong in two directions, and four of these six tests exist for that:
-    /// wrapping the TeleportTick term would undo V-7, and keying the accumulation skip on skipPosError
+    /// wrapping the TeleportTick term would put CSP teleports back to being lerped across, and keying
+    /// the accumulation skip on skipPosError
     /// instead of the snapshot flag would kill the yaw correction of DisablePositionUpdate-only views.
     /// Those four pass before the patch — that is expected, and it is what makes them useful.
     /// </summary>
@@ -92,7 +93,7 @@ namespace xpTURN.Klotho.View.Tests
             var entity = _sim.Frame.CreateEntity();
             _sim.Frame.Add(entity, new TransformComponent { Position = FPVector3.Zero });
 
-            // Tick 5 with TeleportTick 0 keeps the V-7 teleport branch quiet (0 != 4), so these tests
+            // Tick 5 with TeleportTick 0 keeps the teleport branch quiet (0 != 4), so these tests
             // measure the error visual and nothing else.
             CurrentTickField.SetValue(_engine, 5);
             AccumulatorField.SetValue(_engine, 0.5f * TickIntervalMs);
@@ -123,10 +124,10 @@ namespace xpTURN.Klotho.View.Tests
             return go;
         }
 
-        // ── D-1: the gate itself ──
+        // ── The gate itself ───────
 
         /// <summary>
-        /// The D-1 case. With the flag off the pipeline must not run at all — no dictionary reads, no
+        /// With the flag off the pipeline must not run at all — no dictionary reads, no
         /// accumulation. Pre-fix the accumulator advances, which is the whole point: the feature was
         /// running for games that never enabled it.
         /// </summary>
@@ -166,7 +167,7 @@ namespace xpTURN.Klotho.View.Tests
             finally { Object.DestroyImmediate(go); }
         }
 
-        // ── D-3: dead accumulation on the snapshot path ──
+        // ── Dead accumulation on the snapshot path ───────
 
         /// <summary>
         /// Snapshot-interpolated views never apply the offset — verified-frame interpolation already
@@ -227,10 +228,10 @@ namespace xpTURN.Klotho.View.Tests
         // ── Aim guards: the two directions the gate can be pointed wrong ──
 
         /// <summary>
-        /// V-7 regression guard. The teleport check must stay outside the gate: TeleportTick is stamped
+        /// Regression guard. The teleport check must stay outside the gate: TeleportTick is stamped
         /// by the game and has nothing to do with error correction. Pulling the whole `teleported`
         /// computation inside would put CSP teleports back to being lerped across whenever the flag is
-        /// off — the defect V-7 just removed.
+        /// off — the defect the TeleportTick comparison removed.
         /// </summary>
         [Test]
         public void TeleportStillSnaps_WithErrorCorrectionOff()

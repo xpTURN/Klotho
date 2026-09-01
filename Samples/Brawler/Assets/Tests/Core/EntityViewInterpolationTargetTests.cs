@@ -6,7 +6,7 @@ using xpTURN.Klotho.Core;
 namespace xpTURN.Klotho.View.Tests
 {
     /// <summary>
-    /// <see cref="EntityView.ApplyTransform"/> against an assigned interpolation target (IMP103 V-1).
+    /// <see cref="EntityView.ApplyTransform"/> against an assigned interpolation target.
     ///
     /// The split is: the root keeps the tick-accurate transform (collision / raycast reference) while the
     /// child carries the interpolated render pose. Every value ApplyTransform receives is world-space, so
@@ -65,7 +65,7 @@ namespace xpTURN.Klotho.View.Tests
             => p.ErrorVisualQuaternion * p.NewRotation;
 
         /// <summary>
-        /// The core V-1 case. The root is yaw-rotated, so a world delta written into `localPosition`
+        /// The core case. The root is yaw-rotated, so a world delta written into `localPosition`
         /// would come back out rotated by that yaw — this test fails on the pre-fix code.
         /// </summary>
         [Test]
@@ -174,7 +174,7 @@ namespace xpTURN.Klotho.View.Tests
 
         /// <summary>
         /// The other half of the same reset: an offset the PREFAB authored is not residue, and must
-        /// survive (IMP105 C-9).
+        /// survive.
         ///
         /// The two are the same field, so the reset cannot tell them apart by looking — it has to
         /// remember. EnsureInitialized is where: it runs once per instance, before anything has written

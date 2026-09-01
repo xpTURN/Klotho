@@ -80,7 +80,7 @@ namespace xpTURN.Klotho.Godot
             // This used to be an early return for BOTH paths. It still is for CSP, whose whole render basis
             // is this frame — but the snapshot path renders the Verified timeline, where the entity can be
             // perfectly alive while prediction has already destroyed it. Gating that path here froze such a
-            // view for the entire SD lead (IMP103 D-2). Demoting the check from a gate to a fallback
+            // view for the entire SD lead. Demoting the check from a gate to a fallback
             // condition is NOT the same as dropping it: the snapshot path still may not read this frame's
             // transform without it.
             bool predictedAlive = predicted.Entities.IsAlive(EntityRef)
@@ -95,7 +95,7 @@ namespace xpTURN.Klotho.Godot
             // CSP branch only and left false for snapshot, mirroring the Unity view which ORs it onto the
             // CSP term alone: the snapshot path gets its discontinuity from the interpolator's own refusal
             // to lerp across a TeleportTick change, and ApplyErrorVisual returns before reading this on
-            // that path anyway (IMP105 C-7).
+            // that path anyway.
             bool teleported = false;
 
             if (snapshot)
@@ -161,18 +161,18 @@ namespace xpTURN.Klotho.Godot
                     // TransformComponent and the game stamps it with its own tick, so this needs neither
                     // engine support nor EnableErrorCorrection: HasEntityTeleported only ever fires when error
                     // correction is on AND a rollback happened, and even then it means "re-simulation
-                    // introduced a teleport", not "the game teleported this tick" (IMP103 V-7). newPos/newRot
+                    // introduced a teleport", not "the game teleported this tick". newPos/newRot
                     // already hold the live pose, so skipping the lerp is all the interpolation needs.
                     //
                     // The flag carries the same verdict on to the error smoother. Without it the smoother
                     // saw HasEntityTeleported alone — a set filled by ComputeErrorDeltas, i.e. the OTHER
                     // meaning — so a game teleport did not reset the accumulator and the pre-teleport
-                    // offset was added on top of the destination for the frames it took to decay
-                    // (IMP105 C-7). Resetting is enough; the Unity adapter's second guard (bypassing the
+                    // offset was added on top of the destination for the frames it took to decay.
+                    // Resetting is enough; the Unity adapter's second guard (bypassing the
                     // offset in the transform write) has nothing left to bypass once the smoother is 0.
                     //
                     // The `> 0` term keeps the default value out: TeleportTick defaults to 0, so without it
-                    // every entity that has never teleported matches at CurrentTick == 1 (IMP105 C-1).
+                    // every entity that has never teleported matches at CurrentTick == 1.
                     teleported = true;
                 }
                 else
@@ -183,7 +183,7 @@ namespace xpTURN.Klotho.Godot
                     // and the allocator's free list is LIFO with immediate reuse, so a slot released inside a
                     // tick is the first one the next spawn takes — while that tick's snapshot, captured on
                     // entry, still holds the old occupant alive. Without this the new view lerps out of a
-                    // stranger's position for one whole tick (IMP103 V-8).
+                    // stranger's position for one whole tick.
                     var prev = Engine.PredictedPreviousFrame.Frame;
                     if (prev != null
                         && prev.Entities.IsAlive(EntityRef)
@@ -214,7 +214,7 @@ namespace xpTURN.Klotho.Godot
         // Engine.VerifiedFrame does a ring lookup on every access, so this is called only from the fallback
         // branch and never on a frame the window can serve. IsAlive first and Has after it, the same order
         // the interpolator's occupancy check uses: Has forwards Index alone so a recycled slot answers about
-        // its new occupant, and GetReadOnly on an entity without the component throws (IMP103).
+        // its new occupant, and GetReadOnly on an entity without the component throws.
         private bool TryGetLatestVerifiedPose(out Vector3 position, out Quaternion rotation)
         {
             var verified = Engine.VerifiedFrame.Frame;
@@ -236,15 +236,15 @@ namespace xpTURN.Klotho.Godot
         // Tick-then-read: advance the accumulation with this frame's rollback delta, then apply the smoothed
         // error to this frame's transform. The delta was produced in this frame's engine update, so reading
         // first applied the offset one frame late — the correction jump showed in full and the next frame
-        // jumped back — and a teleport frame applied the previous offset once more before Reset cleared it
-        // (IMP103 V-9). skipPosError follows DisablePositionUpdate; yaw error still applies under it.
+        // jumped back — and a teleport frame applied the previous offset once more before Reset cleared it.
+        // skipPosError follows DisablePositionUpdate; yaw error still applies under it.
         // The yaw error is radians, applied as a pre-multiplied quaternion (error * rotation).
         private void ApplyErrorVisual(ref Vector3 newPos, ref Quaternion newRot, bool snapshot, float dt,
                                      bool teleported)
         {
             // Nothing to do on the snapshot path: it applies neither offset, so the delta lookups and the
             // smoother would feed a value no one reads. Keyed on `snapshot` rather than skipPosError
-            // because a DisablePositionUpdate-only view still applies the yaw offset (IMP103 D-3).
+            // because a DisablePositionUpdate-only view still applies the yaw offset.
             if (snapshot) return;
 
             int idx = EntityRef.Index;

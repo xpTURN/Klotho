@@ -32,7 +32,7 @@ namespace xpTURN.Klotho.Core
         // session (KlothoSessionDriver: PollEvents then s.Update) while ClearErrorDeltas is the first
         // thing the update does. Publishing straight into _posDeltas would therefore be erased in the same
         // frame, before any view read it. So the resync parks its deltas here and
-        // PublishPendingResyncDeltas moves them across immediately after that clear (IMP103 #5).
+        // PublishPendingResyncDeltas moves them across immediately after that clear.
         private readonly Dictionary<int, FPVector3> _pendingResyncPos = new();
         private readonly Dictionary<int, FP64> _pendingResyncYaw = new();
         private readonly HashSet<int> _pendingResyncTeleported = new();
@@ -78,7 +78,7 @@ namespace xpTURN.Klotho.Core
         /// operands sit on opposite ends of the wrap. That number then exceeds the view's rotation
         /// snap bound and the correction is thrown away instead of smoothed — the opposite of what
         /// error correction is for. Observed live: every other correction in the session measured
-        /// 28.8 degrees while the one crossing the seam measured exactly 270.000 (IMP105 follow-up).
+        /// 28.8 degrees while the one crossing the seam measured exactly 270.000.
         ///
         /// Repeat rather than a loop, so an unnormalised yaw (nothing constrains the component's range)
         /// costs the same as a normalised one.
@@ -119,7 +119,7 @@ namespace xpTURN.Klotho.Core
         /// parked maps are the reason this exists separately — they survive the per-frame clear by design
         /// (they are produced before it and consumed after it), so without an explicit reset they outlive
         /// the world they were measured against and get published, keyed by entity index, onto whatever
-        /// occupies those indices next (IMP105 C-6).
+        /// occupies those indices next.
         /// </summary>
         private void ResetErrorCorrectionState()
         {
@@ -138,7 +138,7 @@ namespace xpTURN.Klotho.Core
         /// in <c>_pendingVerifiedQueue</c>, P2P by the deferred <c>_hasPendingRollback</c> flag. This
         /// used to read the SD queue directly, which silently disabled the whole pipeline in every other
         /// mode: P2P renders every view on the CSP path, the one path that applies these deltas, so
-        /// EnableErrorCorrection was a knob that did nothing there (IMP103 V-4).
+        /// EnableErrorCorrection was a knob that did nothing there.
         /// </summary>
         private void CapturePreRollbackTransforms(bool rollbackImminent)
         {
@@ -146,7 +146,7 @@ namespace xpTURN.Klotho.Core
             // view render path at all; a spectator has views but every one of them is on the snapshot
             // path, which draws the authoritative state and deliberately discards these deltas. Capturing
             // for a spectator produced deltas that were parked by the resync path and then never
-            // published or cleared, because the spectator update has no publish call (IMP105 C-6).
+            // published or cleared, because the spectator update has no publish call.
             if (_isReplayMode || IsServer || _isSpectatorMode) return;
             if (!_simConfig.EnableErrorCorrection) return;
             if (!rollbackImminent) return;
@@ -159,7 +159,7 @@ namespace xpTURN.Klotho.Core
             // one frame — the resync path captures from the FullState handler and the mode path captures
             // again after the tick loop — and without this the second one only overwrites the entities its
             // filter still matches, leaving the poses of anything that disappeared in between to be diffed
-            // against a world they no longer belong to (IMP105 C-4). Placed after the guards on purpose: a
+            // against a world they no longer belong to. Placed after the guards on purpose: a
             // call with rollbackImminent=false must not wipe a real capture taken earlier in the frame.
             _preRollbackPos.Clear();
             _preRollbackYaw.Clear();
@@ -187,7 +187,7 @@ namespace xpTURN.Klotho.Core
             // Steady input predicts perfectly — SimpleInputPredictor repeats the last continuous command —
             // so a delta-free stretch is normal, and that view-side check is additionally gated behind the
             // very flag it tells you to check. Here all three facts are local: the flag (checked above),
-            // the rollback (the caller's argument), and whether any target exists (this filter) (IMP103).
+            // the rollback (the caller's argument), and whether any target exists (this filter).
             //
             // ClearErrorDeltas empties these dictionaries every frame, so Count is this frame's match
             // count and not an accumulation.
@@ -245,7 +245,7 @@ namespace xpTURN.Klotho.Core
         /// threshold so snapping is the design", did not hold. And it cannot: the FullState restores the
         /// authoritative pose, so the jump is the prediction error at that instant, not a function of
         /// whatever caused the resync. Injecting a real component divergence (Scale x7) instead of a bare
-        /// hash salt moved the number by 1 cm (IMP103 #5).
+        /// hash salt moved the number by 1 cm.
         ///
         /// Replaces rather than merges: the resync swapped the whole world, so a correction still pending
         /// for the old one describes something that no longer exists.
@@ -352,8 +352,8 @@ namespace xpTURN.Klotho.Core
                         // resync published before the tick loop, then a rollback after it — and each delta
                         // measures its own jump between the same two alphas, so the motion BETWEEN them is
                         // in neither. Assigning kept only the last one, which threw away the resync
-                        // correction exactly when a verified batch followed it, i.e. the normal case
-                        // (IMP105 C-5). The teleport set was already additive; this makes the value agree
+                        // correction exactly when a verified batch followed it, i.e. the normal case.
+                        // The teleport set was already additive; this makes the value agree
                         // with the flag.
                         _posDeltas[idx] = _posDeltas.TryGetValue(idx, out var prevDelta)
                             ? prevDelta + delta
@@ -386,7 +386,7 @@ namespace xpTURN.Klotho.Core
             // in place, and diff it against the post-tick state — publishing pre_resync - post_tick, which
             // folds a tick of legitimate motion into the correction the view then smooths away. Clearing at
             // the capture cannot cover it, because that path returns at the rollbackImminent guard before
-            // reaching its own clear (IMP105 C-20).
+            // reaching its own clear.
             _preRollbackPos.Clear();
             _preRollbackYaw.Clear();
             _preRollbackTeleportTick.Clear();

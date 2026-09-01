@@ -107,7 +107,13 @@ namespace Brawler
                 return;
 
             // null/empty entitlement → "all owned" (no gating).
-            var ent = DemoEntitlement.Decode(engine.GetPlayerEntitlement(pid));
+            var raw = engine.GetPlayerEntitlement(pid);
+            var ent = DemoEntitlement.Decode(raw);
+
+            // Logged because the masks are otherwise invisible: they are seed state no log line prints and
+            // the match result barely projects. `bytes` is the one that matters on playback — 0 means
+            // nothing answered and this seed fell back to "all owned", which is NOT what a gated player had.
+            frame.Logger?.KInformation($"[Loadout] tick={frame.Tick}, pid={pid}, bytes={(raw == null ? 0 : raw.Length)}, skill=0x{ent.OwnedSkillMask:X}, consumable=0x{ent.OwnedConsumableMask:X}");
 
             var seed = frame.CreateEntity();
             frame.Add(seed, new LoadoutSeedComponent

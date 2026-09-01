@@ -331,7 +331,7 @@ Klotho deliberately does not carry your authored config for this purpose. A diag
 `ISimulationConfig` on the flow setup would read as an input — which is the same misreading the notice above
 exists to prevent — and the remedy never depends on which field differed: author it on the host or server.
 
-`SessionConfig` carries the 16 host-decided session fields (`RandomSeed`, `MaxPlayers` / `MinPlayers` / `MaxSpectators`, late-join/reconnect policy & tuning, chain-stall watchdog, countdown, match-end grace). Author it once as a `USessionConfig` ScriptableObject and reuse across scenes — `KlothoSession.Create()` copies the values into an internal `SessionConfig` (so editor assets are never mutated, and `RandomSeed = 0` is auto-replaced by `Environment.TickCount` on host). Passing `null` falls back to the runtime default `new SessionConfig()` — convenient for tests and replay paths.
+`SessionConfig` carries the 16 host-decided session fields (`RandomSeed`, `MaxPlayers` / `MinPlayers` / `MaxSpectators`, late-join/reconnect policy & tuning, chain-stall watchdog, countdown, match-end grace). Author it once as a `USessionConfig` ScriptableObject and reuse across scenes — `KlothoSession.Create()` copies the values into an internal `SessionConfig` (so editor assets are never mutated). `RandomSeed` is an **authored request**: it is copied verbatim, and `0` is resolved to a generated seed at match start by the authority — a non-zero value is used as-is. The config field is never overwritten with the effective seed, so read `IKlothoEngine.RandomSeed` (or the network service's `RandomSeed`) for the seed actually in play. Passing `null` falls back to the runtime default `new SessionConfig()` — convenient for tests and replay paths.
 
 ### 3.1 IKlothoSessionObserver — bulk-subscribed lifecycle
 
@@ -465,6 +465,7 @@ var flow = new KlothoSessionFlow(setup);
 | Mode | Entry | Notes |
 |---|---|---|
 | P2P host | `flow.StartHostAndListen(simCfg, sessionCfg, roomName, address, port)` | synchronous — folds StartHost + HostGame + Transport.Listen with auto-teardown on failure. Returns the running session, or `null` on listen-bind failure (session already torn down); rethrows on other failures after teardown |
+| Local (single player) | `flow.StartLocal(simCfg, sessionCfg, roomName?)` | synchronous, one call — creates the session, takes the host role, auto-sends PlayerConfig, and declares ready. No socket: pair it with `NullTransport` to avoid binding a port (and the firewall prompt). `sessionCfg` is **copied**, and `MinPlayers` is forced to 1 on the copy — a solo match cannot start otherwise, and the caller's config (a `ScriptableObject` in Unity) is never written to. Everything else stays as authored: `CountdownDurationMs` defaults to 3000, so the session does nothing for 3s unless you author 0. Observers receive `SessionEntryKind.Local` |
 | P2P host (low-level) | `flow.StartHost(simCfg, sessionCfg)` | synchronous — escape hatch for custom ordering / multi-transport / tests. Caller drives `HostGame` + `Transport.Listen` and rollback manually |
 | Guest (any mode) | `flow.JoinAsync(strategy, transport, host, port, roomId, sessionCfg, ct, connectTimeoutMs?)` | unified entry — the `strategy` (from `KlothoModeStrategy.Resolve(simCfg)`) supplies the pre-join handshake and roomId normalization, so multi-mode games join without branching on the mode. P2P ignores `roomId`. Recommended for games that support more than one mode |
 | P2P guest (convenience) | `flow.JoinP2PAsync(transport, host, port, sessionCfg, ct, connectTimeoutMs?)` | fixed-mode overload of `JoinAsync` — no `roomId`. guest receives `sessionCfg` from `GameStartMessage` (the passed value is a seed). `connectTimeoutMs` optional (default 15s, positive only); failure throws `JoinFailedException` (branch on `e.Reason`) |
@@ -475,7 +476,7 @@ var flow = new KlothoSessionFlow(setup);
 
 Branch by mode using `KlothoModeStrategy.Resolve(simCfg)` rather than reading `simCfg.Mode` directly. For the effective local role, call `strategy.ResolveRole(isHostPreference)` once and branch on the returned `KlothoRole` (`P2PHost` / `P2PGuest` / `SdClient`) — it folds the mode-vs-host-preference combination into a single value (ServerDriven ignores the preference), with `role.IsLocalHost()` / `role.IsReconnectEligible()` helpers.
 
-For session-created handling, implement the single role-bearing observer callback `IKlothoSessionObserver.OnSessionCreated(session, SessionEntryKind kind)` (§3.1) and branch on `kind` — one method covers all modes (Host / Guest / Replay / Spectator). (The former per-mode `KlothoSessionFlow.On*SessionCreated` events have been removed.)
+For session-created handling, implement the single role-bearing observer callback `IKlothoSessionObserver.OnSessionCreated(session, SessionEntryKind kind)` (§3.1) and branch on `kind` — one method covers all modes (Host / Guest / Replay / Spectator / Local). (The former per-mode `KlothoSessionFlow.On*SessionCreated` events have been removed.)
 
 `KlothoFlowSetup` also carries two optional factories that absorb common boilerplate (set them via the builder's `WithAutoPlayerConfig` / `WithSpectator`):
 

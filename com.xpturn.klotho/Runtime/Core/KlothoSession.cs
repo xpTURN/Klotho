@@ -372,8 +372,10 @@ namespace xpTURN.Klotho.Core
             var commandFactory = new CommandFactory();
 
             // 4. Create SessionConfig
-            // Guest: RandomSeed stays 0 because it is overwritten when GameStartMessage is received
-            // Host: if 0, auto-generated from TickCount
+            // Guest: RandomSeed stays 0 — nothing here authors one, and the effective seed arrives on
+            //        the service (GameStartMessage), not in this config
+            // Host: the authored value is copied verbatim; 0 is resolved at match start by StartGame,
+            //       so this field stays the authored request for the life of the session
             // Guest Late Join: overwritten with LateJoinAcceptMessage fields (replaces the GameStartMessage path)
             // Guest cold-start Reconnect: overwritten with ReconnectAcceptMessage fields
             JoinKind joinKind = isGuest ? setup.Connection.Kind : JoinKind.Normal;
@@ -456,9 +458,7 @@ namespace xpTURN.Klotho.Core
                 }
                 sessionConfig = new SessionConfig
                 {
-                    RandomSeed = isGuest
-                        ? 0
-                        : (src.RandomSeed == 0 ? System.Environment.TickCount : src.RandomSeed),
+                    RandomSeed = isGuest ? 0 : src.RandomSeed,
                     MaxPlayers = src.MaxPlayers,
                     MinPlayers = clampedMinPlayers,
                     MaxSpectators = src.MaxSpectators,
@@ -580,6 +580,7 @@ namespace xpTURN.Klotho.Core
             // 6. Create Engine: inject both SimulationConfig and SessionConfig
             var engine = new KlothoEngine(simConfig, sessionConfig);
             engine.AllowLayoutMismatch = setup.AllowLayoutMismatch;   // per-peer, not wire-borne (see setup doc)
+            engine.EnableReplayRecording = setup.EnableReplayRecording; // same: local decision, never on the wire
             if (setup.IsReplay)
                 engine.Initialize(simulation, setup.Logger, setup.SimulationCallbacks, setup.ViewCallbacks);
             else

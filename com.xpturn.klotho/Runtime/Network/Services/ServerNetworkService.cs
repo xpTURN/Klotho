@@ -888,7 +888,11 @@ namespace xpTURN.Klotho.Network
             _nextPlayerId = maxId + 1;
             _gameStarted = true;
 
-            _randomSeed = Environment.TickCount;
+            // Authored seed wins; 0 means "pick one". Symmetric with the P2P host — see the
+            // note there for why the substitution happens at match start and not at build time.
+            _randomSeed = _sessionConfig.RandomSeed != 0
+                ? _sessionConfig.RandomSeed
+                : Environment.TickCount;
 
             bool useCountdown = _sessionConfig.CountdownDurationMs > 0;
 

@@ -67,7 +67,7 @@ namespace xpTURN.Klotho.Godot
         // and 0 is a valid player id that a P2P host holds. Without the IsSpectatorMode guard a spectator
         // watching a P2P session matched its own fallback against the host's entity and rendered that one
         // predicted: running ahead of every other entity and snapping on rollback. PlayerViewRegistry's
-        // IsActuallyLocal already disambiguated the same collision the same way (IMP103).
+        // IsActuallyLocal already disambiguated the same collision the same way.
         //
         // hasOwner exists so the no-owner case shares this expression instead of duplicating it. A sentinel
         // ownerId was the alternative and is deliberately avoided: -1 already means "no local player"
@@ -103,7 +103,7 @@ namespace xpTURN.Klotho.Godot
             // normally corrects that within the same frame (the session driver runs at a lower
             // ProcessPriority than the updater), but it never runs for flags that skip the position line
             // (DisableUpdate / DisablePositionUpdate) and it writes nothing on the snapshot branch that
-            // finds the entity on no timeline at all — late join and ring warmup reach that (IMP105 C-17).
+            // finds the entity on no timeline at all — late join and ring warmup reach that.
             //
             // Written as the LOCAL transform, and on the node while it is still detached: the steady-state
             // write does the same (Position = newPos with a world-space value), so the updater node being
@@ -123,7 +123,7 @@ namespace xpTURN.Klotho.Godot
         /// WITHOUT calling base — adopting a scene-placed object is the usual reason — skips the pose
         /// write above and has no other way to ask the same question. Returns false for an entity with no
         /// transform; leave the pose alone then. Unity's factory carries the same helper under the same
-        /// name (IMP105 C-13).
+        /// name.
         /// </summary>
         protected static bool TryGetSpawnPose(Frame frame, EntityRef entity, out Vector3 pos, out Quaternion rot)
         {

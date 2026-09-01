@@ -58,7 +58,7 @@ namespace xpTURN.Samples.P2pSample
 			// which is a measurement stimulus rather than a setting: with no delay every remote input is
 			// late, so the client rolls back on practically every tick and the correction deltas are easy
 			// to watch. It is a bad thing to inherit by copying this sample (the default is 4, and the
-			// interface documents 2~6) — set it to 0 temporarily if you want that view (IMP105 C-14).
+			// interface documents 2~6) — set it to 0 temporarily if you want that view.
 			_simCfg   = new SimulationConfig { EnableErrorCorrection = true };
 			_sesCfg   = new SessionConfig { MaxPlayers = 2, MinPlayers = 2, CountdownDurationMs = 3000 };
 			_input    = new P2pInputCapture();
@@ -216,7 +216,7 @@ namespace xpTURN.Samples.P2pSample
 		private static IKLogger CreateLogger()
 			// Default level, like the sibling SD sample. Debug was pinned here to capture the per-tick
 			// [EC][DIAG] / [ViewLife] lines while the correction work was being measured; leaving it on
-			// ships a sample that writes those to file on every tick (IMP105 C-14). Pass level: KLogLevel.Debug
+			// ships a sample that writes those to file on every tick. Pass level: KLogLevel.Debug
 			// when you need them.
 			=> GodotKlothoLogger.CreateDefault(filePrefix: "P2p", categoryName: "P2p", timestampFormat: "HH:mm:ss.fff");
 

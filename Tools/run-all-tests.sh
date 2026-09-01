@@ -2,17 +2,25 @@
 #
 # run-all-tests.sh — Klotho integrated test runner
 #
-# Runs the .NET unit tests (dotnet test) plus the Unity Test Runner suites
-# (EditMode, via command line) from a single entry point and prints a final
-# console summary report. Two Unity projects are covered: Brawler on the primary
-# editor, and Unity2022.Tests on the 2022.3 LTS line the package declares as its
-# minimum (a separate editor install).
+# Runs the .NET unit tests (dotnet test), the Brawler dedicated server's own
+# self-hosted suite (`--test`), and the Unity Test Runner suites (EditMode, via
+# command line) from a single entry point, then prints a final console summary
+# report. Two Unity projects are covered: Brawler on the primary editor, and
+# Unity2022.Tests on the 2022.3 LTS line the package declares as its minimum (a
+# separate editor install).
+#
+# The server suite is not a `dotnet test` project — it is a mini-framework inside
+# the server binary (rooms, transports and threads that NUnit's host does not
+# give it), so it is run as `dotnet run -- --test` and its console output is
+# parsed. It is the only place multi-room lifecycle, the replay verifier and the
+# game-side join seeding are covered.
 #
 # Usage:
 #   Tools/run-all-tests.sh                  # run everything (.NET + both Unity projects)
 #   Tools/run-all-tests.sh --dotnet-only    # .NET tests only
 #   Tools/run-all-tests.sh --unity-only     # Unity EditMode tests only
 #   Tools/run-all-tests.sh --no-unity-2022  # skip the 2022.3 LTS project (editor not installed)
+#   Tools/run-all-tests.sh --no-server-test # skip the Brawler server's own --test suite
 #   Tools/run-all-tests.sh --no-build       # pass --no-build to dotnet test (every configuration
 #                                           # below must already be built — checked up front)
 #   Tools/run-all-tests.sh --debug          # dotnet test with the Debug configuration only
@@ -51,6 +59,11 @@ UNITY_2022_VERSION="2022.3.62f3"
 UNITY_2022_PROJECT="${REPO_ROOT}/Samples/Unity2022.Tests"
 UNITY_2022_PATH="${UNITY_2022_PATH:-/Applications/Unity/Hub/Editor/${UNITY_2022_VERSION}/Unity.app/Contents/MacOS/Unity}"
 
+# The Brawler dedicated server's self-hosted suite. Runs through `dotnet run`, not `dotnet test`:
+# its cases spin up rooms, transports and threads, so they live in the binary rather than in a test
+# host. Same configurations as the dotnet tests below, for the same reason (dev-only guards).
+SERVER_TEST_PROJECT="Samples/Brawler/Server"
+
 # .NET test projects
 DOTNET_TEST_PROJECTS=(
   "Tools/KlothoGenerator.Tests/KlothoGenerator.Tests.csproj"
@@ -62,12 +75,13 @@ DOTNET_TEST_PROJECTS=(
 RUN_DOTNET=1
 RUN_UNITY=1
 RUN_UNITY_2022=1
+RUN_SERVER_TEST=1
 DOTNET_NO_BUILD=0
 # Configurations passed to dotnet test, in run order. Debug alone matches the
 # dotnet default, so the unqualified invocation behaves as it always has.
 # Both by default. A dev-only guard (#if DEBUG / DEVELOPMENT_BUILD / UNITY_EDITOR) compiles out of a
 # Release build, so a Debug-only default silently skips every test that covers one — which is exactly
-# how an engine warning added under such a guard shipped "passing" while Release failed on it (IMP103).
+# how an engine warning added under such a guard shipped "passing" while Release failed on it.
 # Several guards already exist (Filter loop-mutation watch, rebake pool overlap, EC diagnostics), so the
 # gap recurs. The cost is roughly double the dotnet time; --debug restores the old behaviour.
 DOTNET_CONFIGS=("Debug" "Release")
@@ -79,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --dotnet-only)   RUN_UNITY=0 ;;
     --unity-only)    RUN_DOTNET=0 ;;
     --no-unity-2022) RUN_UNITY_2022=0 ;;
+    --no-server-test) RUN_SERVER_TEST=0 ;;
     --no-build)      DOTNET_NO_BUILD=1 ;;
     --debug)         DOTNET_CONFIGS=("Debug") ;;
     --release)       DOTNET_CONFIGS=("Release") ;;
@@ -122,13 +137,17 @@ run_dotnet_tests() {
     # project with `dotnet test`'s "The argument <dll> is invalid" — which never mentions the build —
     # and then again as a missing suite in the summary. Name the configuration instead. Failing is
     # correct here: classifying an unbuilt configuration as "skipped" would blunt the missing-suite
-    # gate, whose whole job is to notice a suite that produced no result (IMP105 S-1).
+    # gate, whose whole job is to notice a suite that produced no result.
     local missing=() _cfg _proj
     for _cfg in "${DOTNET_CONFIGS[@]}"; do
       for _proj in "${DOTNET_TEST_PROJECTS[@]}"; do
         [[ -d "${REPO_ROOT}/$(dirname "${_proj}")/bin/${_cfg}" ]] \
           || missing+=("${_cfg}: $(dirname "${_proj}")")
       done
+      # The server suite shares the flag, so it shares the check — an unbuilt configuration there
+      # would otherwise surface as a `dotnet run` build error in the middle of the run.
+      [[ "${RUN_SERVER_TEST}" -eq 1 && ! -d "${REPO_ROOT}/${SERVER_TEST_PROJECT}/bin/${_cfg}" ]] \
+        && missing+=("${_cfg}: ${SERVER_TEST_PROJECT}")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
       echo "${C_RED}--no-build was given but these have never been built:${C_RST}" >&2
@@ -156,6 +175,35 @@ run_dotnet_tests() {
       rc=$?
       [[ ${rc} -ne 0 ]] && overall=1
     done
+  done
+  return ${overall}
+}
+
+# ── Brawler server self-hosted suite (dotnet run -- --test) ──────────────────
+# Writes one log per configuration; the summary parses the console output because this suite has no
+# machine-readable result format. Its exit code is the failure count, so it is authoritative even if
+# the parse comes up empty (a crash mid-suite prints no final line).
+run_server_tests() {
+  section "Brawler server suite (dotnet run -- --test) — configuration: ${DOTNET_CONFIGS[*]}"
+
+  local build_flag=()
+  [[ "${DOTNET_NO_BUILD}" -eq 1 ]] && build_flag=(--no-build)
+
+  local config log rc
+  local overall=0
+  for config in "${DOTNET_CONFIGS[@]}"; do
+    log="${RESULTS_DIR}/servertest-brawler-${config}.log"
+    echo "${C_BLD}▶ Brawler server --test [${config}]${C_RST}  (log: ${log})"
+    # `-v q` and `-c` belong to `dotnet run`; everything after `--` is the app's argv. Order matters:
+    # a flag `dotnet run` does not recognise is forwarded, and this app reads argv[0] as a port —
+    # `--nologo` lands there and dies in int.Parse.
+    dotnet run --project "${REPO_ROOT}/${SERVER_TEST_PROJECT}" \
+      --configuration "${config}" \
+      ${build_flag[@]+"${build_flag[@]}"} \
+      -v q \
+      -- --test 2>&1 | tee "${log}"
+    rc=${PIPESTATUS[0]}
+    [[ ${rc} -ne 0 ]] && overall=1
   done
   return ${overall}
 }
@@ -233,6 +281,12 @@ print_summary() {
       done
     done
   fi
+  if [[ "${RUN_SERVER_TEST}" -eq 1 && "${RUN_DOTNET}" -eq 1 ]]; then
+    local _scfg
+    for _scfg in "${DOTNET_CONFIGS[@]}"; do
+      expected+=("Server: brawler-${_scfg}")
+    done
+  fi
   if [[ "${RUN_UNITY}" -eq 1 ]]; then
     expected+=("Unity: brawler-editmode")
     [[ "${RUN_UNITY_2022}" -eq 1 ]] && expected+=("Unity: 2022lts-editmode")
@@ -240,7 +294,7 @@ print_summary() {
 
   EXPECTED_SUITES="$(printf '%s\n' ${expected[@]+"${expected[@]}"})" \
   RESULTS_DIR="${RESULTS_DIR}" python3 - <<'PY'
-import glob, os, sys
+import glob, os, re, sys
 import xml.etree.ElementTree as ET
 
 results_dir = os.environ["RESULTS_DIR"]
@@ -284,6 +338,31 @@ for path in sorted(glob.glob(os.path.join(results_dir, "dotnet-*.trx"))):
         if local(el.tag) == "UnitTestResult" and el.get("outcome") not in ("Passed", "NotExecuted", None):
             if el.get("outcome") == "Failed":
                 failures.append((suite, el.get("testName", "?")))
+
+# --- Brawler server suite (console log) ---
+# The suite prints one "=== <label> results: N passed, M failed ===" line per sub-suite (one of them
+# has no label: "=== Results: ..."), and one "  FAIL: <name>" line per failed case. Counts are summed
+# into a single row per configuration: sub-suites get added and renamed over time, and an expected-row
+# list that enumerated them would break every time one does — which is how this suite came to be
+# missing from the runner in the first place.
+for path in sorted(glob.glob(os.path.join(results_dir, "servertest-*.log"))):
+    suite = "Server: " + os.path.basename(path)[len("servertest-"):-len(".log")]
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except Exception as e:
+        rows.append((suite, 0, 0, 0, 0)); failures.append((suite, f"<parse failed: {e}>")); continue
+    counts = re.findall(r"^=== .*?[Rr]esults: (\d+) passed, (\d+) failed ===", text, re.M)
+    if not counts:
+        # No final line at all: the run died before any sub-suite finished. Reported as a parse
+        # error so the summary fails even though the table would otherwise show a clean 0/0.
+        rows.append((suite, 0, 0, 0, 0))
+        failures.append((suite, "<parse failed: no result lines — suite crashed or produced no output>"))
+        continue
+    passed = sum(int(p) for p, _ in counts)
+    failed = sum(int(f) for _, f in counts)
+    rows.append((suite, passed + failed, passed, failed, 0))
+    for name in re.findall(r"^  FAIL: (.+)$", text, re.M):
+        failures.append((suite, name.strip()))
 
 # --- Unity NUnit3 XML ---
 for path in sorted(glob.glob(os.path.join(results_dir, "unity-*.xml"))):
@@ -364,9 +443,11 @@ PY
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 DOTNET_RC=0
+SERVER_RC=0
 UNITY_RC=0
 
 [[ "${RUN_DOTNET}" -eq 1 ]] && { run_dotnet_tests; DOTNET_RC=$?; }
+[[ "${RUN_DOTNET}" -eq 1 && "${RUN_SERVER_TEST}" -eq 1 ]] && { run_server_tests; SERVER_RC=$?; }
 [[ "${RUN_UNITY}"  -eq 1 ]] && { run_unity_tests;  UNITY_RC=$?; }
 
 print_summary
@@ -376,7 +457,7 @@ echo
 echo "Result files: ${RESULTS_DIR}"
 
 # Exit code: non-zero if any run or the summary failed
-if [[ ${DOTNET_RC} -ne 0 || ${UNITY_RC} -ne 0 || ${SUMMARY_RC} -ne 0 ]]; then
+if [[ ${DOTNET_RC} -ne 0 || ${SERVER_RC} -ne 0 || ${UNITY_RC} -ne 0 || ${SUMMARY_RC} -ne 0 ]]; then
   exit 1
 fi
 exit 0

@@ -452,7 +452,7 @@ namespace xpTURN.Klotho.Helper.Tests
                 if (capturedPeer.Engine.IsReplayMode) return;
                 if (!capturedPeer.Engine.ReplaySystem.IsRecording) return;
                 var (data, hash) = capturedPeer.Simulation.SerializeFullStateWithHash();
-                capturedPeer.Engine.ReplaySystem.SetInitialStateSnapshot(data, hash);
+                capturedPeer.Engine.ReplaySystem.SetInitialStateSnapshot(data, hash, capturedPeer.Engine.CurrentTick);
             };
 
             return peer;
