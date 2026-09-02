@@ -23,9 +23,9 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
     ///
     /// <para>Everything here is immutable and loaded once. The navmesh deserialize and the rebake snapshot
     /// are expensive enough that rooms must not pay them: rooms are created on the server loop's receive
-    /// stage, so a per-room construction cost is subtracted from every other room's tick budget that cycle
-    /// (Docs/IMP/IMP96/Report-MultiRoomThreading.md §H-1). It is also what the rebake API asks for — rooms
-    /// sharing a stage call CreateSnapshot once and construct an FPNavMeshRebakeContext each.</para>
+    /// stage, so a per-room construction cost is subtracted from every other room's tick budget that cycle.
+    /// It is also what the rebake API asks for — rooms sharing a stage call CreateSnapshot once and
+    /// construct an FPNavMeshRebakeContext each.</para>
     /// </summary>
     internal sealed class BrawlerStageAssets
     {

@@ -190,7 +190,7 @@ namespace Brawler
             }
         }
 
-        // Perf-report group labels (IMP102). Short on purpose: the longest name sets the report's
+        // Perf-report group labels. Short on purpose: the longest name sets the report's
         // whole first column. "engine" marks systems the ENGINE owns that this game registers into
         // its own pipeline. Constants because the report groups by EXACT string — "combat" and
         // "Combat" would be two groups (only trimming is applied). Diagnostic only: these never

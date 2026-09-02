@@ -1308,7 +1308,7 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
 
         #region ContactNormalDirection
 
-        // Regression for the A->B contact-normal contract (IMP107). Both cases failed before the
+        // Regression for the A->B contact-normal contract. Both cases failed before the
         // dispatch sign correction: the pair pushed together (1.108) and the capsule sank into the
         // static mesh floor (0.538).
         static FPMeshData MeshFloor()

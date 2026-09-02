@@ -563,7 +563,7 @@ namespace xpTURN.Klotho.Deterministic.Physics
                     // The band is defined on the STATIC SURFACE normal — the direction the static
                     // face points back at the body — which is the negation of the contact normal
                     // (A→B = dynamic body → static collider). Positive Y is then an upward-facing
-                    // (walkable) surface for every collider type; before IMP107 this read the raw
+                    // (walkable) surface for every collider type; this used to read the raw
                     // contact normal and so only fired for meshes, whose normal was inverted.
                     // Box collider: an edge contact's normal can differ from the face normal, so
                     // snap to the nearest face normal before judging.

@@ -74,6 +74,50 @@ namespace xpTURN.Klotho.ECS
 
         // --- Component access API (signature unchanged, return type replaced with ComponentStorageFlat<T>) ---
 
+        /// <summary>
+        /// The per-type storage view for <typeparamref name="T"/> over this frame's heap.
+        /// <b>Supported API</b>: holding the returned struct across a loop, instead of calling
+        /// <see cref="Get{T}(EntityRef)"/> once per element, is the intended way to read or write many
+        /// components of one type.
+        /// </summary>
+        /// <returns>A view bound to THIS frame's heap. <c>ComponentStorageFlat&lt;T&gt;</c> is a
+        /// <c>readonly struct</c> holding offsets, so copying it is free and holding one is fine.</returns>
+        /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is registered but excluded
+        /// from this simulation's reserved set (<c>ISimulationConfig.PrunedComponentTypeIds</c>). A pruned
+        /// type has no heap region, so this fails fast rather than aliasing another type's storage.</exception>
+        /// <remarks>
+        /// <para><b>Lifetime is the frame, not the simulation.</b> The heap array is allocated once in the
+        /// <see cref="Frame"/> constructor and never resized, so it does not move for lifetime reasons. But the
+        /// ring rotates frames: a view taken from one frame keeps pointing at THAT frame's heap. Re-acquire per
+        /// tick, and after a rollback in particular.</para>
+        ///
+        /// <para><b>Offsets are stable for the session.</b> They come from the process-global registry layout
+        /// (<c>maxEntities</c>, per-type <c>maxCount</c>, the reservation-prune set), which are determinism
+        /// inputs frozen before the first frame is built. Acquire after the world is built.</para>
+        ///
+        /// <para><b>Hoist the spans, not just this call, for a hot pass.</b> Every access to
+        /// <c>ComponentsSpan</c> / <c>SparseSpan</c> / <c>DenseSpan</c> re-derives the span, and
+        /// <c>Get</c> / <c>Has</c> do that per call — so hoisting this method alone removes the type-id
+        /// lookup and the struct construction, but leaves the per-element span work in place. Lifting the
+        /// spans themselves out of the loop is what removes it, and both properties are public for that
+        /// reason.</para>
+        ///
+        /// <para><b>Indexed reads are unchecked.</b> <c>Get</c> / <c>GetReadOnly</c> are
+        /// <c>ComponentsSpan[SparseSpan[index]]</c> with no membership test; an entity without
+        /// <typeparamref name="T"/> leaves <c>-1</c> in its sparse slot. A hand-hoisted loop must already know
+        /// every element carries the component — from a <c>Filter</c> pass, or its own invariant. Use
+        /// <c>Has</c> when it does not.</para>
+        ///
+        /// <para><b>Pinning.</b> A <c>fixed</c> block over a span pins for the duration of the block, which
+        /// covers work started and joined inside it. <c>MemoryMarshal.GetReference</c> +
+        /// <c>Unsafe.AsPointer</c> is NOT a pin — the heap is an ordinary managed array, so a pointer kept past
+        /// the block can be invalidated by a GC move. That failure is intermittent and presents as a desync.
+        /// There is deliberately no accessor for the array itself.</para>
+        ///
+        /// <para><b>Writes must be scheduling-independent.</b> Reads may fan out across threads, but anything
+        /// that lands in the frame heap must do so in an order that does not depend on thread scheduling, or
+        /// the simulation stops being deterministic.</para>
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ComponentStorageFlat<T> GetStorage<T>() where T : unmanaged, IComponent
         {

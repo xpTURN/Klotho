@@ -32,6 +32,12 @@ namespace xpTURN.Klotho.Core
         private int _cachedFullStateTick = -1;
         private bool _staticMismatchLogged;
 
+        // Registration audit for the fingerprint sources — see AuditFingerprintSources. One shot per
+        // engine: the flag records that the AUDIT RAN, not that it warned, so a source registered after
+        // the first fingerprint call is never re-examined (a deliberate limit — the sibling startup
+        // warning has the same, earlier, snapshot horizon).
+        private bool _fingerprintSourcesAudited;
+
         // Counts FullStateResponse messages dropped by the silent-ignore guard in
         // HandleFullStateReceived (received outside Requested / expectingFullState state).
         // Exposed to the network-service telemetry emitter.
@@ -648,6 +654,12 @@ namespace xpTURN.Klotho.Core
             if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation ecs)
                 return new FingerprintBreakdown(layout, 0, 0, 0);
 
+            // Latch FIRST, then count: the audit walks the system list three times and allocates a
+            // small list per interface. Once per engine that is free; per call it would ride along
+            // on every resync and on the replay snapshot path.
+            if (!_fingerprintSourcesAudited)
+                AuditFingerprintSources(ecs);
+
             var svc = ecs.GetSystem<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>();
             var nav = ecs.GetSystem<xpTURN.Klotho.Deterministic.Navigation.INavFingerprintSource>();
             // The game's own slot. The two sources above are things the engine can see for
@@ -662,6 +674,64 @@ namespace xpTURN.Klotho.Core
                 svc?.GetStaticFingerprint() ?? 0,
                 nav?.GetNavFingerprint() ?? 0,
                 game?.GetGameFingerprint() ?? 0);
+        }
+
+        /// <summary>
+        /// Reports fingerprint sources that are registered more than once, where the fingerprint is
+        /// resolved. Sibling of <c>WarnOnUnfoldedRebakeInputs</c>: that one says "no source at all",
+        /// this one says "two or more, and only the first is folded".
+        ///
+        /// <para><b>Why here.</b> The three terms above come from <c>GetSystem&lt;T&gt;</c>, which is
+        /// <c>SystemRunner.Find&lt;T&gt;</c> — the FIRST registered match, in registration order. A game
+        /// with two nav systems therefore has exactly one mesh covered, chosen by wiring order, and the
+        /// other one silently outside every cross-peer check. That is worse than silence: the check is
+        /// independent of the state hash, so the uncovered divergence surfaces later as an agent desync
+        /// while the static comparison reports a match.</para>
+        ///
+        /// <para><b>Why not at startup.</b> Registration is the game's to schedule — <c>AddSystem</c> is
+        /// public and the engine has no point that is guaranteed to be after it. Auditing here does not
+        /// fix that, but it aligns the audit with the feature: it sees exactly what the fingerprint
+        /// comparison itself sees, at the same instant. It cannot be blinder than the thing it audits.</para>
+        ///
+        /// <para><b>A warning, not an error</b>, for the reason the sibling records: a second source may
+        /// be a deliberate choice (folded into the game slot instead), and promoting this to a stop
+        /// condition would make those games unjudgeable. Diagnostic only — no term, wire value or
+        /// selection rule changes.</para>
+        /// </summary>
+        private void AuditFingerprintSources(xpTURN.Klotho.ECS.EcsSimulation ecs)
+        {
+            _fingerprintSourcesAudited = true;
+
+            WarnOnMultipleFingerprintSources<xpTURN.Klotho.Deterministic.Physics.IStaticColliderService>(ecs);
+            WarnOnMultipleFingerprintSources<xpTURN.Klotho.Deterministic.Navigation.INavFingerprintSource>(ecs);
+            WarnOnMultipleFingerprintSources<xpTURN.Klotho.ECS.IGameFingerprintSource>(ecs);
+        }
+
+        private void WarnOnMultipleFingerprintSources<T>(xpTURN.Klotho.ECS.EcsSimulation ecs) where T : class
+        {
+            // Buffer per call rather than a cached one: this runs once per engine, and a shared buffer
+            // would be a cross-room race (a server ticks its rooms on the ThreadPool).
+            var found = new List<T>();
+            if (ecs.GetSystems(found) < 2)
+                return;
+
+            // found[0] is the folded one: FindAll and Find walk the same entry list in the same order.
+            // Telling a game to fold the game slot INTO the game slot would be unactionable, so that
+            // case gets its own remedy.
+            string remedy = typeof(T) == typeof(xpTURN.Klotho.ECS.IGameFingerprintSource)
+                ? "Combine them into ONE IGameFingerprintSource whose GetGameFingerprint folds every table "
+                  + "you need compared"
+                : "Fold the extra sources into IGameFingerprintSource.GetGameFingerprint(), or call "
+                  + "GetSystems<T>(List<T>) and fold all of them yourself";
+
+            _logger?.KWarning(
+                $"[KlothoEngine] {found.Count} systems implement {typeof(T).Name}, but only the first " +
+                $"({found[0].GetType().Name}) is folded into the static environment fingerprint — " +
+                $"GetSystem<T> returns the first registered match, so which one that is depends on " +
+                $"registration order. The rest are NOT cross-checked at join, and a divergence in them " +
+                $"surfaces several ticks later as a dynamic-body/agent desync while the static comparison " +
+                $"reports a match. {remedy}. If you already fold them elsewhere, this line is a known " +
+                $"false positive.");
         }
 
         /// <summary>

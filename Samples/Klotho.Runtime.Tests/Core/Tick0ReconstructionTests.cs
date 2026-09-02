@@ -21,7 +21,7 @@ namespace xpTURN.Klotho.Core.Tests
     ///
     /// <para><b>What these gates do NOT cover.</b> Both the recording and the playback here run in the
     /// same .NET process, so they say the implementation is right — not that Unity's tick 0 and .NET's
-    /// tick 0 are the same world. That premise is untested (Plan-Tick0Reconstruction §8-6) and only a
+    /// tick 0 are the same world. That premise is untested, and only a
     /// file recorded by the Unity P2P host can put it on trial.</para>
     /// </summary>
     [TestFixture]

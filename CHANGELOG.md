@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.1] - 2026-09-02
+
+### Added — diagnostics
+
+- **The engine now says so when a fingerprint source is registered more than once.** The static environment fingerprint takes its three terms through `GetSystem<T>()`, which returns the **first registered match** — so a game with two `INavFingerprintSource` systems (a second navmesh for flyers, say) has exactly one mesh cross-checked at join and the other outside every check, with *which one* decided by wiring order. That was silent, and silence was the better half of it: the check is independent of the state hash, so a divergence in the uncovered source surfaces several ticks later as a dynamic-body/agent desync **while the static comparison reports a match** — you go looking at agent positions for a bug that is in a mesh. The warning names the interface, the count, and the implementation that is actually folded, and carries the two ways out (fold the extras into `IGameFingerprintSource.GetGameFingerprint()`, or call `GetSystems<T>(List<T>)` and fold them yourself). It covers all three sources, not just navigation — `IStaticColliderService` and `IGameFingerprintSource` are resolved the same way, and the game slot is the likeliest to be split across systems precisely because it is the slot we tell you to use.
+
+  **Diagnostic only** — no fingerprint term, wire value, or selection rule changes; `GetSystem<T>` still folds the first match. It is a warning rather than an error because a second source can be a deliberate choice (folded into the game slot instead), and it says so: a line you already handle is marked a known false positive. Emitted **once per engine**, at the first fingerprint computation rather than at startup — `AddSystem` is public, so the engine has no moment guaranteed to be after your wiring, and auditing where the fingerprint is actually resolved means the audit sees exactly what the comparison sees. Sources registered after that first computation are not examined.
+
 ## [0.11.0] - 2026-09-01
 
 ### Added — single-player entry
