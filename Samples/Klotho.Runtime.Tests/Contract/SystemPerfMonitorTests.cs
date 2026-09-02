@@ -262,9 +262,8 @@ namespace xpTURN.Klotho.Core.Tests
             // are sized and no rare-path allocation remains.
             for (int i = 0; i < 4; i++) runner.RunUpdateSystems(ref frame);
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < 200; i++) runner.RunUpdateSystems(ref frame);
-            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            long allocated = AllocProbe.SmallestWindow(
+                () => { for (int i = 0; i < 200; i++) runner.RunUpdateSystems(ref frame); });
 
             Assert.AreEqual(0, allocated);
         }

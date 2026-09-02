@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using NUnit.Framework;
 
 using xpTURN.Klotho.Deterministic.Math;
+using xpTURN.Klotho.Core.Tests;
 
 namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 {
@@ -279,13 +280,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             for (int i = 0; i < 64; i++)
                 FPNavMeshRebaker.TryValidateOne(slab, existing, 1, ghost, out _, scratch);
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < 64; i++)
-                FPNavMeshRebaker.TryValidateOne(slab, existing, 1, ghost, out _, scratch);
-            long after = GC.GetAllocatedBytesForCurrentThread();
+            long allocated = AllocProbe.SmallestWindow(() =>
+            {
+                for (int i = 0; i < 64; i++)
+                    FPNavMeshRebaker.TryValidateOne(slab, existing, 1, ghost, out _, scratch);
+            });
 
-            Assert.AreEqual(0, after - before,
-                $"64 previews allocated {after - before} B — the scratch stopped being reused");
+            Assert.AreEqual(0, allocated,
+                $"64 previews allocated {allocated} B — the scratch stopped being reused");
         }
 
         // ── V5 — the snapshot stays clean ────────────────────────────────────────

@@ -203,14 +203,15 @@ namespace xpTURN.Klotho.Core.Tests
                 sim.ComputeAndRecordHashHistory(tick);
             sim.RecordHashHistory(3);
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < 200; i++)
+            long allocated = AllocProbe.SmallestWindow(() =>
             {
-                sim.GetStateHash();                    // fills the reusable breakdown (history enabled)
-                sim.RecordHashHistory(i % 16);         // check-tick shape: reuse the just-computed hash
-                sim.ComputeAndRecordHashHistory(i % 16);   // per-tick shape
-            }
-            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+                for (int i = 0; i < 200; i++)
+                {
+                    sim.GetStateHash();                    // fills the reusable breakdown (history enabled)
+                    sim.RecordHashHistory(i % 16);         // check-tick shape: reuse the just-computed hash
+                    sim.ComputeAndRecordHashHistory(i % 16);   // per-tick shape
+                }
+            });
 
             Assert.AreEqual(0, allocated);
         }

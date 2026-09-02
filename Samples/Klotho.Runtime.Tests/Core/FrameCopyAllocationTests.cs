@@ -34,9 +34,10 @@ namespace xpTURN.Klotho.Core.Tests
 
             for (int i = 0; i < Warmup; i++) target.CopyFrom(source);
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < Iterations; i++) target.CopyFrom(source);
-            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            // AllocProbe, not a bare window: this gate reported 5,344 B in CI on a loop that is a
+            // single BlockCopy, which is the instrument's quantum artifact rather than a regression.
+            long allocated = AllocProbe.SmallestWindow(
+                () => { for (int i = 0; i < Iterations; i++) target.CopyFrom(source); });
 
             Assert.That(allocated, Is.Zero,
                 $"CopyFrom allocated {allocated} bytes over {Iterations} calls — a regression here means the "

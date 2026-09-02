@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using NUnit.Framework;
 using xpTURN.Klotho.Helper.Tests;
+using xpTURN.Klotho.Core.Tests;
 
 namespace xpTURN.Klotho.ECS.Tests
 {
@@ -193,10 +194,7 @@ namespace xpTURN.Klotho.ECS.Tests
                 AddThenRemove(sim.Frame, entity);
 
             const int iterations = 256;
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < iterations; i++)
-                AddThenRemove(sim.Frame, entity);
-            long perCycle = (GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
+            long perCycle = AllocProbe.SmallestPerCall(() => AddThenRemove(sim.Frame, entity), iterations);
 
             Assert.AreEqual(0, perCycle,
                 "the gate must be free for a project that registers no listeners");
@@ -283,10 +281,7 @@ namespace xpTURN.Klotho.ECS.Tests
                 SpawnThenDestroy(sim.Frame);
 
             const int iterations = 128;
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < iterations; i++)
-                SpawnThenDestroy(sim.Frame);
-            long perCycle = (GC.GetAllocatedBytesForCurrentThread() - before) / iterations;
+            long perCycle = AllocProbe.SmallestPerCall(() => SpawnThenDestroy(sim.Frame), iterations);
 
             Assert.AreEqual(0, perCycle);
         }

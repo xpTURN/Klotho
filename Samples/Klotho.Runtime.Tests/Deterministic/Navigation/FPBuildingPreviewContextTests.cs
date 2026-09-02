@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using NUnit.Framework;
 
 using xpTURN.Klotho.Deterministic.Math;
+using xpTURN.Klotho.Core.Tests;
 
 namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 {
@@ -369,11 +370,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 FPNavMeshRebaker.TryValidateOne(ctx, g2, out _);
             }
 
-            Carve(ctx, placed);
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            FPNavMeshRebaker.TryValidateOne(ctx, g1, out _);
-            FPNavMeshRebaker.TryValidateOne(ctx, g2, out _);
-            long alloc = GC.GetAllocatedBytesForCurrentThread() - before;
+            // The rebake is the window's precondition, not part of it — see AllocProbe's setup hook.
+            long alloc = AllocProbe.SmallestWindow(() =>
+            {
+                FPNavMeshRebaker.TryValidateOne(ctx, g1, out _);
+                FPNavMeshRebaker.TryValidateOne(ctx, g2, out _);
+            }, setup: () => Carve(ctx, placed));
 
             Assert.Less(alloc, 64,
                 $"a preview allocated {alloc} B — the point of this form is that the caller keeps "

@@ -4,6 +4,7 @@ using NUnit.Framework;
 
 using xpTURN.Klotho.ECS.Diagnostics;
 using xpTURN.Klotho.Helper.Tests;
+using xpTURN.Klotho.Core.Tests;
 
 namespace xpTURN.Klotho.ECS.Tests
 {
@@ -350,9 +351,8 @@ namespace xpTURN.Klotho.ECS.Tests
             var frame = NewFrame();
             for (int i = 0; i < 4; i++) runner.RunUpdateSystems(ref frame);
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < 200; i++) runner.RunUpdateSystems(ref frame);
-            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            long allocated = AllocProbe.SmallestWindow(
+                () => { for (int i = 0; i < 200; i++) runner.RunUpdateSystems(ref frame); });
 
             Assert.AreEqual(0, allocated, "cleanup passes must reuse their buffer");
         }
