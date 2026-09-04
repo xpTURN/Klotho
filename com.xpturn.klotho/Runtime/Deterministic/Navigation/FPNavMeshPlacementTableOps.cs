@@ -97,6 +97,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     term ^= p.Placement.ShapeId * 31L + p.Placement.Orientation;
                     term ^= p.Placement.CentreX.RawValue * 17L
                           + p.Placement.CentreZ.RawValue * 13L + p.Placement.Y.RawValue;
+                    // Retain changes the geometry the rebake produces, so it has to change the
+                    // digest. Mixed INTO the per-entry term rather than added to the running sum:
+                    // this digest is order-independent by construction (a sum of per-entry terms),
+                    // and a term outside that structure would break the property the summary
+                    // promises. Leaving it out entirely is worse than a collision — a mode toggle
+                    // would read as "nothing changed" and the driver would keep the mesh it has.
+                    term ^= p.Placement.Retain ? unchecked((long)0x9E3779B97F4A7C15UL) : 0L;
                     tag += term;
                 }
             }

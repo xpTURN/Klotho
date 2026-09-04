@@ -230,7 +230,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             var newPos = new FPVector3(FP64.FromInt(2), FP64.Zero, FP64.FromInt(1));
             var oldPos = new FPVector3(FP64.FromInt(1), FP64.Zero, FP64.FromInt(1));
 
-            var result = system.ConstrainToNavMesh(newPos, oldPos, 0);
+            var result = system.ConstrainToNavMesh(newPos, oldPos, 0, FPNavAgentSystem.DEFAULT_AREA_MASK);
 
             Assert.AreEqual(2f, result.x.ToFloat(), EPSILON);
             Assert.AreEqual(1f, result.z.ToFloat(), EPSILON);
@@ -245,7 +245,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             var newPos = new FPVector3(FP64.FromInt(2), FP64.Zero, FP64.FromInt(-1));
             var oldPos = new FPVector3(FP64.FromInt(2), FP64.Zero, FP64.FromInt(1));
 
-            var result = system.ConstrainToNavMesh(newPos, oldPos, 0);
+            var result = system.ConstrainToNavMesh(newPos, oldPos, 0, FPNavAgentSystem.DEFAULT_AREA_MASK);
 
             float resultZ = result.z.ToFloat();
             Assert.IsTrue(resultZ >= -EPSILON, "Z coordinate must be within NavMesh bounds or be oldPos");
@@ -386,7 +386,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             var newPos = new FPVector3(FP64.FromInt(-5), FP64.Zero, FP64.FromInt(-5));
             var oldPos = new FPVector3(FP64.FromInt(1), FP64.Zero, FP64.FromInt(1));
 
-            var result = system.ConstrainToNavMesh(newPos, oldPos, -1);
+            var result = system.ConstrainToNavMesh(newPos, oldPos, -1, FPNavAgentSystem.DEFAULT_AREA_MASK);
 
             Assert.AreEqual(1f, result.x.ToFloat(), EPSILON);
             Assert.AreEqual(1f, result.z.ToFloat(), EPSILON);

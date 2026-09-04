@@ -393,8 +393,10 @@ namespace xpTURN.Klotho.Core.Tests
         public void CurrentVersion_Loads()
         {
             Assert.DoesNotThrow(() => new ReplayData().Deserialize(SerializedWithVersion(ReplayMetadata.CURRENT_VERSION)));
-            Assert.AreEqual(5, ReplayMetadata.CURRENT_VERSION,
-                "4 carried the tick-0 roster; 5 is that layout plus the roster-parallel entitlements");
+            Assert.AreEqual(6, ReplayMetadata.CURRENT_VERSION,
+                "4 carried the tick-0 roster; 5 is that layout plus the roster-parallel "
+                + "entitlements; 6 is the per-agent area masks, which grew NavAgentComponent's "
+                + "wire size 700 -> 708 and so made every version-5 component stream unreadable");
         }
 
         [Test] // The old guard was `>`, which let version 1 through to be misparsed with the current layout.

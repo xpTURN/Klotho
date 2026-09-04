@@ -59,6 +59,14 @@ namespace Brawler
         public int ShapeId;
         /// <summary>Which turn of it. 0 for a shape that does not turn, such as the hexagon.</summary>
         public int Orientation;
+        /// <summary>
+        /// Retain mode (<c>FPBuildingPlacement.Retain</c>): the footprint stays triangulated
+        /// ground, stamped <c>FPNavMeshAreas.BUILDING_AREA</c>, instead of becoming a hole. Frame
+        /// state, like the centre: the mode changes the geometry, so it has to be a pure function of
+        /// the frame and agree on every peer — it flows in through the command payload and nowhere
+        /// else.
+        /// </summary>
+        public bool Retain;
         public int OwnerSlot;
         /// <summary>
         /// The tick this building becomes part of the navmesh — the placement tick plus the build

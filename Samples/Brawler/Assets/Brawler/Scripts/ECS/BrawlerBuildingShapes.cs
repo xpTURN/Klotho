@@ -56,9 +56,11 @@ namespace Brawler
         public const ulong OrientationFeatureKey = 0x424C44474F52494EUL;
 
         private const long Unit = FPGeoPredicates.SNAP_UNITS_PER_WORLD;
-        private const long HalfWidth = Unit;        // 2 x 1 box footprint...
-        private const long HalfDepth = Unit / 2;    // ...before the bake-radius expansion
-        private const long HexCircumradius = Unit;  // 2 wide across the points x ~1.73 across the flats
+        // Public so the editor footprint gizmo (BrawlerGameController.OnDrawGizmos) can draw the
+        // shapes the catalog was built from; the catalog itself exposes no per-vertex read.
+        public const long HalfWidth = Unit;        // 2 x 1 box footprint...
+        public const long HalfDepth = Unit / 2;    // ...before the bake-radius expansion
+        public const long HexCircumradius = Unit;  // 2 wide across the points x ~1.73 across the flats
 
         public static readonly FPBuildingShapeCatalog Catalog;
 
@@ -142,9 +144,30 @@ namespace Brawler
         /// </summary>
         public static void SnapHexPlacement(
             FPBuildingShapeExpansion expansion, FP64 x, FP64 z, out FP64 snappedX, out FP64 snappedZ)
+            => SnapPlacement(expansion, HexShape, 0, x, z, out snappedX, out snappedZ);
+
+        /// <summary>
+        /// Moves a desired centre onto the shape's own tiling LATTICE, so a building lands flush
+        /// against its neighbours instead of merely near them; falls back to plain grid
+        /// quantisation when there is no expansion yet or the shape cannot tile.
+        ///
+        /// <para><b>Quantising alone does not do this, and the difference is invisible until you
+        /// look for it.</b> The expansion pads outward by two snap units per side to absorb the
+        /// vertex snap, so the spacing that makes two footprints meet is not a round number: a
+        /// 2x1 box at bake radius 0.5 meets its neighbour at 2.003906 world units, not 2, and the
+        /// hexagon at 2.371094. Place at the number that looks right and roughly four millimetres
+        /// of walkable ground is left between the two — and the engine cannot tell a four
+        /// millimetre gap from a door, so units path straight through the seam.</para>
+        ///
+        /// <para>Generalised from the hexagon-only form: the box needed it just as much, and only
+        /// the hexagon was getting it.</para>
+        /// </summary>
+        public static void SnapPlacement(
+            FPBuildingShapeExpansion expansion, int shapeId, int orientation,
+            FP64 x, FP64 z, out FP64 snappedX, out FP64 snappedZ)
         {
             if (expansion != null
-                && expansion.TrySnapToLattice(HexShape, 0, x, z, out snappedX, out snappedZ))
+                && expansion.TrySnapToLattice(shapeId, orientation, x, z, out snappedX, out snappedZ))
                 return;
             snappedX = FPGeoPredicates.Quantize(x);
             snappedZ = FPGeoPredicates.Quantize(z);

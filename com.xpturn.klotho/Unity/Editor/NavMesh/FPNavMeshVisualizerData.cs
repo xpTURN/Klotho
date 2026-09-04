@@ -79,6 +79,135 @@ namespace xpTURN.Klotho.Editor
 
         public bool IsLoaded => NavMesh != null;
 
+        #region Building placement
+
+        /// <summary>
+        /// Base mesh + placement list, rebaked from the base every time. Null until a mesh is
+        /// loaded; rebuilt whenever the base changes, because the snapshot it caches is a function
+        /// of the base alone.
+        /// </summary>
+        private FPNavMeshPlacementProbe _probe;
+
+        /// <summary>
+        /// Installs a rebaked mesh into the SIMULATION side. Set once at wiring; it exists so that
+        /// <see cref="InstallRebakedMesh"/> is the only way to adopt a rebake and cannot be done
+        /// halfway — the mesh, the render cache and the agents move together or not at all.
+        /// </summary>
+        public System.Action<FPNavMesh> AgentSwap;
+
+        public int PlacementCount => _probe != null ? _probe.Count : 0;
+
+        public FPBuildingPlacementRules PlacementRules
+        {
+            get => _probe != null ? _probe.Rules : default;
+            set { if (_probe != null) _probe.Rules = value; }
+        }
+
+        public FPBuildingPlacement PlacementAt(int index) => _probe.PlacementAt(index);
+
+        /// <summary>
+        /// Snap a placement onto the shape's tiling lattice so neighbours meet with no sliver.
+        /// On by default; see <c>FPNavMeshPlacementProbe.SnapToTilingLattice</c> for why plain
+        /// quantisation is not enough.
+        /// </summary>
+        public bool SnapPlacementToLattice
+        {
+            get => _probe == null || _probe.SnapToTilingLattice;
+            set { if (_probe != null) _probe.SnapToTilingLattice = value; }
+        }
+
+        /// <summary>
+        /// Places one building at <paramref name="point"/> and adopts the rebaked mesh. The centre
+        /// is quantised by the probe, so a click never produces the malformed-request throw.
+        /// </summary>
+        public bool TryPlaceBuilding(
+            Vector3 point, int shapeId, int orientation, bool retain,
+            out FPBuildingRejectionInfo rejection)
+        {
+            rejection = default;
+            if (_probe == null) return false;
+
+            if (!_probe.TryPlace(shapeId, orientation,
+                    FP64.FromFloat(point.x), FP64.FromFloat(point.z), FP64.FromFloat(point.y),
+                    retain, out FPNavMesh mesh, out rejection))
+                return false;
+
+            InstallRebakedMesh(mesh);
+            return true;
+        }
+
+        public bool TryRemoveBuilding(int index)
+        {
+            if (_probe == null || index < 0 || index >= _probe.Count) return false;
+            if (!_probe.TryRemoveAt(index, out FPNavMesh mesh, out _)) return false;
+            InstallRebakedMesh(mesh);
+            return true;
+        }
+
+        /// <summary>Rebakes the current list — for a rules change.</summary>
+        public bool TryRebakeBuildings(out FPBuildingRejectionInfo rejection)
+        {
+            rejection = default;
+            if (_probe == null) return false;
+            if (!_probe.TryRebake(out FPNavMesh mesh, out rejection)) return false;
+            InstallRebakedMesh(mesh);
+            return true;
+        }
+
+        /// <summary>Drops every placement and goes back to the loaded mesh.</summary>
+        public void RevertBuildings()
+        {
+            if (_probe == null) return;
+            InstallRebakedMesh(_probe.Revert());
+        }
+
+        /// <summary>
+        /// Adopts a rebaked mesh. **The one entry point**, so that nothing can update half of it.
+        ///
+        /// <para>Three things go stale on a rebake and all three are handled here. The mesh field
+        /// and the render cache are what the overlay draws — miss them and the window draws the old
+        /// mesh while the path tool answers on the new one, a contradiction inside one window whose
+        /// wrong half is the half the user trusts. The query/pathfinder/funnel are REBOUND rather
+        /// than replaced, keeping their identity: the agent system was constructed from these very
+        /// instances, so rebinding is what keeps the two sides one truth. And the corridor indexes
+        /// the old triangle numbering, so it has to go.</para>
+        ///
+        /// <para>Deliberately NOT <c>LoadFromNavMesh</c>: that one nulls the pathfinder and funnel
+        /// (only the play-mode bridge calls it, and that mode hides the path tool, which is why the
+        /// gap has never shown) and it clears the start/end MARKERS as well as the path — and
+        /// placing a building between two markers the user just set is the whole point of the tool.</para>
+        /// </summary>
+        private void InstallRebakedMesh(FPNavMesh mesh)
+        {
+            if (mesh == null) return;
+
+            NavMesh = mesh;
+            FPNavMeshPlacementProbe.RebindQueries(mesh, Query, Pathfinder, Funnel);
+
+            BuildRenderCache();
+            InvalidatePathResult();
+
+            // Simulation side, in the same call — see AgentSwap.
+            AgentSwap?.Invoke(mesh);
+        }
+
+        /// <summary>
+        /// Drops the corridor while KEEPING the start and end markers, which
+        /// <see cref="ClearPath"/> would also clear. The corridor holds triangle indices from the
+        /// mesh that was just replaced; the markers are world positions and stay meaningful.
+        /// </summary>
+        public void InvalidatePathResult()
+        {
+            HasPath = false;
+            Corridor = null;
+            CorridorLength = 0;
+            Waypoints = null;
+            WaypointCount = 0;
+            Portals.Clear();
+        }
+
+        #endregion
+
         public void LoadFromNavMesh(FPNavMesh navMesh, FPNavMeshQuery query)
         {
             NavMesh = navMesh;
@@ -87,6 +216,9 @@ namespace xpTURN.Klotho.Editor
             Funnel = null;
             BuildRenderCache();
             ClearPath();
+            // The play-mode bridge is the only caller, and the game owns the placements there —
+            // an edit-mode placement list would be a second, competing account of what is built.
+            _probe = null;
         }
 
         private void CreateLogger()
@@ -124,6 +256,9 @@ namespace xpTURN.Klotho.Editor
 
                 BuildRenderCache();
                 ClearPath();
+                // A new base means a new probe: the snapshot it caches is a function of the base,
+                // and the old placement list describes a mesh that is no longer loaded.
+                _probe = new FPNavMeshPlacementProbe(NavMesh, FPNavMeshPlacementProbe.ToolCatalog, Logger);
                 return true;
             }
             catch (System.Exception e)
@@ -146,6 +281,7 @@ namespace xpTURN.Klotho.Editor
             InternalEdges.Clear();
             ObstacleRings.Clear();
             ClearPath();
+            _probe = null;
         }
 
         public void BuildRenderCache()
@@ -266,14 +402,24 @@ namespace xpTURN.Klotho.Editor
             }
         }
 
-        public bool FindPath(Vector3 start, Vector3 end)
+        /// <summary>
+        /// Finds a path under <paramref name="areaMask"/>.
+        ///
+        /// <para>The mask is a required argument with no default, following
+        /// <c>FPNavMeshQuery.MoveAlongSurface</c>: it used to be hardcoded to <c>~0</c> here, which
+        /// was harmless while nothing was filtered and is not any more — a retained building
+        /// footprint is walkable ground the agents' default mask refuses, so <c>~0</c> and
+        /// <c>FPNavAgentSystem.DEFAULT_AREA_MASK</c> now give different answers on the same mesh. A
+        /// caller that forgets to pass one should not get the permissive half by accident.</para>
+        /// </summary>
+        public bool FindPath(Vector3 start, Vector3 end, int areaMask)
         {
-            if (NavMesh == null) return false;
+            if (NavMesh == null || Pathfinder == null) return false;
 
             FPVector3 startFP = start.ToFPVector3();
             FPVector3 endFP = end.ToFPVector3();
 
-            bool found = Pathfinder.FindPath(startFP, endFP, ~0,
+            bool found = Pathfinder.FindPath(startFP, endFP, areaMask,
                 out int[] corridor, out int corridorLength);
 
             if (!found)

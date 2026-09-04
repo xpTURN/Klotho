@@ -150,7 +150,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             // MoveAlongSurface needs a starting triangle.
             query.ClosestPointOnNavMesh(outsideXZ, out _);
             query.Raycast(rayOrigin, rayDir, out _, out _);
-            query.MoveAlongSurface(moveFrom, moveTo, query.FindTriangle(moveFrom.ToXZ()), FP64.MaxValue);
+            query.MoveAlongSurface(moveFrom, moveTo, query.FindTriangle(moveFrom.ToXZ()),
+                FPNavAgentSystem.DEFAULT_AREA_MASK, FP64.MaxValue);
 
             query.Rebind(to);
 
@@ -171,8 +172,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.AreEqual(expectedRayTri, actualRayTri);
 
             int startTri = oracle.FindTriangle(moveFrom.ToXZ());
-            var expectedMove = oracle.MoveAlongSurface(moveFrom, moveTo, startTri, FP64.MaxValue);
-            var actualMove = query.MoveAlongSurface(moveFrom, moveTo, startTri, FP64.MaxValue);
+            var expectedMove = oracle.MoveAlongSurface(moveFrom, moveTo, startTri,
+                FPNavAgentSystem.DEFAULT_AREA_MASK, FP64.MaxValue);
+            var actualMove = query.MoveAlongSurface(moveFrom, moveTo, startTri,
+                FPNavAgentSystem.DEFAULT_AREA_MASK, FP64.MaxValue);
             Assert.AreEqual(expectedMove.resultPos, actualMove.resultPos, "MoveAlongSurface differs from a fresh query");
             Assert.AreEqual(expectedMove.resultTri, actualMove.resultTri);
         }

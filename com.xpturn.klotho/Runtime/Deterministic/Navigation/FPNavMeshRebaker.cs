@@ -159,7 +159,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         /// <summary>The expanded footprint reaches the edge of the walkable region. Rejected even
         /// though the triangulation accepts it, because a hole ring sharing an edge with the outer
-        /// ring carves nothing.</summary>
+        /// ring carves nothing.
+        ///
+        /// <para>Under <see cref="FPBoundaryPlacementPolicy.ClipOverlap"/> a crossing carve is
+        /// clipped instead, so there this value is reported only for a crossing footprint that
+        /// asked to be retained (<see cref="FPBuildingPlacement.Retain"/>): the clip stage rewrites
+        /// a crossing footprint into lattice-conforming rings, a retained ring has no defined way
+        /// to close against them, and so retain has no clip to fall back on.</para></summary>
         TouchesWalkableBoundary = 2,
 
         /// <summary>The expanded footprint is not on the mesh at all.</summary>
@@ -791,7 +797,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 }
             }
 
-            var cdtSnapshot = FPConstrainedDelaunay.BuildSnapshot(xs, zs, constraints.ToArray(), logger);
+            // Core, not the public factory: that one also builds a base coordinate map, and this
+            // snapshot already travels with CoordToIndex below — paying for a second one would be
+            // pure waste on the runtime rebake path.
+            var cdtSnapshot = FPConstrainedDelaunay.BuildSnapshotCore(xs, zs, constraints.ToArray(), logger);
             logger?.KInformation($"[FPNavMeshRebaker] snapshot created: {baseCount} base vertices, " +
                 $"{ringEdges.Count} ring constraints");
             // Expanding the catalog here, not per placement, is what makes contact authorable
@@ -956,13 +965,15 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             var buffers = context.Pool;
             FP64[] polyYs = buffers.PolyYs(liveCount == 0 ? 1 : liveCount);
+            byte[] polyRetain = buffers.PolyRetain(liveCount == 0 ? 1 : liveCount);
             BuildPlacementPolygons(snapshot, placements, liveCount, buffers,
-                out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds, polyYs);
+                out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds,
+                polyYs, polyRetain);
 
             if (!TryBeginRebakeFromPolygons(
                     snapshot, polyX, polyZ, polyStart, polyBounds, polyYs, liveCount,
                     polyStart[liveCount], logger, buffers, rules, out rejection, out task,
-                    context.PreviousForPatch, context.PatchOutcome, context.Accepted))
+                    context.PreviousForPatch, context.PatchOutcome, context.Accepted, polyRetain))
                 return false;
 
             task.BindContext(context);
@@ -1306,7 +1317,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FPNavMeshRebakeSnapshot snapshot, FPBuildingPlacement[] placements, int count,
             FPNavMeshRebakeBufferPool buffers,
             out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds,
-            FP64[] polyYs = null)
+            FP64[] polyYs = null, byte[] polyRetain = null)
         {
             FPBuildingShapeExpansion expansion = snapshot.ShapeExpansion;
             if (count > 0 && expansion == null)
@@ -1326,7 +1337,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             int n = 0;
             for (int b = 0; b < count; b++)
                 WritePlacementPolygon(expansion, placements[b], b, b,
-                    polyX, polyZ, polyStart, polyBounds, polyYs, ref n);
+                    polyX, polyZ, polyStart, polyBounds, polyYs, ref n, polyRetain);
             polyStart[count] = n;
         }
 
@@ -1353,6 +1364,29 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 + $"{shape}, which turns {expansion.Catalog.DirectionCount(shape)} ways");
         }
 
+        /// <summary>Per-building mode buffer values — see <c>FPNavMeshRebakeBufferPool.PolyRetain</c>.</summary>
+        private const byte CARVE = 0;
+        private const byte RETAIN = 1;
+
+        /// <summary>
+        /// Does building <paramref name="b"/> retain its footprint?
+        ///
+        /// <para><c>== RETAIN</c> rather than <c>!= CARVE</c> on purpose: the pool poisons the
+        /// buffer in DEBUG, so a slot the writer forgot is neither value. The assert names that in
+        /// DEBUG and the comparison degrades to carve — the pre-retain behaviour — in release,
+        /// which is the safe direction for a mode that changes emitted geometry.</para>
+        /// </summary>
+        private static bool IsRetain(byte[] polyRetain, int b)
+        {
+            if (polyRetain == null)
+                return false;
+            System.Diagnostics.Debug.Assert(
+                polyRetain[b] == CARVE || polyRetain[b] == RETAIN,
+                "FPNavMeshRebaker: polyRetain slot was never written (pool poison) — the writer's "
+                + "range and the reader's buildingCount have gone out of step");
+            return polyRetain[b] == RETAIN;
+        }
+
         /// <summary>
         /// One catalog placement into slot <paramref name="slot"/>, appending its vertices at
         /// <paramref name="vertCount"/>.
@@ -1362,7 +1396,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private static void WritePlacementPolygon(
             FPBuildingShapeExpansion expansion, in FPBuildingPlacement p, int slot, int boundsSlot,
             long[] polyX, long[] polyZ, int[] polyStart, long[] polyBounds, FP64[] polyYs,
-            ref int vertCount)
+            ref int vertCount, byte[] polyRetain = null)
         {
             long cx = FPGeoPredicates.Snap(p.CentreX);
             long cz = FPGeoPredicates.Snap(p.CentreZ);
@@ -1392,9 +1426,16 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 throw new ArgumentException($"FPNavMeshRebaker: placement {slot} (expanded) outside the snapped domain");
             FillPolyBounds(polyX, polyZ, polyStart[slot], vertCount, polyBounds, boundsSlot);
             if (polyYs != null) polyYs[slot] = p.Y;
+            if (polyRetain != null) polyRetain[slot] = p.Retain ? RETAIN : CARVE;
         }
 
-        private static FPNavMesh RebakePlacements(
+        /// <remarks>
+        /// internal rather than private so <see cref="FPNavMeshPlacementProbe"/> can bake a
+        /// snapshot WITHOUT the throw the public overload adds — an editor tool has to report a
+        /// refusal as text, and a refused placement is the normal outcome of pointing somewhere you
+        /// cannot build. The public surface is unchanged.
+        /// </remarks>
+        internal static FPNavMesh RebakePlacements(
             FPNavMeshRebakeSnapshot snapshot, FPBuildingPlacement[] placements,
             IKLogger logger, FPNavMeshRebakeBufferPool pool, FPBuildingPlacementRules rules,
             out FPBuildingRejectionInfo rejection,
@@ -1415,13 +1456,15 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             var buffers = pool ?? FPNavMeshRebakeBufferPool.NonPooling;
 
             FP64[] polyYs = buffers.PolyYs(count == 0 ? 1 : count);
+            byte[] polyRetain = buffers.PolyRetain(count == 0 ? 1 : count);
             BuildPlacementPolygons(snapshot, placements, count, buffers,
-                out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds, polyYs);
+                out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds,
+                polyYs, polyRetain);
             int n = polyStart[count];
 
             return RebakeFromPolygons(
                 snapshot, polyX, polyZ, polyStart, polyBounds, polyYs, count, n, logger, pool, rules,
-                out rejection, previous, outcome, accepted);
+                out rejection, previous, outcome, accepted, polyRetain);
         }
 
         /// <summary>
@@ -1583,7 +1626,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             BuildPlacementPolygons(snapshot, all, count + 1, scratch.Buffers,
                 out long[] polyX, out long[] polyZ, out int[] polyStart, out long[] polyBounds);
             return ValidateGhostOnly(snapshot, polyX, polyZ, polyStart, polyBounds, count,
-                count, rules, out rejection, clipScratch: scratch.Clip);
+                count, rules, out rejection, clipScratch: scratch.Clip, ghostRetain: ghost.Retain);
         }
 
         /// <summary>
@@ -1668,7 +1711,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 accepted.PolyX, accepted.PolyZ, accepted.PolyStart, accepted.PolyBounds, ghostIndex,
                 ghostIndex, rules ?? accepted.Rules, out rejection,
                 accepted.CachedTransitions, accepted.CachedTransitionStart,
-                accepted.CachedBuildingCount, context.ClipScratch);
+                accepted.CachedBuildingCount, context.ClipScratch, ghostRetain: ghost.Retain);
         }
 
         /// <summary>
@@ -1685,13 +1728,21 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// unless it covers exactly the <paramref name="ghostIndex"/> buildings being validated
         /// against.
         /// </param>
+        /// <param name="ghostRetain">
+        /// Whether the ghost asks for retain mode (<see cref="FPBuildingPlacement.Retain"/>). Only
+        /// the <see cref="FPBoundaryPlacementPolicy.ClipOverlap"/> branch reads it: a retained
+        /// ghost with clip transitions is refused as
+        /// <see cref="FPBuildingRejection.TouchesWalkableBoundary"/>, exactly as the real placement
+        /// refuses it. The rect forms pass <c>false</c> — a rect cannot ask for retain.
+        /// </param>
         private static bool ValidateGhostOnly(
             FPNavMeshRebakeSnapshot snapshot,
             long[] polyX, long[] polyZ, int[] polyStart, long[] polyBounds, int boundsSlot,
             int ghostIndex, FPBuildingPlacementRules rules,
             out FPBuildingRejectionInfo rejection,
             FPNavMeshClipper.Transition[] cachedTransitions = null, int[] cachedStart = null,
-            int cachedBuildingCount = 0, FPClipScratch clipScratch = null)
+            int cachedBuildingCount = 0, FPClipScratch clipScratch = null,
+            bool ghostRetain = false)
         {
             rejection = default;
 
@@ -1738,8 +1789,19 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                             polyX, polyZ, polyStart, polyBounds, boundsSlot, ghostIndex,
                             boundaryTouchOk: true, out rejection))
                     return false;
-                return FPNavMeshClipper.ValidateClipRings(
-                    snapshot, in clip, out rejection, ghostIndex);
+                if (!FPNavMeshClipper.ValidateClipRings(
+                        snapshot, in clip, out rejection, ghostIndex))
+                    return false;
+                // Mirrors TryBeginRebakeFromPolygons: retain is admitted transition-free and
+                // refused with transitions, checked AFTER the ring checks so that when several
+                // reasons apply this form reports the one the real placement would.
+                if (ghostRetain && !clip.IdentityBuilding[ghostIndex])
+                {
+                    rejection = new FPBuildingRejectionInfo(
+                        FPBuildingRejection.TouchesWalkableBoundary, ghostIndex);
+                    return false;
+                }
+                return true;
             }
 
             return ValidateOneAgainstBase(snapshot.BaseXs, snapshot.BaseZs, snapshot.RingEdges,
@@ -2086,12 +2148,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             IKLogger logger, FPNavMeshRebakeBufferPool pool, FPBuildingPlacementRules rules,
             out FPBuildingRejectionInfo rejection,
             FPNavMesh previous = null, FPNavMeshBuildPipeline.IncrementalOutcome outcome = null,
-            FPBuildingAcceptedSet accepted = null)
+            FPBuildingAcceptedSet accepted = null, byte[] polyRetain = null)
         {
             if (!TryBeginRebakeFromPolygons(
                     snapshot, polyX, polyZ, polyStart, polyBounds, polyYs,
                     buildingCount, polyVertCount, logger, pool, rules, out rejection,
-                    out FPNavMeshRebakeTask task, previous, outcome, accepted))
+                    out FPNavMeshRebakeTask task, previous, outcome, accepted, polyRetain))
                 return null;
 
             while (!task.Step(int.MaxValue)) { }
@@ -2120,14 +2182,42 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             IKLogger logger, FPNavMeshRebakeBufferPool pool, FPBuildingPlacementRules rules,
             out FPBuildingRejectionInfo rejection, out FPNavMeshRebakeTask task,
             FPNavMesh previous = null, FPNavMeshBuildPipeline.IncrementalOutcome outcome = null,
-            FPBuildingAcceptedSet accepted = null)
+            FPBuildingAcceptedSet accepted = null, byte[] polyRetain = null)
         {
             task = null;
             bool clipMode = rules.BoundaryPolicy == FPBoundaryPlacementPolicy.ClipOverlap;
+
             if (!ValidatePolygons(snapshot, polyX, polyZ, polyStart, polyBounds, polyYs,
                     buildingCount, rules, out rejection, out FPNavMeshClipper.Result clip,
                     exportClipTransitions: clipMode && accepted != null))
                 return false;
+
+            // Retain under ClipOverlap is decided by the building's TRANSITIONS, not by the policy.
+            // A transition-free building takes the identity path — its footprint is emitted
+            // verbatim, so a doubled ring means exactly what it means under Touch — and is
+            // admitted. A building with transitions is refused: the clip stage's job is GRID
+            // CONFORMITY of the boundary-crossing constraints (rational intersection -> X'
+            // lattice point, wall runs welded to existing base ring vertices), X' sits STRICTLY
+            // inside the walkable region, and how a retained ring would close against that chain
+            // is undefined — closed directly it leaves a ~1 mm walkable sliver along the wall, and
+            // the engine cannot tell a 1 mm gap from a door.
+            //
+            // A rejection VALUE rather than a throw, because this is something a player causes and
+            // is meant to see: the retained footprint reached the walkable boundary, and retain
+            // has no clip to fall back on. The same check, in the same order, lives in
+            // ValidateGhostOnly so that both preview forms answer as the real placement does.
+            if (clipMode && polyRetain != null)
+            {
+                for (int b = 0; b < buildingCount; b++)
+                {
+                    if (IsRetain(polyRetain, b) && !clip.IdentityBuilding[b])
+                    {
+                        rejection = new FPBuildingRejectionInfo(
+                            FPBuildingRejection.TouchesWalkableBoundary, b);
+                        return false;
+                    }
+                }
+            }
 
             if (clipMode && clip.RingCount > 0 && previous != null)
             {
@@ -2174,10 +2264,22 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 // Sized by the actual vertex total, not buildings * 4 — a polygon carries as many
                 // vertices as it has, and a rect is just the n = 4 case.
                 int holeCapacity = polyVertCount + (clipMode ? clip.Xs.Count : 0);
+
+                // Constraint capacity, NOT vertex capacity: a retained ring contributes its edges
+                // TWICE and its vertices once (AddHoleVertex dedups by coordinate), so the pair
+                // budget grows by that ring's vertex count while holeCapacity does not. Sizing this
+                // as holeCapacity * 2 — correct for every carve-only set — overflows the buffer the
+                // moment a retained building appears, and only on stages that place them.
+                int retainVertCount = 0;
+                for (int b = 0; b < buildingCount; b++)
+                {
+                    if (IsRetain(polyRetain, b))
+                        retainVertCount += polyStart[b + 1] - polyStart[b];
+                }
                 long[] holeXs = buffers.HoleXs(holeCapacity);
                 long[] holeZs = buffers.HoleZs(holeCapacity);
                 FP64[] holeYs = buffers.HoleYs(holeCapacity);
-                int[] holeConstraints = buffers.HoleConstraints(holeCapacity * 2);
+                int[] holeConstraints = buffers.HoleConstraints((holeCapacity + retainVertCount) * 2);
                 int holeCount = 0;
                 int holeConstraintCount = 0;
 
@@ -2243,7 +2345,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     // ClipOverlap's degenerate case" to the parent's golden).
                     for (int b = 0; b < buildingCount; b++)
                     {
-                        if (clip.IdentityBuilding[b])
+                        if (!clip.IdentityBuilding[b])
+                            continue;
+                        EmitRing(polyX, polyZ, null, polyYs[b], polyStart[b], polyStart[b + 1]);
+                        // Retain, exactly as in the non-clip branch below. A retained building
+                        // reaches this loop only transition-free (the check after
+                        // ValidatePolygons refused the others), so the doubled ring means here
+                        // precisely what it means under Touch.
+                        if (IsRetain(polyRetain, b))
                             EmitRing(polyX, polyZ, null, polyYs[b], polyStart[b], polyStart[b + 1]);
                     }
                     for (int r = 0; r < clip.RingCount; r++)
@@ -2252,7 +2361,23 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 else
                 {
                     for (int b = 0; b < buildingCount; b++)
+                    {
                         EmitRing(polyX, polyZ, null, polyYs[b], polyStart[b], polyStart[b + 1]);
+
+                        // The whole of retain mode. Marking an edge twice leaves it a WALL to the
+                        // triangulator (Constrained is OR over markings) and PARITY-NEUTRAL to the
+                        // erase pass (CrossParity is XOR), so the ring conforms the triangulation
+                        // exactly as a carve does while its interior keeps the depth it had —
+                        // walkable. The vertices are deduped by coordinate, so this second pass
+                        // adds edges only.
+                        //
+                        // Note what this does NOT do: it never touches the keep predicate. A
+                        // global `depth >= 1` would keep the outer region and every baked hole too
+                        // (measured at +54% triangles), which is why the choice lives here, at
+                        // emission, where the placement can make it per building.
+                        if (IsRetain(polyRetain, b))
+                            EmitRing(polyX, polyZ, null, polyYs[b], polyStart[b], polyStart[b + 1]);
+                    }
                 }
 
                 // CDT resume: clone + ghost rebase + incremental hole insertion. The extract that
@@ -2265,7 +2390,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     snapshot, cdt, buffers, holeXs, holeYs, holeZs, holeCount, baseCount,
                     logger, previous, outcome, accepted,
                     polyX, polyZ, polyStart, buildingCount, polyVertCount, rules,
-                    clip.Transitions, clip.TransitionStart);
+                    clip.Transitions, clip.TransitionStart, polyRetain);
                 return true;
             }
             catch
@@ -2736,6 +2861,87 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             }
         }
 
+        /// <summary>
+        /// Stamps every triangle inside a retained footprint
+        /// <see cref="FPNavMeshAreas.BUILDING_MASK"/> — exclusively (see <see cref="FPNavMeshAreas"/>
+        /// for why OR-ing the bit in would block nothing).
+        ///
+        /// <para>Membership is decided by the triangle's centroid, and the centroid is exact: the
+        /// footprint ring went in as constraint edges, so no triangle straddles it, and a triangle
+        /// that does not straddle has its centroid strictly on one side. The centroid is kept as the
+        /// vertex SUM (three times the centroid) against the ring scaled by three, so the test is
+        /// integer all the way and cannot round a centroid across an edge — <c>(a+b+c)/3</c> could.
+        /// The footprints are convex (the catalog contract), so "inside" is "the same strict side of
+        /// every edge"; the ring's winding is not assumed.</para>
+        ///
+        /// <para>Runs after <see cref="InheritUniformAreaAttributes"/>, which writes every triangle,
+        /// and before the fingerprint, which mixes <c>areaMask</c> — so the stamp is a determinism
+        /// input like the ring itself, and the patch path (which rebuilds <c>areaMask</c> from the
+        /// bake areas) ends up stamped exactly as the full path does. GC-free.</para>
+        /// </summary>
+        internal static void StampRetainedFootprints(
+            FPNavMesh mesh, long[] polyX, long[] polyZ, int[] polyStart, int buildingCount,
+            byte[] polyRetain)
+        {
+            if (polyRetain == null)
+                return;
+            var tris = mesh.TrianglesMutable;
+            var vs = mesh.Vertices;
+            for (int b = 0; b < buildingCount; b++)
+            {
+                if (!IsRetain(polyRetain, b))
+                    continue;
+                int start = polyStart[b], end = polyStart[b + 1];
+
+                long minX = long.MaxValue, minZ = long.MaxValue;
+                long maxX = long.MinValue, maxZ = long.MinValue;
+                for (int i = start; i < end; i++)
+                {
+                    if (polyX[i] < minX) minX = polyX[i];
+                    if (polyX[i] > maxX) maxX = polyX[i];
+                    if (polyZ[i] < minZ) minZ = polyZ[i];
+                    if (polyZ[i] > maxZ) maxZ = polyZ[i];
+                }
+
+                for (int t = 0; t < tris.Length; t++)
+                {
+                    long sx = FPGeoPredicates.Snap(vs[tris[t].v0].x)
+                        + FPGeoPredicates.Snap(vs[tris[t].v1].x)
+                        + FPGeoPredicates.Snap(vs[tris[t].v2].x);
+                    long sz = FPGeoPredicates.Snap(vs[tris[t].v0].z)
+                        + FPGeoPredicates.Snap(vs[tris[t].v1].z)
+                        + FPGeoPredicates.Snap(vs[tris[t].v2].z);
+                    if (sx <= 3 * minX || sx >= 3 * maxX || sz <= 3 * minZ || sz >= 3 * maxZ)
+                        continue;
+                    if (!InsideConvexRingTimes3(polyX, polyZ, start, end, sx, sz))
+                        continue;
+                    tris[t].areaMask = FPNavMeshAreas.BUILDING_MASK;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Is the point (sx, sz) — given at THREE TIMES its coordinates — strictly inside the
+        /// convex ring <c>[start, end)</c>? Exact: the cross products are 128-bit.
+        /// </summary>
+        private static bool InsideConvexRingTimes3(
+            long[] polyX, long[] polyZ, int start, int end, long sx, long sz)
+        {
+            int positive = 0, negative = 0;
+            for (int i = start; i < end; i++)
+            {
+                int j = i + 1 < end ? i + 1 : start;
+                long ax = 3 * polyX[i], az = 3 * polyZ[i];
+                long ex = 3 * polyX[j] - ax, ez = 3 * polyZ[j] - az;
+                int sign = FPInt128.Sub(
+                    FPInt128.Mul64(ex, sz - az), FPInt128.Mul64(ez, sx - ax)).Sign();
+                if (sign > 0) positive++;
+                else if (sign < 0) negative++;
+                else return false;
+            }
+            return positive == 0 || negative == 0;
+        }
+
         #endregion
     }
 
@@ -2776,6 +2982,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private readonly long[] _polyX, _polyZ;
         private readonly int[] _polyStart;
         private readonly int _buildingCount, _polyVertCount;
+        private readonly byte[] _polyRetain;
         private readonly FPBuildingPlacementRules _rules;
         private readonly FPNavMeshClipper.Transition[] _clipTransitions;
         private readonly int[] _clipTransitionStart;
@@ -2804,7 +3011,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FPNavMeshBuildPipeline.IncrementalOutcome outcome, FPBuildingAcceptedSet accepted,
             long[] polyX, long[] polyZ, int[] polyStart, int buildingCount, int polyVertCount,
             FPBuildingPlacementRules rules,
-            FPNavMeshClipper.Transition[] clipTransitions, int[] clipTransitionStart)
+            FPNavMeshClipper.Transition[] clipTransitions, int[] clipTransitionStart,
+            byte[] polyRetain)
         {
             _snapshot = snapshot;
             _cdt = cdt;
@@ -2826,6 +3034,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _rules = rules;
             _clipTransitions = clipTransitions;
             _clipTransitionStart = clipTransitionStart;
+            _polyRetain = polyRetain;
 
             _phase = Phase.Extract;
             _cdt.ExtractBegin(true);
@@ -2981,6 +3190,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             if (mesh != null)
             {
                 FPNavMeshRebaker.InheritUniformAreaAttributes(_snapshot.BaseMesh, mesh, _logger);
+                // After the inherit, which writes every triangle; the stamp is the one exception
+                // to "uniform", and the fingerprint below must see it.
+                FPNavMeshRebaker.StampRetainedFootprints(
+                    mesh, _polyX, _polyZ, _polyStart, _buildingCount, _polyRetain);
 
                 // The one place a rebake is known to have produced a mesh, and therefore the only
                 // place the preview cache may be told what the current building set is.

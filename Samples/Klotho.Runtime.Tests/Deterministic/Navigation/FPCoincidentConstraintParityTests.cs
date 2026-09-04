@@ -311,6 +311,173 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 + "become a hole a third constraint can drive through");
         }
 
+        // ── the doubled-segment rule, as a contract ──────────────────────────
+
+        [Test]
+        public void DoubledOpenSeam_CarvesNothing_AndIsStillAWall()
+        {
+            // The half of the doubled-segment rule that nothing pinned. TwiceMarkedEdge above proves
+            // Constrained is OR'd, but it runs with eraseOuterAndHoles:false — the erase pass is off,
+            // so "parity is back to 0" is stated in its comment and asserted nowhere. This is the
+            // shape a caller actually uses: an OPEN seam (a wall footing, a cliff join) sent twice so
+            // it stays geometrically present without carving the region beside it.
+            //
+            // Why an open chain is legal here at all: InsertConstraints requires the marked set to be
+            // a sum of CLOSED curves, because the erase pass reads a min-depth parity that is only
+            // path-independent then. Doubling makes every edge of the chain even, so the odd set is
+            // EMPTY — and the empty set is trivially such a sum. The rule is not a lucky side effect;
+            // it is what makes an open seam expressible.
+            var xs = new List<long>();
+            var zs = new List<long>();
+
+            // Outer ring 0..3, then an open seam 4..6 running through the interior.
+            foreach (var (x, z) in new[] { (0, 0), (10, 0), (10, 10), (0, 10) })
+            {
+                xs.Add(S(x)); zs.Add(S(z));
+            }
+            foreach (var (x, z) in new[] { (2, 5), (5, 5), (8, 5) })
+            {
+                xs.Add(S(x)); zs.Add(S(z));
+            }
+
+            var cons = new List<int>();
+            Ring(cons, 0, 4);
+            // The seam, twice. Same segments, same direction — multiplicity is the whole point.
+            for (int rep = 0; rep < 2; rep++)
+            {
+                cons.Add(4); cons.Add(5);
+                cons.Add(5); cons.Add(6);
+            }
+
+            int[] tris = FPConstrainedDelaunay.Triangulate(
+                xs.ToArray(), zs.ToArray(), cons.ToArray(), eraseOuterAndHoles: true);
+
+            Assert.IsTrue(Covered(tris, xs.ToArray(), zs.ToArray(), 5, 3),
+                "below a doubled seam must stay walkable — an even edge does not change depth");
+            Assert.IsTrue(Covered(tris, xs.ToArray(), zs.ToArray(), 5, 7),
+                "and so must above it: the seam is geometry, not a boundary");
+
+            // Still a wall. Observed through the crossing check for the reason TwiceMarkedEdge
+            // records: a free edge being flipped away by legalisation is unreachable through
+            // Triangulate, so the crossing check is the role that actually exercises the OR bit.
+            // x = 3.5, i.e. strictly between seam vertices 4 (x=2) and 5 (x=5): the crosser has to
+            // meet segment 4-5 in its INTERIOR. Running it through x=5 instead would pass exactly
+            // through vertex 5 and be split there rather than rejected — the same trap the kite in
+            // TwiceMarkedEdge avoids by making 1-3 and 0-2 genuinely cross.
+            var crossing = new List<int>(cons) { 7, 8 };
+            xs.Add(S(3.5)); zs.Add(S(3));
+            xs.Add(S(3.5)); zs.Add(S(7));
+            Assert.Throws<InvalidOperationException>(
+                () => FPConstrainedDelaunay.Triangulate(
+                    xs.ToArray(), zs.ToArray(), crossing.ToArray(), eraseOuterAndHoles: true),
+                "a twice-marked seam is STILL a wall — parity-neutral is not the same as absent");
+        }
+
+        [Test]
+        public void DoubledRing_ThroughASnapshotResume_CarvesNothing_AndIsStillAWall()
+        {
+            // The same rule through the OTHER public entry point. W08 made BuildSnapshot and
+            // TriangulateFromSnapshot public, so the multiplicity contract now covers a constraint
+            // set the caller authors as HOLE pairs — and nothing exercised doubling on that path.
+            // It runs the same InsertConstraints, which is why the gap was easy to miss: the claim
+            // was true and untested on the surface that turned it into a contract.
+            //
+            // A CLOSED ring, and that is the whole reason this test is shaped differently from
+            // DoubledOpenSeam above. The first version of this test doubled an open seam and passed
+            // with the doubling REMOVED — an odd open chain is undefined, and in that arrangement it
+            // happens to carve nothing either, so the assertion had no teeth. A ring is defined in
+            // both directions: odd carves (the control below), even does not.
+            var baseXs = new long[] { S(0), S(10), S(10), S(0) };
+            var baseZs = new long[] { S(0), S(0), S(10), S(10) };
+            var baseCons = new List<int>();
+            Ring(baseCons, 0, 4);
+
+            // Interior ring 4..7, appended as hole vertices (base 0..3 first, then holes).
+            var holeXs = new long[] { S(2), S(8), S(8), S(2) };
+            var holeZs = new long[] { S(4), S(4), S(6), S(6) };
+
+            var xs = new long[8];
+            var zs = new long[8];
+            Array.Copy(baseXs, xs, 4);
+            Array.Copy(baseZs, zs, 4);
+            Array.Copy(holeXs, 0, xs, 4, 4);
+            Array.Copy(holeZs, 0, zs, 4, 4);
+
+            int[] once = ResumeWithRing(baseXs, baseZs, baseCons, holeXs, holeZs, repeats: 1);
+            int[] twice = ResumeWithRing(baseXs, baseZs, baseCons, holeXs, holeZs, repeats: 2);
+
+            Assert.IsFalse(Covered(once, xs, zs, 5, 5),
+                "control: one ring at odd depth is erased on the resume path as well");
+            Assert.IsTrue(Covered(twice, xs, zs, 5, 5),
+                "the same ring sent twice must carve nothing — an even edge does not change depth");
+            Assert.IsTrue(Covered(twice, xs, zs, 5, 1), "and the rest of the slab survives");
+
+            // Still a wall, observed the way the OR bit is actually reachable: a crossing constraint
+            // that meets a ring side in its INTERIOR (x = 5 crosses side 4-5 at z = 4 between
+            // x = 2 and x = 8, so it is refused rather than split at a vertex).
+            var crossXs = new long[] { holeXs[0], holeXs[1], holeXs[2], holeXs[3], S(5), S(5) };
+            var crossZs = new long[] { holeZs[0], holeZs[1], holeZs[2], holeZs[3], S(1), S(9) };
+            var crossing = new List<int>();
+            for (int rep = 0; rep < 2; rep++)
+                Ring(crossing, 4, 4);
+            crossing.Add(8); crossing.Add(9);
+
+            Assert.Throws<InvalidOperationException>(
+                () => FPConstrainedDelaunay.TriangulateFromSnapshot(
+                    FPConstrainedDelaunay.BuildSnapshot(baseXs, baseZs, baseCons.ToArray()),
+                    crossXs, crossZs, crossing.ToArray(), eraseOuterAndHoles: true),
+                "a twice-marked ring is STILL a wall when the pairs arrive as hole constraints");
+        }
+
+        /// <summary>
+        /// One resume with the interior ring submitted <paramref name="repeats"/> times. A fresh
+        /// snapshot per call on purpose: a snapshot is immutable and shared, and reusing one across
+        /// the two arms would make the test depend on that being true rather than assert it.
+        /// </summary>
+        private static int[] ResumeWithRing(long[] baseXs, long[] baseZs, List<int> baseCons,
+            long[] holeXs, long[] holeZs, int repeats)
+        {
+            var cons = new List<int>();
+            for (int rep = 0; rep < repeats; rep++)
+                Ring(cons, 4, 4);
+
+            return FPConstrainedDelaunay.TriangulateFromSnapshot(
+                FPConstrainedDelaunay.BuildSnapshot(baseXs, baseZs, baseCons.ToArray()),
+                holeXs, holeZs, cons.ToArray(), eraseOuterAndHoles: true);
+        }
+
+        [Test]
+        public void ClosedRingOverTheSameArea_DoesCarve()
+        {
+            // The control, and deliberately NOT "the same open seam sent once". A single open chain
+            // is the case InsertConstraints calls out as path-dependent — its erase result depends on
+            // which way the BFS arrived — so pinning it would turn undefined behaviour into a golden.
+            // A closed ring is defined, and it shows the same machinery erasing when parity is odd,
+            // which is what makes the doubled case above mean something.
+            var xs = new List<long>();
+            var zs = new List<long>();
+            foreach (var (x, z) in new[] { (0, 0), (10, 0), (10, 10), (0, 10) })
+            {
+                xs.Add(S(x)); zs.Add(S(z));
+            }
+            foreach (var (x, z) in new[] { (2, 4), (8, 4), (8, 6), (2, 6) })
+            {
+                xs.Add(S(x)); zs.Add(S(z));
+            }
+
+            var cons = new List<int>();
+            Ring(cons, 0, 4);
+            Ring(cons, 4, 4);
+
+            int[] tris = FPConstrainedDelaunay.Triangulate(
+                xs.ToArray(), zs.ToArray(), cons.ToArray(), eraseOuterAndHoles: true);
+
+            Assert.IsFalse(Covered(tris, xs.ToArray(), zs.ToArray(), 5, 5),
+                "a closed ring at odd depth is erased — parity does move the erase pass");
+            Assert.IsTrue(Covered(tris, xs.ToArray(), zs.ToArray(), 5, 1),
+                "and the rest of the slab survives");
+        }
+
         // ── goldens for the configurations this change MAKES correct ─────────
 
         // Captured 2026-08-11, after the fix. The existing rebake goldens pin what must NOT move,
@@ -371,13 +538,22 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         // ── the invariant that moved up a layer ──────────────────────────────
 
         [Test]
-        public void RebakerEmitsEachBuildingEdgeExactlyOnce()
+        public void RebakerEmitsEachBuildingEdgeExactlyOnce_UnlessThePlacementAsksToRetain()
         {
             // Multiplicity is now MEANINGFUL, so "the same logical wall twice" erases that wall
             // from the erase pass. There is deliberately no duplicate check inside the CDT: at
             // that layer a repeat is indistinguishable from the legitimate case, because two rings
             // sharing an edge emit (p,q) and (q,p), which normalise to the same pair. The
             // invariant therefore lives here, in the producer.
+            //
+            // ⚠ CONDITIONAL SINCE RETAIN MODE, and the condition is the whole design: a placement
+            // with `FPBuildingPlacement.Retain` emits its ring TWICE on purpose, which is what
+            // makes the footprint a wall to the triangulator and parity-neutral to the erase pass
+            // (FPNavMeshRetainPlacementTests). So the invariant is "exactly once per CARVE" —
+            // never "the producer cannot double-emit". Deleting the qualifier and tightening this
+            // back to an unconditional claim would not fail here; it would make retain mode
+            // unimplementable while this test stayed green, which is why the reason is written
+            // down rather than left to the diff.
             //
             // Counted, not scanned, for exactly that reason — a scan would fire on the coincident
             // pair below, which is the configuration this whole plan exists to support.

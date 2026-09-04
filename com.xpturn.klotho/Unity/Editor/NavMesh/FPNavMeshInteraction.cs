@@ -14,6 +14,7 @@ namespace xpTURN.Klotho.Editor
         InspectTriangle,
         PlaceAgent,
         SetAgentDest,
+        PlaceBuilding,
     }
 
     /// <summary>
@@ -34,6 +35,7 @@ namespace xpTURN.Klotho.Editor
         public event Action<int> OnTriangleSelected;
         public event Action<Vector3> OnAgentPlaced;
         public event Action<int, Vector3> OnAgentDestinationSet;
+        public event Action<Vector3> OnBuildingPlaced;
 
         public void SetData(FPNavMeshVisualizerData data)
         {
@@ -112,6 +114,10 @@ namespace xpTURN.Klotho.Editor
                 case InteractionMode.SetAgentDest:
                     if (SelectedAgentIndex >= 0)
                         OnAgentDestinationSet?.Invoke(SelectedAgentIndex, hitPoint);
+                    break;
+
+                case InteractionMode.PlaceBuilding:
+                    OnBuildingPlaced?.Invoke(hitPoint);
                     break;
             }
         }

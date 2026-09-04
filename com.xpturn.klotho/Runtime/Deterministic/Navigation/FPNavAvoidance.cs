@@ -389,9 +389,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 }
                 return false;
             }
-            else if (s >= FP64.Zero && s < FP64.One && distSqLine <= radiusSq)
+            else if (s >= FP64.Zero && s <= FP64.One && distSqLine <= radiusSq)
             {
-                // Collision with the segment interior.
+                // Collision with the segment interior — and `s <= One` rather than `s < One`
+                // deliberately, because the closed end is a hole between the three guards above.
+                //
+                // At s == 1 the agent's projection is exactly on obstacle2, so distSqLine ==
+                // distSq2 identically. The right-vertex guard needs s > 1 and this one used to need
+                // s < 1, so that configuration fell through to the leg computation below, where the
+                // divisor is distSq2 — zero when the agent stands ON the vertex, and smaller than
+                // radiusSq when it stands inside the vertex's clearance, which reaches
+                // Sqrt(negative) first. Both threw. Neither is exotic: agent positions and obstacle
+                // ring vertices live on the same snap lattice, and a runtime rebake can put a new
+                // hole ring where an agent already stands.
+                //
+                // The closed end is also what makes the two ends of a segment agree. s == 0 was
+                // always caught here (`s >= Zero`), and every shared ring vertex is one segment's
+                // end and the next one's start — so the same position was handled through one and
+                // fatal through the other.
                 line.point = FPVector2.Zero;
                 line.direction = -obstacle1.unitDir;
                 return true;

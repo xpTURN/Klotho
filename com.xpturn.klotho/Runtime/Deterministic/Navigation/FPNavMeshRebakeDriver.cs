@@ -742,7 +742,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 if (x.ShapeId != y.ShapeId || x.Orientation != y.Orientation
                     || x.CentreX.RawValue != y.CentreX.RawValue
                     || x.CentreZ.RawValue != y.CentreZ.RawValue
-                    || x.Y.RawValue != y.Y.RawValue)
+                    || x.Y.RawValue != y.Y.RawValue
+                    // Retain belongs here for a harder reason than the fields above it. This
+                    // comparison decides which CACHED MESH to install, and the cache is per-peer
+                    // local history — so a mode left out here hands a carved mesh to a retain set
+                    // on the peer that happens to hold one, while the peer that does not rebuilds
+                    // correctly. The two navmeshes then differ with the state hash agreeing, which
+                    // is the same silent shape the Sequence audit exists to prevent.
+                    || x.Retain != y.Retain)
                     return false;
             }
             return true;

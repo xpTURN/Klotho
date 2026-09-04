@@ -140,6 +140,17 @@ namespace xpTURN.Klotho.Godot
                 vis.selectedIndex = 0;
 
             _header.Text = $"FPPhysics   Bodies: {vis.bodyCount}   StaticColliders: {vis.staticCount}";
+            // copied/total for the three snapshot views, suppressed until the visualizer has run a
+            // frame (the contact caches are filled by _Process, not here) — "0/0" in that state
+            // would assert "nothing was truncated" where we know nothing.
+            if (vis.currentContacts != null)
+            {
+                var st = vis.currentStats;
+                _header.Text += $"\n   Contacts: {st.ContactCopied}/{st.ContactTotal}"
+                    + $"   Static: {st.StaticContactCopied}/{st.StaticContactTotal}"
+                    + $"   Triggers: {st.TriggerCopied}/{st.TriggerTotal}"
+                    + (st.AnyTruncated ? "   [TRUNCATED — showing less than the simulation holds]" : "");
+            }
             _bodiesTab.ButtonPressed = vis.viewingBodies;
             _staticTab.ButtonPressed = !vis.viewingBodies;
             _navLabel.Text = $"{(total == 0 ? 0 : vis.selectedIndex + 1)} / {total}";
@@ -208,10 +219,17 @@ namespace xpTURN.Klotho.Godot
                     if (vis.currentSContacts[i].entityA == bodyIdx || vis.currentSContacts[i].entityB == bodyIdx)
                         staCount++;
 
-            if (dynCount + staCount == 0) return;
+            // truncation has to be considered, not just the tally: a body whose contacts were all
+            // dropped reads as zero, and that is exactly the body someone came to inspect.
+            bool incomplete = vis.currentStats.ContactListMayBeIncomplete;
+            if (!vis.currentStats.ShouldDrawContactList(dynCount, staCount)) return;
 
             sb.AppendLine();
-            sb.AppendLine($"Contacts  Dyn:{dynCount}  Static:{staCount}");
+            // the header text itself has to say it — a note beside "Dyn:0 Static:0" still leaves the
+            // body of the list asserting "no contacts".
+            sb.AppendLine(incomplete
+                ? $"Contacts  Dyn:{dynCount}  Static:{staCount}  — truncated (this body's contacts may not be shown)"
+                : $"Contacts  Dyn:{dynCount}  Static:{staCount}");
 
             if (vis.currentContacts != null)
             {

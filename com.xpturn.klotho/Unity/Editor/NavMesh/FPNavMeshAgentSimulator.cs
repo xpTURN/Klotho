@@ -80,6 +80,35 @@ namespace xpTURN.Klotho.Editor
         }
 
         /// <summary>
+        /// Installs a rebaked mesh WITHOUT rebuilding the simulation — the engine's own swap
+        /// protocol, so an editor experiment survives a building being placed.
+        ///
+        /// <para><see cref="Initialize"/> is the alternative and it is the wrong one here: it
+        /// recreates the frame and resets the tick, so every placement would wipe the agents whose
+        /// behaviour is the thing being looked at. What this does instead is what a match does —
+        /// <c>FPNavAgentInstaller.Swap</c> rebinds the query/pathfinder/funnel, drops the
+        /// graph-local obstacle CSR, re-extracts the ORCA obstacles (a carve adds a hole ring, so
+        /// that set really does change) and re-collects the agent list; then <c>ReseedAgents</c>
+        /// re-queries every agent's triangle index on the new mesh. Skipping the reseed leaves
+        /// agents holding indices into the mesh that was just replaced, which is not an exception —
+        /// they simply walk somewhere else.</para>
+        ///
+        /// <para>Returns false when there is nothing to swap into (no simulation built yet); the
+        /// caller then has no agents to worry about either.</para>
+        /// </summary>
+        public bool SwapNavMesh(FPNavMesh newMesh)
+        {
+            if (_agentSystem == null || _simFrame == null || newMesh == null)
+                return false;
+
+            int collected = FPNavAgentInstaller.Swap(
+                ref _simFrame, _agentSystem, newMesh, ref _entities);
+            _agentSystem.ReseedAgents(ref _simFrame, _entities, collected);
+            _entityCount = collected;
+            return true;
+        }
+
+        /// <summary>
         /// Live knob: writes through to the retained avoidance so toggling the inset (e.g. 0 vs
         /// bake radius) is visible without reloading the mesh.
         /// </summary>
@@ -139,6 +168,27 @@ namespace xpTURN.Klotho.Editor
 
             ref var nav = ref _simFrame.Get<NavAgentComponent>(_entities[index]);
             NavAgentComponent.Stop(ref nav);
+        }
+
+        /// <summary>
+        /// Gives ONE agent its own plan and walk area masks, so a scene can hold agents that
+        /// disagree about which ground they may use. Pass 0 for either to mean "no override".
+        ///
+        /// <para>Per agent rather than a simulator-wide default because the combination worth
+        /// looking at is two agents on the same mesh with the same destination and different walk
+        /// masks — one enters a retained footprint and the other stops at its edge on the same
+        /// tick. A global setting could only produce that by being changed between spawns.</para>
+        ///
+        /// <para>Goes through <c>NavAgentComponent.SetAreaMask</c>, which also drops the corridor
+        /// the old masks planned; the agent replans on the next tick. That is the behaviour to
+        /// watch when narrowing a mask under an agent that is already walking.</para>
+        /// </summary>
+        public void SetAgentAreaMask(int index, int planMask, int walkMask)
+        {
+            if (index < 0 || index >= _entityCount || _simFrame == null) return;
+
+            ref var nav = ref _simFrame.Get<NavAgentComponent>(_entities[index]);
+            NavAgentComponent.SetAreaMask(ref nav, planMask, walkMask);
         }
 
         public void ClearAllAgents()
@@ -283,6 +333,10 @@ namespace xpTURN.Klotho.Editor
             public bool hasPath;
             public FPNavAgentStatus status;
             public int currentTriangleIndex;
+            // The agent's own masks, so a mixed scene can be told apart in the list. 0 = no
+            // override, i.e. FPNavAgentSystem.DEFAULT_AREA_MASK.
+            public int planAreaMask;
+            public int walkAreaMask;
             public int[] corridor;
             public int corridorLength;
         }
@@ -306,6 +360,8 @@ namespace xpTURN.Klotho.Editor
                 hasPath = nav.HasPath,
                 status = (FPNavAgentStatus)nav.Status,
                 currentTriangleIndex = nav.CurrentTriangleIndex,
+                planAreaMask = nav.PlanAreaMaskOverride,
+                walkAreaMask = nav.WalkAreaMaskOverride,
             };
 
             if (nav.HasPath && nav.PathIsValid && nav.CorridorLength > 0)

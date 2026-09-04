@@ -351,8 +351,13 @@ namespace Brawler
         /// The orientation is drawn at random from the shape catalog, which is the point of the P4
         /// wiring: an axis-aligned rect would not have one.
         /// No-op when the stage has no rebake snapshot or the local character is absent.
+        ///
+        /// <para><paramref name="retain"/> asks for a building that keeps its footprint as ground
+        /// (<c>FPBuildingPlacement.Retain</c>) instead of carving a hole. It travels ONLY in the
+        /// command payload: a local toggle the simulation read directly would give each peer its
+        /// own navmesh under a matching state hash.</para>
         /// </summary>
-        public void SendPlaceBuildingCommand(IKlothoEngine engine)
+        public void SendPlaceBuildingCommand(IKlothoEngine engine, bool retain = false)
         {
             if (RebakeContext == null)
                 return;
@@ -366,15 +371,18 @@ namespace Brawler
                 if (ch.PlayerId != playerId || ch.IsDead)
                     continue;
                 ref readonly var tr = ref frame.GetReadOnly<TransformComponent>(entity);
-                // Quantised to the placement grid, not rounded to whole units. The grid is
-                // 1/1024 of a world unit, so the character's actual position survives instead of
-                // being flattened — which is what lets a placement sit where a flush neighbour
-                // would go (FPGeoPredicates.Quantize).
-                var centre = new FPVector3(
-                    FPGeoPredicates.Quantize(tr.Position.x + FP64.FromInt(2)),
-                    tr.Position.y,
-                    FPGeoPredicates.Quantize(tr.Position.z));
                 int orientation = RandomOrientation(frame, (ulong)playerId);
+                // Snapped to the BOX's own tiling lattice, exactly as the hexagon button is.
+                // Quantising alone (which is all this used to do) keeps the placement legal but not
+                // flush: the expansion pads outward by two snap units per side, so two boxes meet at
+                // 2.003906 world units rather than 2, and a free-hand centre essentially never lands
+                // there. The leftover is about four millimetres of walkable ground between the
+                // footprints — and the engine cannot tell a four millimetre gap from a door, so
+                // pressing this repeatedly built a wall units could path straight through.
+                BrawlerBuildingShapes.SnapPlacement(
+                    RebakeContext.ShapeExpansion, BrawlerBuildingShapes.BoxShape, orientation,
+                    tr.Position.x + FP64.FromInt(2), tr.Position.z, out FP64 bx, out FP64 bz);
+                var centre = new FPVector3(bx, tr.Position.y, bz);
                 // Pooled, not `new`: IssueOnce's factory hands the instance to the framework, which
                 // owns and eventually recycles it (ILockstepEngine.IssueOnce · ReliableCommandTracker
                 // .Issue both state this). The factory is re-invoked on every retry, so a `new` here
@@ -390,6 +398,7 @@ namespace Brawler
                     cmd.ShapeId = BrawlerBuildingShapes.BoxShape;
                     cmd.Orientation = orientation;
                     cmd.Centre = centre;
+                    cmd.Retain = retain;
                     return cmd;
                 });
                 return;
@@ -401,8 +410,11 @@ namespace Brawler
         /// command. Separate from the box because a hexagon has no orientation to send — no integer
         /// hexagon is symmetric under 60 degrees, so the turns a rotate button would offer are not
         /// in the catalog (see BrawlerBuildingShapes). Wire to a second UI button.
+        ///
+        /// <para><paramref name="retain"/> as in <see cref="SendPlaceBuildingCommand"/>: the mode
+        /// travels only in the command payload.</para>
         /// </summary>
-        public void SendPlaceHexBuildingCommand(IKlothoEngine engine)
+        public void SendPlaceHexBuildingCommand(IKlothoEngine engine, bool retain = false)
         {
             if (RebakeContext == null)
                 return;
@@ -420,8 +432,8 @@ namespace Brawler
                 // a honeycomb rather than a scatter of near misses. Without it the touch rule is
                 // on but unreachable from the UI: no tiling delta is a whole world unit, so a
                 // free-hand position essentially never lands flush.
-                BrawlerBuildingShapes.SnapHexPlacement(
-                    RebakeContext.ShapeExpansion,
+                BrawlerBuildingShapes.SnapPlacement(
+                    RebakeContext.ShapeExpansion, BrawlerBuildingShapes.HexShape, 0,
                     tr.Position.x + FP64.FromInt(2), tr.Position.z,
                     out FP64 hx, out FP64 hz);
                 var centre = new FPVector3(hx, tr.Position.y, hz);
@@ -431,6 +443,7 @@ namespace Brawler
                 {
                     var cmd = CommandPool.Get<PlaceHexBuildingCommand>();
                     cmd.Centre = centre;
+                    cmd.Retain = retain;
                     return cmd;
                 });
                 return;

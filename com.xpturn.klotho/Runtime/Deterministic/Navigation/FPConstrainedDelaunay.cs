@@ -102,6 +102,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// Triangulates snapped-grid points with constraint edges and returns triangle index
         /// triplets referencing the input arrays (duplicates weld to their first occurrence).
         /// Output triangles are CCW and canonically ordered.
+        ///
+        /// <para><b>Constraint multiplicity is meaningful — submitting a segment twice is a
+        /// contract, not an accident.</b> An edge marked more than once is still a wall
+        /// (<c>Constrained</c> is OR over markings), but crossing it does not change walkability
+        /// (the erase pass reads an XOR parity). So a segment submitted an EVEN number of times
+        /// stays geometrically present while carving nothing, which is how an open seam — a cliff
+        /// join a unit may climb, a bridge rail, a wall footing — is expressed. Duplicates are
+        /// deliberately not folded away, and this holds for hole constraints on
+        /// <see cref="TriangulateFromSnapshot(CdtSnapshot, long[], long[], int[], bool, IKLogger)"/>
+        /// too.</para>
+        ///
+        /// <para>Two limits ride with it. An <b>odd-multiplicity open chain is undefined</b>: the
+        /// erase pass reads a min-depth parity that is path-independent only when the marked set is
+        /// a sum of closed curves, and doubling is what makes an open chain satisfy that (every
+        /// edge even ⇒ the odd set is empty). And a pair whose two endpoints <b>weld to the same
+        /// vertex is dropped entirely</b> rather than becoming a parity-neutral wall — welding
+        /// happens before constraint insertion, so a caller with coincident input coordinates can
+        /// reach this.</para>
         /// </summary>
         /// <param name="xs">Snapped X coordinates (|x| &lt;= FPGeoPredicates.MAX_SNAPPED_COORD).</param>
         /// <param name="zs">Snapped Z coordinates (same length as <paramref name="xs"/>).</param>
@@ -136,12 +154,48 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
-        /// Builds a reusable base snapshot: the full CDT state after inserting all base
-        /// vertices and base constraints. Runs the exact same
-        /// code path as <see cref="Triangulate"/> up to (but excluding) Extract, so
+        /// Builds a reusable base snapshot for a caller-authored constraint set: the full CDT state
+        /// after inserting all base vertices and base constraints. Runs the exact same code path as
+        /// <see cref="Triangulate"/> up to (but excluding) Extract, so
         /// "BuildSnapshot + Extract == Triangulate" bit-identically (freeze-consistency gate).
+        ///
+        /// <para>Feed the result to
+        /// <see cref="TriangulateFromSnapshot(CdtSnapshot, long[], long[], int[], bool, IKLogger)"/>
+        /// once per set of holes; the expensive half is this build and it is shared across resumes.
+        /// The returned triangle indices go to
+        /// <c>FPNavMeshBuildPipeline.BuildFromConformingTriangulation</c>, which also takes a
+        /// <c>previous</c> mesh — so a caller-authored pipeline keeps the incremental patch path.
+        /// What it does not get is slicing: this entry point runs to completion.</para>
+        ///
+        /// <para><b>Also attaches a base coordinate map</b>, which is what lets the public resume
+        /// check its input cheaply (see <c>CdtSnapshot.CoordToIndex</c>). That costs one pass over
+        /// the base vertices here, once, rather than on every resume.</para>
         /// </summary>
-        internal static CdtSnapshot BuildSnapshot(
+        /// <param name="xs">Snapped X coordinates (|x| &lt;= FPGeoPredicates.MAX_SNAPPED_COORD).</param>
+        /// <param name="zs">Snapped Z coordinates (same length as <paramref name="xs"/>).</param>
+        /// <param name="constraintPairs">Base constraint edges as index pairs. May be null/empty.</param>
+        /// <param name="logger">Optional diagnostic logger.</param>
+        /// <exception cref="ArgumentException">Out-of-domain coordinates or malformed input.</exception>
+        /// <exception cref="InvalidOperationException">A constraint crosses another constraint.</exception>
+        public static CdtSnapshot BuildSnapshot(
+            long[] xs, long[] zs, int[] constraintPairs, IKLogger logger = null)
+        {
+            CdtSnapshot snap = BuildSnapshotCore(xs, zs, constraintPairs, logger);
+
+            // [0, RealCount): the ghost block trails Xs/Zs and is not caller geometry.
+            var map = new Dictionary<(long, long), int>(snap.RealCount);
+            for (int i = 0; i < snap.RealCount; i++)
+                map[(snap.Xs[i], snap.Zs[i])] = i;   // duplicates welded already; last wins, unused
+
+            return snap.WithCoordMap(map);
+        }
+
+        /// <summary>
+        /// The snapshot build itself, without the public factory's coordinate map. This is what the
+        /// rebaker uses: it already keeps its own coordinate map and must not pay for a second one,
+        /// and its hole vertices are deduped upstream so the public resume's check would find nothing.
+        /// </summary>
+        internal static CdtSnapshot BuildSnapshotCore(
             long[] xs, long[] zs, int[] constraintPairs, IKLogger logger = null)
         {
             if (xs == null || zs == null || xs.Length != zs.Length)
@@ -154,6 +208,86 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             cdt.InsertConstraints(constraintPairs, constraintPairs == null ? 0 : constraintPairs.Length);
             cdt.SelfCheck();
             return cdt.Freeze();
+        }
+
+        /// <summary>
+        /// Resumes from a base snapshot with a set of holes and returns triangle index triplets.
+        /// Sizes come from the arrays, and the returned array is exact-size.
+        ///
+        /// <para><b>Hole vertices must not duplicate any coordinate</b> — neither a base coordinate
+        /// nor another hole's. Unlike <see cref="Triangulate"/>, a resume does <b>not</b> weld the
+        /// vertices you append: the snapshot's weld map covers the BASE range only and appended
+        /// holes get an identity mapping, and your constraint indices are positional, so welding
+        /// them would silently renumber your pairs. A violation therefore throws rather than
+        /// quietly producing a different mesh. Hole constraint indices live in the combined
+        /// space — base <c>0..RealCount-1</c> first, then holes appended in the order given.</para>
+        ///
+        /// <para>The check is O(holes) against the map the public
+        /// <see cref="BuildSnapshot"/> attached, so it does not scale with the base mesh.</para>
+        /// </summary>
+        /// <param name="snapshot">A snapshot from <see cref="BuildSnapshot"/>.</param>
+        /// <param name="holeXs">Snapped hole X coordinates.</param>
+        /// <param name="holeZs">Snapped hole Z coordinates (same length as <paramref name="holeXs"/>).</param>
+        /// <param name="holeConstraintPairs">Hole constraint edges as index pairs in the combined space. May be null/empty.</param>
+        /// <param name="eraseOuterAndHoles">See <see cref="Triangulate"/>.</param>
+        /// <param name="logger">Optional diagnostic logger.</param>
+        /// <exception cref="ArgumentException">Null arguments, mismatched lengths, or out-of-domain coordinates.</exception>
+        /// <exception cref="InvalidOperationException">A duplicate hole coordinate, or a constraint crossing another constraint.</exception>
+        public static int[] TriangulateFromSnapshot(
+            CdtSnapshot snapshot, long[] holeXs, long[] holeZs, int[] holeConstraintPairs,
+            bool eraseOuterAndHoles = true, IKLogger logger = null)
+        {
+            if (snapshot == null)
+                throw new ArgumentException("FPConstrainedDelaunay: snapshot is null");
+            if (holeXs == null || holeZs == null)
+                throw new ArgumentException("FPConstrainedDelaunay: holeXs/holeZs must be non-null");
+            if (holeXs.Length != holeZs.Length)
+                throw new ArgumentException("FPConstrainedDelaunay: holeXs/holeZs must be equal length");
+
+            ValidateHoleCoordinates(snapshot, holeXs, holeZs, holeXs.Length);
+
+            int[] result = TriangulateFromSnapshot(
+                snapshot, holeXs, holeZs, holeXs.Length,
+                holeConstraintPairs, holeConstraintPairs == null ? 0 : holeConstraintPairs.Length,
+                out int count, eraseOuterAndHoles, logger, pool: null);
+            System.Diagnostics.Debug.Assert(result.Length == count,
+                "FPConstrainedDelaunay.TriangulateFromSnapshot: NonPooling must return exact-size buffers");
+            return result;
+        }
+
+        /// <summary>
+        /// The no-duplicate-hole-coordinate contract, enforced where a caller can actually break it.
+        ///
+        /// <para>The same check exists inside the resume as a <c>#if DEBUG</c> scan, and it is
+        /// deliberately left there rather than promoted: that scan is O(holes x base vertices) —
+        /// measured at ~9.4 us per hole against a 17k-vertex base, 91% of the whole hole-proportional
+        /// cost — and the rebaker provably cannot trip it, so making it unconditional would tax the
+        /// runtime rebake path for a defense it does not need. This one runs only on the public
+        /// entry, and only against the map the public factory already built.</para>
+        ///
+        /// <para>Hole-to-hole duplicates need their own set: the map holds base coordinates only.</para>
+        /// </summary>
+        private static void ValidateHoleCoordinates(
+            CdtSnapshot snapshot, long[] holeXs, long[] holeZs, int holeCount)
+        {
+            var baseMap = snapshot.CoordToIndex;
+            if (baseMap == null)
+                return;   // internal-path snapshot: the DEBUG scan inside the resume still covers it
+
+            var seen = new HashSet<(long, long)>(holeCount);
+            for (int i = 0; i < holeCount; i++)
+            {
+                var key = (holeXs[i], holeZs[i]);
+                if (baseMap.ContainsKey(key))
+                    throw new InvalidOperationException(
+                        $"FPConstrainedDelaunay: hole vertex {i} duplicates a base coordinate " +
+                        $"({key.Item1}, {key.Item2}) — a resume does not weld, so this would renumber " +
+                        $"your constraint indices");
+                if (!seen.Add(key))
+                    throw new InvalidOperationException(
+                        $"FPConstrainedDelaunay: hole vertex {i} duplicates an earlier hole coordinate " +
+                        $"({key.Item1}, {key.Item2})");
+            }
         }
 
         /// <summary>
@@ -218,8 +352,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// Never transmitted — a peer-local derivative of the base mesh; determinism follows from
         /// the deterministic build chain, with the nav fingerprint as the final cross-peer check. Shared read-only across rebakes/workers;
         /// every resume clones it.
+        ///
+        /// <para><b>Opaque handle.</b> Public so a caller can hold one between
+        /// <see cref="BuildSnapshot"/> and <see cref="TriangulateFromSnapshot(CdtSnapshot, long[], long[], int[], bool, IKLogger)"/>;
+        /// every member stays internal because they are the internal representation, not a format.
+        /// Reading the base geometry is what <c>FPNavMesh</c> is for.</para>
         /// </summary>
-        internal sealed class CdtSnapshot
+        public sealed class CdtSnapshot
         {
             internal readonly long[] Xs;        // realCount + 4 (ghosts trailing)
             internal readonly long[] Zs;
@@ -230,13 +369,40 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             internal readonly int LastLocate;   // determinism material (walk start hint)
             internal readonly int RealCount;
 
+            /// <summary>
+            /// Base coordinate -> index, over [0, RealCount) only (the ghost block trails Xs/Zs and
+            /// must stay out). Non-null ONLY on snapshots handed out by the public
+            /// <see cref="BuildSnapshot"/>, which is what lets the public resume enforce the
+            /// no-duplicate-hole-vertex contract in O(holes) instead of O(holes x base).
+            ///
+            /// <para>Built eagerly at construction and never written after, because a snapshot is
+            /// shared: rooms sharing a stage hold one, and a server ticks its rooms on the thread
+            /// pool. A lazy cache here would be a race in a type whose whole contract is
+            /// immutability.</para>
+            ///
+            /// <para><c>null</c> on the internal <see cref="BuildSnapshotCore"/> path — the rebaker
+            /// keeps its own map (<c>FPNavMeshRebakeSnapshot.CoordToIndex</c>) and must not pay for a
+            /// second one. That asymmetry is the whole reason the two factories have different names.</para>
+            /// </summary>
+            internal readonly Dictionary<(long, long), int> CoordToIndex;
+
             internal CdtSnapshot(
                 long[] xs, long[] zs, int[] weld, Cdt.Tri[] tris, int triCount,
-                int[] vertexTri, int lastLocate, int realCount)
+                int[] vertexTri, int lastLocate, int realCount,
+                Dictionary<(long, long), int> coordToIndex = null)
             {
                 Xs = xs; Zs = zs; Weld = weld; Tris = tris; TriCount = triCount;
                 VertexTri = vertexTri; LastLocate = lastLocate; RealCount = realCount;
+                CoordToIndex = coordToIndex;
             }
+
+            /// <summary>
+            /// Same frozen state with a base coordinate map attached. Shares every array — O(1)
+            /// besides the map itself — so the public factory can add the map without a second freeze.
+            /// </summary>
+            internal CdtSnapshot WithCoordMap(Dictionary<(long, long), int> coordToIndex)
+                => new CdtSnapshot(Xs, Zs, Weld, Tris, TriCount, VertexTri, LastLocate, RealCount,
+                                   coordToIndex);
         }
 
         // ------------------------------------------------------------------------------------

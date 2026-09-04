@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 using xpTURN.Klotho.Logging;
 
 using xpTURN.Klotho.Deterministic.Math;
@@ -16,9 +18,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         /// Create lightweight Frame + 1 NavAgentComponent agent.
         /// </summary>
         public static Frame CreateFrameWithAgent(FPVector3 position, int triangleIndex,
-            out EntityRef entity, out EntityRef[] entities)
+            out EntityRef entity, out EntityRef[] entities, int maxEntities = MAX_ENTITIES)
         {
-            var frame = new Frame(MAX_ENTITIES, null);
+            var frame = new Frame(maxEntities, null);
             entity = frame.CreateEntity();
             frame.Add(entity, default(NavAgentComponent));
             ref var nav = ref frame.Get<NavAgentComponent>(entity);
@@ -32,9 +34,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         /// Create lightweight Frame + N NavAgentComponent agents.
         /// </summary>
         public static Frame CreateFrameWithAgents(FPVector3[] positions, int[] triangleIndices,
-            out EntityRef[] entities)
+            out EntityRef[] entities, int maxEntities = MAX_ENTITIES)
         {
-            var frame = new Frame(MAX_ENTITIES, null);
+            var frame = new Frame(maxEntities, null);
             entities = new EntityRef[positions.Length];
             for (int i = 0; i < positions.Length; i++)
             {
@@ -52,9 +54,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         /// </summary>
         public static Frame CreateFrameWithMovingAgents(
             FPVector3[] positions, FPVector2[] velocities,
-            out EntityRef[] entities)
+            out EntityRef[] entities, int maxEntities = MAX_ENTITIES)
         {
-            var frame = new Frame(MAX_ENTITIES, null);
+            var frame = new Frame(maxEntities, null);
             entities = new EntityRef[positions.Length];
             for (int i = 0; i < positions.Length; i++)
             {
@@ -70,12 +72,229 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         }
 
         public static FPNavAgentSystem CreateSystem(FPNavMesh mesh, IKLogger logger)
+            => CreateSystem(mesh, logger, out _);
+
+        /// <summary>
+        /// Same system, with the pathfinder handed back so a caller can read its diagnostic
+        /// counters. The system keeps the instance private on purpose — reaching for it is a test
+        /// concern, not an engine API.
+        /// </summary>
+        public static FPNavAgentSystem CreateSystem(FPNavMesh mesh, IKLogger logger,
+            out FPNavMeshPathfinder pathfinder)
         {
             var query = new FPNavMeshQuery(mesh, logger);
-            var pathfinder = new FPNavMeshPathfinder(mesh, query, logger);
+            pathfinder = new FPNavMeshPathfinder(mesh, query, logger);
             var funnel = new FPNavMeshFunnel(mesh, query, logger);
             return new FPNavAgentSystem(mesh, query, pathfinder, funnel, logger);
         }
+
+        #region Large synthetic meshes (crowd-scaling harness)
+
+        // Every large-mesh helper below emits unit quads on an integer lattice and hands them to
+        // the real build pipeline, so adjacency, the broadphase grid and the bake block come out
+        // exactly as they do for a baked asset. CELL is the world size of one lattice cell: it is
+        // wider than the default agent radius (0.5) so a one-cell corridor stays walkable.
+        private const double CELL = 2.0;
+
+        private sealed class QuadMeshBuilder
+        {
+            private readonly Dictionary<(int, int), int> _index = new Dictionary<(int, int), int>();
+            private readonly List<FPVector3> _vertices = new List<FPVector3>();
+            private readonly List<int> _indices = new List<int>();
+            private readonly List<int> _areas = new List<int>();
+
+            private int Vertex(int gx, int gz)
+            {
+                if (_index.TryGetValue((gx, gz), out int existing))
+                    return existing;
+                int id = _vertices.Count;
+                _vertices.Add(new FPVector3(
+                    FP64.FromDouble(gx * CELL), FP64.Zero, FP64.FromDouble(gz * CELL)));
+                _index[(gx, gz)] = id;
+                return id;
+            }
+
+            /// <summary>Adds the two CCW triangles of lattice cell (gx, gz), area 0.</summary>
+            public void AddCell(int gx, int gz) => AddCell(gx, gz, 0);
+
+            /// <summary>
+            /// Adds the two CCW triangles of lattice cell (gx, gz) with the given NavMesh area
+            /// index. The pipeline turns it into <c>areaMask = 1 &lt;&lt; area</c> per triangle and
+            /// carries it through canonicalisation, so a caller picks areas by CELL and never has
+            /// to know the emitted triangle order.
+            /// </summary>
+            public void AddCell(int gx, int gz, int area)
+            {
+                _areas.Add(area);
+                _areas.Add(area);
+                int v00 = Vertex(gx, gz);
+                int v10 = Vertex(gx + 1, gz);
+                int v11 = Vertex(gx + 1, gz + 1);
+                int v01 = Vertex(gx, gz + 1);
+                _indices.Add(v00); _indices.Add(v10); _indices.Add(v11);
+                _indices.Add(v00); _indices.Add(v11); _indices.Add(v01);
+            }
+
+            public FPNavMesh Build()
+            {
+                var vertices = _vertices.ToArray();
+                var indices = _indices.ToArray();
+                return FPNavMeshBuildPipeline.Build(
+                    vertices, indices, _areas.ToArray(), CELL * 4.0,
+                    null, bakeAgentRadius: 0.5);
+            }
+        }
+
+        /// <summary>
+        /// Open square field, <paramref name="cells"/> × <paramref name="cells"/> lattice cells
+        /// (2 triangles each). The best case for A*: the distance heuristic is nearly perfect, so
+        /// expansion tracks the straight line however large the field gets. Use it to measure what
+        /// a wide-open map costs, not to stress the iteration budget.
+        /// </summary>
+        public static FPNavMesh CreateOpenFieldNavMesh(int cells)
+        {
+            var builder = new QuadMeshBuilder();
+            for (int gz = 0; gz < cells; gz++)
+                for (int gx = 0; gx < cells; gx++)
+                    builder.AddCell(gx, gz);
+            return builder.Build();
+        }
+
+        /// <summary>
+        /// Serpentine corridor: <paramref name="rows"/> horizontal runs of <paramref name="width"/>
+        /// cells, joined at alternating ends by a single connector cell, with the rows themselves
+        /// one empty lattice row apart so no shortcut exists. The route is forced through very
+        /// nearly every cell, which is what makes this the worst case for A*: the heuristic points
+        /// straight at the goal while the only path doubles back, so expansion count scales with
+        /// the corridor rather than with the straight-line distance.
+        /// <para>
+        /// Two gates ride on that: a long enough serpentine overruns the corridor buffer
+        /// (<c>MAX_CORRIDOR</c>), and a longer one overruns the A* iteration budget
+        /// (<c>MAX_ITERATIONS</c>) before it can reach the far end.
+        /// </para>
+        /// Cell (0,0) is the start; <paramref name="endCell"/> returns the far end.
+        /// </summary>
+        public static FPNavMesh CreateSerpentineNavMesh(int width, int rows, out (int gx, int gz) endCell)
+        {
+            var builder = new QuadMeshBuilder();
+            int lastX = 0;
+            for (int r = 0; r < rows; r++)
+            {
+                int gz = r * 2;
+                for (int gx = 0; gx < width; gx++)
+                    builder.AddCell(gx, gz);
+
+                lastX = (r % 2 == 0) ? width - 1 : 0;
+                if (r < rows - 1)
+                    builder.AddCell(lastX, gz + 1);   // connector into the next run
+            }
+            endCell = (lastX, (rows - 1) * 2);
+            return builder.Build();
+        }
+
+        /// <summary>
+        /// Two open patches of <paramref name="cells"/> × <paramref name="cells"/> with a lattice
+        /// gap between them, in one mesh. Both endpoints are on-mesh and walkable, but no edge
+        /// joins the patches — this is "there is genuinely no route", the case a budget-overrun
+        /// counter must not claim. Keep <paramref name="cells"/> small enough that draining the
+        /// start patch costs far fewer than <c>MAX_ITERATIONS</c> expansions.
+        /// </summary>
+        public static FPNavMesh CreateSplitFieldNavMesh(int cells, out (int gx, int gz) farCell)
+            => CreateSplitFieldNavMesh(cells, cells, out farCell);
+
+        /// <summary>
+        /// Rectangular variant. The start patch holds <c>width × height × 2</c> triangles, and A*
+        /// pops every one of them before giving up — which makes the cell count the dial for
+        /// "how much search happens before the open set drains", exactly the quantity that decides
+        /// whether a failure is a budget overrun or an exhausted graph.
+        /// </summary>
+        public static FPNavMesh CreateSplitFieldNavMesh(int width, int height, out (int gx, int gz) farCell)
+        {
+            var builder = new QuadMeshBuilder();
+            for (int gz = 0; gz < height; gz++)
+                for (int gx = 0; gx < width; gx++)
+                    builder.AddCell(gx, gz);
+
+            int offset = width + 2;   // one empty lattice column is enough to break adjacency
+            for (int gz = 0; gz < 2; gz++)
+                for (int gx = 0; gx < 2; gx++)
+                    builder.AddCell(offset + gx, gz);
+
+            farCell = (offset, 0);
+            return builder.Build();
+        }
+
+        /// <summary>
+        /// Open square field split into TWO NavMesh areas by lattice column: cells with
+        /// <c>gx &lt; splitGx</c> get area 0 (<c>areaMask == 1</c>), the rest area 3
+        /// (<c>areaMask == 8</c>). The two halves are edge-adjacent, so a mask of 1 makes the
+        /// seam a wall while the geometry stays fully connected — which is what separates "the
+        /// filter is being applied" from "the mesh has a hole in it". Area 3 rather than 1 because
+        /// 1 is <see cref="FPNavMeshAreas.BUILDING_AREA"/>, reserved for the runtime and refused by
+        /// the build pipeline.
+        ///
+        /// <para>Areas are assigned through the build pipeline's <c>areas</c> argument, the same
+        /// producer a baked asset uses (the Unity exporter forwards
+        /// <c>NavMeshTriangulation.areas</c>), rather than by stamping
+        /// <c>TrianglesMutable</c> afterwards. Tests about the runtime's own stamp want the other
+        /// producer: <see cref="RebakeWithBuildings"/> with a retained building.</para>
+        /// </summary>
+        public static FPNavMesh CreateTwoAreaFieldNavMesh(int cells, int splitGx)
+        {
+            var builder = new QuadMeshBuilder();
+            for (int gz = 0; gz < cells; gz++)
+                for (int gx = 0; gx < cells; gx++)
+                    builder.AddCell(gx, gz, gx < splitGx ? 0 : 3);
+            return builder.Build();
+        }
+
+        /// <summary>
+        /// One square building shape, half extent 1.25 world units — deliberately off the 2-unit
+        /// lattice, so an expanded corner never coincides with a base vertex (the retain fixture's
+        /// reasoning, see <c>FPNavMeshRetainPlacementTests.SquareCatalog</c>).
+        /// </summary>
+        public static readonly FPBuildingShapeCatalog SquareBuildingCatalog = MakeSquareCatalog();
+
+        private static FPBuildingShapeCatalog MakeSquareCatalog()
+        {
+            long h = 5 * FPGeoPredicates.SNAP_UNITS_PER_WORLD / 4;
+            FPBuildingShapeCatalog.ObbOffsets(h, h, 4, out long[] x, out long[] z, out int[] entryStart);
+            return new FPBuildingShapeCatalog(x, z, entryStart);
+        }
+
+        /// <summary>Touch policy, building contact allowed — the rules every helper rebake uses.</summary>
+        public static readonly FPBuildingPlacementRules TouchRules =
+            new FPBuildingPlacementRules(allowBuildingTouch: true);
+
+        /// <summary>
+        /// Half extent, in world units, of the footprint the rebaker actually carves or retains for
+        /// <see cref="SquareBuildingCatalog"/> on <paramref name="mesh"/> — read from the engine's own
+        /// expansion, which pads conservatively (measured 1.751953125, not 1.25 + radius).
+        /// </summary>
+        public static double ExpandedBuildingHalf(FPNavMesh mesh) =>
+            new FPBuildingShapeExpansion(SquareBuildingCatalog, mesh.BakeAgentRadius).ExpandedX[0]
+            / (double)FPGeoPredicates.SNAP_UNITS_PER_WORLD;
+
+        public static FPBuildingPlacement Building(double x, double z, bool retain) =>
+            new FPBuildingPlacement(0, FP64.FromDouble(x), FP64.FromDouble(z), FP64.Zero, retain);
+
+        /// <summary>
+        /// <paramref name="mesh"/> with <paramref name="placements"/> placed through the real
+        /// rebaker under <see cref="TouchRules"/>. Carved buildings come back as holes; retained ones
+        /// as ground stamped <see cref="FPNavMeshAreas.BUILDING_MASK"/>. Throws on a rejection.
+        /// </summary>
+        public static FPNavMesh RebakeWithBuildings(FPNavMesh mesh, params FPBuildingPlacement[] placements)
+        {
+            var snapshot = FPNavMeshRebaker.CreateSnapshot(
+                mesh, null, prewarm: false, shapeCatalog: SquareBuildingCatalog);
+            return FPNavMeshRebaker.RebakePlacements(snapshot, placements, null, TouchRules);
+        }
+
+        /// <summary>World-space centre of lattice cell (gx, gz), on the mesh surface.</summary>
+        public static FPVector3 CellCenter(int gx, int gz) => new FPVector3(
+            FP64.FromDouble((gx + 0.5) * CELL), FP64.Zero, FP64.FromDouble((gz + 0.5) * CELL));
+
+        #endregion
 
         /// <summary>
         /// 4-triangle strip NavMesh (same as FPNavMeshPathfinderTests).

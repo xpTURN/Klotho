@@ -143,7 +143,7 @@ namespace Brawler
                 {
                     Sequence = b.Sequence,
                     Placement = new FPBuildingPlacement(
-                        b.ShapeId, b.Orientation, b.Centre.x, b.Centre.z, b.Centre.y),
+                        b.ShapeId, b.Orientation, b.Centre.x, b.Centre.z, b.Centre.y, b.Retain),
                     EffectiveTick = b.EffectiveTick,
                     RemovalEffectiveTick = b.RemovalEffectiveTick,
                 };

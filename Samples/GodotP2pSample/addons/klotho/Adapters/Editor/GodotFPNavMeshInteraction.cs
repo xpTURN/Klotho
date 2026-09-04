@@ -15,6 +15,7 @@ namespace xpTURN.Klotho.Godot
         InspectTriangle,
         PlaceAgent,
         SetAgentDest,
+        PlaceBuilding,
     }
 
     internal class GodotFPNavMeshInteraction
@@ -32,6 +33,7 @@ namespace xpTURN.Klotho.Godot
         public event Action<int> OnTriangleSelected;
         public event Action<Vector3> OnAgentPlaced;
         public event Action<int, Vector3> OnAgentDestinationSet;
+        public event Action<Vector3> OnBuildingPlaced;
 
         public void SetData(GodotFPNavMeshVisualizerData data) => _data = data;
 
@@ -94,6 +96,10 @@ namespace xpTURN.Klotho.Godot
                 case InteractionMode.SetAgentDest:
                     if (SelectedAgentIndex >= 0)
                         OnAgentDestinationSet?.Invoke(SelectedAgentIndex, hitPoint);
+                    break;
+
+                case InteractionMode.PlaceBuilding:
+                    OnBuildingPlaced?.Invoke(hitPoint);
                     break;
             }
         }

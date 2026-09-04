@@ -146,6 +146,25 @@ namespace xpTURN.Klotho.Godot
             NavAgentComponent.Stop(ref nav);
         }
 
+        /// <summary>
+        /// Gives ONE agent its own plan and walk area masks, so a scene can hold agents that
+        /// disagree about which ground they may use. Pass 0 for either to mean "no override".
+        ///
+        /// <para>Per agent rather than a simulator-wide default because the combination worth
+        /// looking at is two agents on the same mesh with the same destination and different walk
+        /// masks — one enters a retained footprint and the other stops at its edge on the same
+        /// tick. A global setting could only produce that by being changed between spawns.</para>
+        ///
+        /// <para>Goes through <c>NavAgentComponent.SetAreaMask</c>, which also drops the corridor
+        /// the old masks planned; the agent replans on the next tick.</para>
+        /// </summary>
+        public void SetAgentAreaMask(int index, int planMask, int walkMask)
+        {
+            if (index < 0 || index >= _entityCount || _simFrame == null) return;
+            ref var nav = ref _simFrame.Get<NavAgentComponent>(_entities[index]);
+            NavAgentComponent.SetAreaMask(ref nav, planMask, walkMask);
+        }
+
         public void ClearAllAgents()
         {
             _entityCount = 0;
@@ -163,6 +182,30 @@ namespace xpTURN.Klotho.Godot
         }
 
         public void Pause() => IsRunning = false;
+
+        /// <summary>
+        /// Installs a rebaked mesh WITHOUT rebuilding the simulation — the engine's own protocol,
+        /// so an editor experiment survives a building being placed. Mirrors the Unity simulator.
+        ///
+        /// <para><c>Initialize</c> is the alternative and it is the wrong one: it recreates the
+        /// frame and resets the tick, wiping the agents whose behaviour is the thing being looked
+        /// at. <c>FPNavAgentInstaller.Swap</c> rebinds the query trio, drops the graph-local
+        /// obstacle CSR, re-extracts the ORCA obstacles (a carve adds a hole ring, so that set
+        /// really does change) and re-collects the agents; <c>ReseedAgents</c> then re-queries
+        /// every agent's triangle index on the new mesh. Skip the reseed and agents keep indices
+        /// into the mesh that was just replaced — not an exception, they simply walk elsewhere.</para>
+        /// </summary>
+        public bool SwapNavMesh(FPNavMesh newMesh)
+        {
+            if (_agentSystem == null || _simFrame == null || newMesh == null)
+                return false;
+
+            int collected = FPNavAgentInstaller.Swap(
+                ref _simFrame, _agentSystem, newMesh, ref _entities);
+            _agentSystem.ReseedAgents(ref _simFrame, _entities, collected);
+            _entityCount = collected;
+            return true;
+        }
 
         public void Step()
         {
@@ -234,6 +277,10 @@ namespace xpTURN.Klotho.Godot
             public bool hasPath;
             public FPNavAgentStatus status;
             public int currentTriangleIndex;
+            // The agent's own masks, so a mixed scene can be told apart in the list. 0 = no
+            // override, i.e. FPNavAgentSystem.DEFAULT_AREA_MASK.
+            public int planAreaMask;
+            public int walkAreaMask;
             public int[] corridor;
             public int corridorLength;
         }
@@ -257,6 +304,8 @@ namespace xpTURN.Klotho.Godot
                 hasPath = nav.HasPath,
                 status = (FPNavAgentStatus)nav.Status,
                 currentTriangleIndex = nav.CurrentTriangleIndex,
+                planAreaMask = nav.PlanAreaMaskOverride,
+                walkAreaMask = nav.WalkAreaMaskOverride,
             };
 
             if (nav.HasPath && nav.PathIsValid && nav.CorridorLength > 0)

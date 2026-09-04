@@ -145,5 +145,95 @@ namespace xpTURN.Klotho.Runtime.Tests.Contract
                 + "swaps on and no state hash covers it, so two builds disagreeing about it swap at "
                 + "different times and diverge with every component still matching");
         }
+
+        // ── Retain mode: the mode is a determinism input and flows through the payload only ──
+
+        [Test]
+        public void RetainMode_FlowsOnlyThroughTheCommandPayload()
+        {
+            // A toggle the simulation read directly (Input, PlayerPrefs, a static) would give each
+            // peer its own navmesh under a matching state hash — the failure with no detector. So
+            // the two systems that turn a placement into geometry may not read local input at all,
+            // and the handler must take the mode from the command it was handed.
+            string cmdSys = ReadBrawler("ECS/Systems/PlatformerCommandSystem.cs");
+            string botSys = ReadBrawler("ECS/Systems/BotFSMSystem.cs");
+            foreach (var (name, src) in new[] { ("PlatformerCommandSystem", cmdSys), ("BotFSMSystem", botSys) })
+            {
+                Assert.IsFalse(Regex.IsMatch(src, @"UnityEngine\.Input\b|\bInput\.Get|PlayerPrefs"),
+                    $"{name} reads local input — a placement mode taken from it diverges the navmesh");
+            }
+
+            // Both handlers — the command path is two, and a hexagon command that lost its field
+            // would silently carve forever with nothing else to notice (wiring plan trap 6).
+            Assert.AreEqual(2, Regex.Matches(cmdSys, @"PlaceBuildingAt\([^;]*cmd\.Retain\s*\)").Count,
+                "a placement handler no longer passes cmd.Retain into the shared placement body — "
+                + "the box and the hexagon must both take the mode from their own payload");
+            Assert.IsFalse(Regex.IsMatch(cmdSys, @"PlaceBuildingAt\([^;]*retain:\s*(true|false)\s*\)"),
+                "a placement handler pins the mode to a constant instead of reading its payload");
+            Assert.IsTrue(Regex.IsMatch(cmdSys, @"new FPBuildingPlacement\(\s*shapeId,\s*orientation,\s*centre\.x,\s*centre\.z,\s*centre\.y,\s*retain\)"),
+                "the trial placement no longer carries the mode — the validation would answer for a carve");
+            Assert.IsTrue(Regex.IsMatch(cmdSys, @"Retain\s*=\s*retain"),
+                "the BuildingComponent no longer records the mode — the installed mesh is derived from "
+                + "the component, so a carve would land where a retain was accepted");
+            Assert.IsTrue(Regex.IsMatch(ReadBrawler("ECS/Systems/NavMeshEffectiveTickSystem.cs"),
+                    @"b\.Centre\.y,\s*b\.Retain\s*\)"),
+                "Collect no longer passes the component's mode to the rebaker");
+        }
+
+        [Test]
+        public void PooledPlaceCommands_AssignRetainOnEveryIssue()
+        {
+            // CommandPool.Get resets only PlayerId and Tick, so a recycled PlaceBuildingCommand
+            // still carries the previous caller's mode. Every field is assigned on every issue,
+            // deliberately — this pins that Retain joined that list at both issuing sites.
+            string sender = ReadBrawler("Manager/BrawlerSimulationCallbacks.cs");
+            Assert.IsTrue(
+                Regex.IsMatch(sender, @"CommandPool\.Get<PlaceBuildingCommand>\(\)[\s\S]{0,400}?cmd\.Retain\s*=\s*retain\s*;"),
+                "SendPlaceBuildingCommand no longer assigns cmd.Retain from its parameter — a pooled "
+                + "instance would go out with whatever mode the previous send had");
+            Assert.IsTrue(
+                Regex.IsMatch(sender, @"CommandPool\.Get<PlaceHexBuildingCommand>\(\)[\s\S]{0,400}?cmd\.Retain\s*=\s*retain\s*;"),
+                "SendPlaceHexBuildingCommand no longer assigns cmd.Retain from its parameter");
+
+            string bots = ReadBrawler("ECS/Systems/BotFSMSystem.cs");
+            Assert.IsTrue(Regex.IsMatch(bots, @"_placeCmd\.Retain\s*=\s*[^;]*beat[^;]*;"),
+                "the headless demo no longer assigns _placeCmd.Retain as a function of the beat — "
+                + "the reused instance would carry the previous box's mode, and a mode not derived "
+                + "from the frame would not survive a re-executed tick");
+            Assert.IsTrue(Regex.IsMatch(bots, @"_placeHexCmd\.Retain\s*=\s*[^;]*beat[^;]*;"),
+                "the headless demo no longer assigns _placeHexCmd.Retain as a function of the beat");
+        }
+
+        [Test]
+        public void BotFallback_DoesNotSteerStraightThroughARetainedBuilding()
+        {
+            // The PathFailed fallback used to steer straight at the destination whenever the agent's
+            // velocity was zero — which defeats every FindPath-based block, the retained footprint
+            // included (no collider stops a Brawler building). The narrowed form fires only for a
+            // bot standing INSIDE a retained footprint, and drops the destination otherwise. Text,
+            // because the EditMode fixture's bots never acquire a destination
+            // (NavMeshEffectiveTickTests.Fixture_HowFarTheBotsGet_AndWhereItStops), so the live
+            // form of this gate has nothing to drive it yet.
+            //
+            // Being text has a second cost worth naming: when FindPath began exempting a masked-out
+            // START, the case this fallback was written for stopped reaching it — a bot a building
+            // lands on now gets an ordinary route out under the default masks — and this gate stayed
+            // green throughout, because the source still matches. Nothing was going to redden. The
+            // branch is kept deliberately (a narrowed per-agent PLAN mask still produces PathFailed
+            // inside a footprint), and that reasoning lives in the comment this regex sits next to,
+            // which is the only thing keeping it from becoming code nobody can explain.
+            string bots = ReadBrawler("ECS/Systems/BotFSMSystem.cs");
+            Match fallback = Regex.Match(bots,
+                // 2600, not 1600: the budget is there to stop the match running into a neighbouring
+            // method, not to cap how much the branch is allowed to explain itself — and raising
+            // it is what this gate asked for the moment the comment grew (measured gap: 2129).
+            @"PathFailed fallback[\s\S]{0,2600}?FPNavAgentStatus\.PathFailed[\s\S]{0,400}?StandsInsideBuilding\([\s\S]{0,900}?HasDestination\s*=\s*false");
+            Assert.IsTrue(fallback.Success,
+                "the fallback is no longer gated on PathFailed + standing inside a retained footprint, "
+                + "or no longer drops an unreachable destination on ordinary ground — the straight steer "
+                + "would walk bots through retained buildings again");
+            Assert.IsTrue(Regex.IsMatch(bots, @"StandsInsideBuilding\(int[\s\S]{0,400}?FPNavMeshAreas\.BUILDING_MASK"),
+                "StandsInsideBuilding no longer reads the installed mesh's building stamp");
+        }
     }
 }

@@ -225,7 +225,7 @@ MonoBehaviour:
       m_Calls:
       - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: Brawler.BrawlerGameController, Brawler.Manager
-        m_MethodName: OnBtnPlaceBuilding
+        m_MethodName: OnBtnPlaceRetainBuilding
         m_Mode: 1
         m_Arguments:
           m_ObjectArgument: {fileID: 0}
@@ -765,7 +765,7 @@ MonoBehaviour:
       m_Calls:
       - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: Brawler.BrawlerGameController, Brawler.Manager
-        m_MethodName: OnBtnPlaceHexBuilding
+        m_MethodName: OnBtnPlaceRetainHexBuilding
         m_Mode: 1
         m_Arguments:
           m_ObjectArgument: {fileID: 0}

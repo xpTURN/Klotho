@@ -206,6 +206,12 @@ Many units · low input frequency · rollback impractical (simulation cost too h
   - A path corridor is capped at `MAX_CORRIDOR` (128) triangles, and the fixed array behind it is most of `NavAgentComponent`'s 708-byte footprint.
   These are compile-time constants on purpose: they are determinism inputs (they change simulation results, and `MAX_CORRIDOR` changes the hashed component layout), so they cannot be turned into plain per-peer settings. For unit counts in the hundreds or more, plan on a game-side movement layer (flow fields, a spatial hash, a bounded path-request queue) over the deterministic primitives rather than on the stock agent system.
 
+- **Moving hundreds of units.** Measured, on a 192×192-unit field: the tick where 800 units all receive one move order costs **~970 ms**, against ~16 ms for the steady-state following that follows it — and ~42% of those searches return **no path at all**, silently, because they run out of the per-call A* budget. The order tick, not ORCA, is what binds first. Three levers work today with no engine change:
+  1. **Admit paths over several ticks** (promote K destinations per tick) instead of letting an idle army fire on one. The repath cooldown does not do this for you — it only gates units that already repathed.
+  2. **Call `Update` once per spatial cluster.** The array is yours; `MAX_AGENTS` is a *per-call* cap, so splitting both cuts the O(N²) neighbour scan and stops silently dropping agents from the correction pass. At 800 units, 50 clusters of 16 measured 6.3 ms against 16.3 ms for a single call.
+  3. **Flow fields for same-destination groups**, over the already-public triangle graph.
+  The partition is a **determinism input**, not a local optimisation — it must be a pure function of frame state, and a path-admission cursor must live in frame state or be derived from the tick, or rollback resimulation diverges. Full pattern, the measured tables, the quality trade the split makes, and the diagnostic counters that report each cap: [Navigation.md § Crowd Scaling](./Navigation.md#crowd-scaling).
+
 ### 3.5 Tactics / Strategy — Non-Real-Time
 
 Each turn is discrete; simulation advances after input arrives. **Slow tick + no rollback.**

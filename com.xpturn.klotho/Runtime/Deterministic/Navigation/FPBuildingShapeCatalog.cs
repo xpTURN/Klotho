@@ -666,18 +666,51 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         public readonly FP64 CentreZ;
         public readonly FP64 Y;
 
-        public FPBuildingPlacement(int shapeId, int orientation, FP64 centreX, FP64 centreZ, FP64 y)
+        /// <summary>
+        /// RETAIN mode: keep the footprint as triangulated ground instead of carving it out.
+        /// False (the default, and what every existing constructor produces) carves.
+        ///
+        /// <para>The rebaker still inserts the footprint as exact constraint edges, so no triangle
+        /// straddles its boundary — it simply inserts each edge TWICE, which leaves the ring a wall
+        /// to the triangulator and parity-neutral to the erase pass. The interior therefore
+        /// survives, and every query the engine ships reports it as WALKABLE. Nothing about a
+        /// retained placement makes a unit path around the building; it makes the triangles exist
+        /// so that something above can decide. See <c>Docs/Navigation.Rebake.md</c>.</para>
+        ///
+        /// <para><b>This flag is a determinism input, not a presentation choice.</b> It changes the
+        /// geometry the rebake produces, so it must be a pure function of frame state and agree on
+        /// every peer — exactly like the placement centre or <c>FPNavMeshTimedPlacement.Sequence</c>.
+        /// A mode read from local config, a UI toggle or wall-clock diverges the navmesh while the
+        /// state hash still matches, which is the shape of desync nothing else catches.</para>
+        /// </summary>
+        public readonly bool Retain;
+
+        public FPBuildingPlacement(
+            int shapeId, int orientation, FP64 centreX, FP64 centreZ, FP64 y, bool retain)
         {
             ShapeId = shapeId;
             Orientation = orientation;
             CentreX = centreX;
             CentreZ = centreZ;
             Y = y;
+            Retain = retain;
+        }
+
+        /// <summary>Carve mode (<see cref="Retain"/> false) — the behaviour before retain existed.</summary>
+        public FPBuildingPlacement(int shapeId, int orientation, FP64 centreX, FP64 centreZ, FP64 y)
+            : this(shapeId, orientation, centreX, centreZ, y, false)
+        {
         }
 
         /// <summary>A shape that does not turn.</summary>
         public FPBuildingPlacement(int shapeId, FP64 centreX, FP64 centreZ, FP64 y)
-            : this(shapeId, 0, centreX, centreZ, y)
+            : this(shapeId, 0, centreX, centreZ, y, false)
+        {
+        }
+
+        /// <summary>A shape that does not turn, with an explicit mode.</summary>
+        public FPBuildingPlacement(int shapeId, FP64 centreX, FP64 centreZ, FP64 y, bool retain)
+            : this(shapeId, 0, centreX, centreZ, y, retain)
         {
         }
     }

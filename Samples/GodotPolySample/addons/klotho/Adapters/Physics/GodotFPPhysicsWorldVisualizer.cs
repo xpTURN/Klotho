@@ -80,6 +80,15 @@ namespace xpTURN.Klotho.Godot
         public FPContact[] currentSContacts;
         public int currentSContactCount;
 
+        // copied-vs-total accounting for the three caches above (the debug panel draws copied/total
+        // from this).
+        public FPContactSnapshotStats currentStats;
+
+        // Truncation warning latch — compared against the previous counter values, not the
+        // copied/total pair: this runs once per frame while the snapshot is overwritten every tick.
+        bool _warnedSnapshotTruncated;
+        int _lastSeenContactTrunc, _lastSeenStaticTrunc, _lastSeenTriggerTrunc;
+
         // ---- Drawing nodes / drawers ----
 
         MeshInstance3D _staticMI;
@@ -180,6 +189,8 @@ namespace xpTURN.Klotho.Godot
             Provider.GetStaticColliders(out var statics, out int sc);
             Provider.GetContacts(out var contacts, out int cc, out var sContacts, out int scc);
             Provider.GetTriggerPairs(out var triggerPairs, out int tc);
+            currentStats = Provider.GetSnapshotStats();
+            WarnOnceIfSnapshotTruncated();
 
             // Cache snapshot for the debug panel.
             currentBodies = bodies; bodyCount = bc;
@@ -200,6 +211,31 @@ namespace xpTURN.Klotho.Godot
             // effect immediately (matching how dynamic toggles already work).
             RebuildStatic(statics, sc);
             RebuildDynamic(bodies, bc, statics, sc, contacts, cc, sContacts, scc);
+        }
+
+        void WarnOnceIfSnapshotTruncated()
+        {
+            bool grew = currentStats.ContactTruncatedCount       != _lastSeenContactTrunc
+                     || currentStats.StaticContactTruncatedCount != _lastSeenStaticTrunc
+                     || currentStats.TriggerTruncatedCount       != _lastSeenTriggerTrunc;
+
+            _lastSeenContactTrunc = currentStats.ContactTruncatedCount;
+            _lastSeenStaticTrunc  = currentStats.StaticContactTruncatedCount;
+            _lastSeenTriggerTrunc = currentStats.TriggerTruncatedCount;
+
+            if (!grew || _warnedSnapshotTruncated) return;
+            _warnedSnapshotTruncated = true;
+
+            // once per instance; the live numbers are the debug panel's job. "not copied", not
+            // "collisions" — the totals include speculative (CCD) contacts, never highlighted.
+            GD.PushWarning(
+                "[GodotFPPhysicsWorldVisualizer] contact/trigger snapshot truncated — the overlay and "
+                + "the debug panel's per-body list are showing less than the simulation holds. "
+                + $"Contacts {currentStats.ContactCopied}/{currentStats.ContactTotal}, "
+                + $"Static {currentStats.StaticContactCopied}/{currentStats.StaticContactTotal}, "
+                + $"Triggers {currentStats.TriggerCopied}/{currentStats.TriggerTotal}. "
+                + $"Truncating copies so far: {currentStats.ContactTruncatedCount}/"
+                + $"{currentStats.StaticContactTruncatedCount}/{currentStats.TriggerTruncatedCount}.");
         }
 
         void RebuildStatic(FPStaticCollider[] statics, int sc)

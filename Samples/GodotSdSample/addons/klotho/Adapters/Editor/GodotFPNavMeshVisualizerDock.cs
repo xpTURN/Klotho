@@ -7,6 +7,8 @@ using System.Globalization;
 
 using global::Godot;
 
+using xpTURN.Klotho.Deterministic.Navigation;
+
 namespace xpTURN.Klotho.Godot
 {
     [Tool]
@@ -25,6 +27,8 @@ namespace xpTURN.Klotho.Godot
         private Button _playBtn;
         private LineEdit _spawnStart;
         private LineEdit _spawnDest;
+        private Label _buildingList;
+        private Label _buildingStatus;
 
         public void Init(GodotFPNavMeshVisualizer ctrl)
         {
@@ -34,6 +38,7 @@ namespace xpTURN.Klotho.Godot
 
             BuildNavMeshSection();
             BuildLayersSection();
+            BuildBuildingsSection();
             BuildPathfindingSection();
             BuildAgentsSection();
             BuildGridSection();
@@ -48,6 +53,23 @@ namespace xpTURN.Klotho.Godot
             var sim = _ctrl.AgentSim;
             var ov = _ctrl.Overlay;
             var it = _ctrl.Interaction;
+
+            if (_buildingList != null)
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"Placed: {data.PlacementCount}");
+                for (int i = 0; i < data.PlacementCount; i++)
+                {
+                    FPBuildingPlacement p = data.PlacementAt(i);
+                    // Retain leaves no hole, so the text is the only place the two modes are
+                    // unambiguous without reading the overlay colour.
+                    sb.Append($"\n#{i}  {(p.Retain ? "retain" : "carve")}  "
+                        + $"({p.CentreX.ToFloat():F2}, {p.CentreZ.ToFloat():F2})");
+                }
+                _buildingList.Text = sb.ToString();
+            }
+            if (_buildingStatus != null)
+                _buildingStatus.Text = _ctrl.PlaceStatus ?? string.Empty;
 
             if (data.IsLoaded)
             {
@@ -81,7 +103,13 @@ namespace xpTURN.Klotho.Godot
                     string extra = !rd.hasDestination ? " [No Dest]"
                         : !rd.hasPath ? " [No Path]"
                         : rd.currentTriangleIndex < 0 ? " [Off Mesh]" : "";
-                    sb.Append($"#{i}: {rd.status}{extra} {Fmt(rd.position)}\n");
+                    // The masks are shown because a mixed scene is otherwise unreadable — two
+                    // agents at the same spot with the same status look identical, and which of
+                    // them may enter the building is the whole question.
+                    string masks = $" [{GodotFPNavMeshVisualizer.MaskLabel(rd.planAreaMask)}"
+                        + $"/{GodotFPNavMeshVisualizer.MaskLabel(rd.walkAreaMask)}]";
+                    string sel = _ctrl.Interaction?.SelectedAgentIndex == i ? "▸" : " ";
+                    sb.Append($"{sel}#{i}: {rd.status}{extra}{masks} {Fmt(rd.position)}\n");
                 }
                 _agentList.Text = sb.ToString();
             }
@@ -157,6 +185,81 @@ namespace xpTURN.Klotho.Godot
             AddChild(new HSeparator());
         }
 
+        /// <summary>
+        /// Place Carve/Retain buildings on the loaded mesh and rebake. Mirrors the Unity window's
+        /// section; the geometry work is the shared <c>FPNavMeshPlacementProbe</c>.
+        /// </summary>
+        private void BuildBuildingsSection()
+        {
+            AddChild(Header("Buildings"));
+            AddChild(Lbl("Shapes belong to the TOOL, not to any game: a 2x1 box and a hexagon."));
+
+            var row = new HBoxContainer();
+            row.AddChild(Btn("Place Building", () => ToggleMode(InteractionMode.PlaceBuilding)));
+            row.AddChild(Check("Retain (keep ground)", _ctrl.PlaceRetain, v => _ctrl.PlaceRetain = v));
+            AddChild(row);
+
+            // Flush packing needs the centre on the shape's tiling lattice, and those spacings are
+            // not round numbers (a 2x1 box at radius 0.5 meets its neighbour at 2.003906) — a
+            // free-hand click otherwise leaves millimetres of walkable ground between footprints.
+            AddChild(Check("Snap to tiling lattice (flush)", _ctrl.Data.SnapPlacementToLattice,
+                v => _ctrl.Data.SnapPlacementToLattice = v));
+
+            var shapeRow = new HBoxContainer();
+            shapeRow.AddChild(new Label { Text = "Shape", CustomMinimumSize = new Vector2(70, 0) });
+            var shape = new OptionButton();
+            shape.AddItem("Box");
+            shape.AddItem("Hexagon");
+            shape.Selected = _ctrl.PlaceShapeIndex;
+            shape.ItemSelected += i => { _ctrl.PlaceShapeIndex = (int)i; Refresh(); };
+            shapeRow.AddChild(shape);
+            AddChild(shapeRow);
+
+            // A hexagon has no orientation in the catalog: no integer hexagon is symmetric under
+            // 60 degrees, so the turns a slider would offer do not exist.
+            if (_ctrl.PlaceShapeIndex == 0)
+            {
+                AddChild(SliderRow("Turn", 0, FPNavMeshPlacementProbe.ToolBoxDirections - 1,
+                    _ctrl.PlaceOrientation, v => _ctrl.PlaceOrientation = (int)v));
+            }
+
+            // Touch is the default rather than a game's ClipOverlap: under ClipOverlap a RETAINED
+            // footprint that crosses the walkable boundary is refused (a carve is clipped instead),
+            // which is worth seeing on purpose and not by default.
+            var ruleRow = new HBoxContainer();
+            ruleRow.AddChild(new Label { Text = "Boundary", CustomMinimumSize = new Vector2(70, 0) });
+            var policy = new OptionButton();
+            policy.AddItem("Reject");
+            policy.AddItem("Touch");
+            policy.AddItem("ClipOverlap");
+            policy.Selected = (int)_ctrl.PlacePolicy;
+            policy.ItemSelected += i =>
+            {
+                _ctrl.PlacePolicy = (FPBoundaryPlacementPolicy)(int)i;
+                _ctrl.ApplyPlacementRules();
+            };
+            ruleRow.AddChild(policy);
+            ruleRow.AddChild(Check("Allow contact", _ctrl.PlaceAllowTouch,
+                v => { _ctrl.PlaceAllowTouch = v; _ctrl.ApplyPlacementRules(); }));
+            AddChild(ruleRow);
+
+            _buildingList = Lbl();
+            AddChild(_buildingList);
+
+            var acts = new HBoxContainer();
+            acts.AddChild(Btn("Remove last", () =>
+            {
+                if (_ctrl.Data.PlacementCount > 0)
+                    _ctrl.RemoveBuilding(_ctrl.Data.PlacementCount - 1);
+            }));
+            acts.AddChild(Btn("Revert to loaded mesh", () => _ctrl.RevertBuildings()));
+            AddChild(acts);
+
+            _buildingStatus = Lbl();
+            AddChild(_buildingStatus);
+            AddChild(new HSeparator());
+        }
+
         private void BuildPathfindingSection()
         {
             AddChild(Header("Pathfinding"));
@@ -167,6 +270,11 @@ namespace xpTURN.Klotho.Godot
             AddChild(modes);
 
             AddChild(Lbl("Shift + Click in the 3D viewport to set."));
+
+            // Agent default excludes the building area, so a retained footprint is a wall to it;
+            // All areas plans straight through one. Same mesh, opposite answers.
+            AddChild(Check("Area mask: all areas (through buildings)", _ctrl.PathMaskAllAreas,
+                v => { _ctrl.PathMaskAllAreas = v; _ctrl.FindPath(); }));
 
             var actions = new HBoxContainer();
             actions.AddChild(Btn("Find Path", () => _ctrl.FindPath()));
@@ -219,6 +327,18 @@ namespace xpTURN.Klotho.Godot
             modes.AddChild(Btn("Place Agent", () => ToggleMode(InteractionMode.PlaceAgent)));
             modes.AddChild(Btn("Set Dest", () => ToggleMode(InteractionMode.SetAgentDest)));
             AddChild(modes);
+
+            // Area masks for the SELECTED agent (click one in the viewport). Two, because an agent
+            // carries two and the pair worth setting is the one where they disagree: plan through
+            // buildings + walk excluded means the path is drawn straight through a retained
+            // footprint and the agent walks into it and stops, showing Blocked in the list below.
+            AddChild(Lbl("Selected agent's area masks — apply after picking one in the viewport"));
+            AddChild(Check("  plan: all areas (routes through buildings)",
+                _ctrl.AgentPlanMaskAllAreas, v => _ctrl.AgentPlanMaskAllAreas = v));
+            AddChild(Check("  walk: all areas (may enter buildings)",
+                _ctrl.AgentWalkMaskAllAreas, v => _ctrl.AgentWalkMaskAllAreas = v));
+            AddChild(Btn("Apply masks to selected agent",
+                () => { _ctrl.ApplyAgentAreaMask(); Refresh(); }));
 
             AddChild(Lbl("Spawn agent by position (x, y, z)"));
             _spawnStart = new LineEdit { Text = "0, 0, 0" };

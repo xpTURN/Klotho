@@ -1422,7 +1422,97 @@ namespace xpTURN.Klotho.Deterministic.Physics.Tests
             int count = -1;
             Assert.DoesNotThrow(() => world.CopyContactsTo(buffer, out count));
             Assert.AreEqual(2, count);
+
+            // the copied count alone cannot say the tail was dropped — the total can.
+            Assert.AreEqual(3, world.DebugContactCount);
         }
+
+        [Test]
+        public void DebugCounts_ReportTotalsForAllThreeKinds()
+        {
+            // _staticContacts is the dynamic-vs-STATIC-COLLIDER list; a static *body* still goes
+            // through the ordinary broadphase and lands in _contacts. Load a collider to reach it.
+            var bodies = new FPPhysicsBody[1];
+            bodies[0] = MakeDynamicSphere(1, FPVector3.Zero, FP64.One, FP64.One);
+
+            var world = new FPPhysicsWorld(FP64.FromInt(4));
+            world.LoadStaticColliders(new[] { MakeStaticCollider(90, new FPVector3(FP64.Half, FP64.Zero, FP64.Zero), FP64.One) }, 1);
+            world.RebuildStaticBVH(bodies, 1);
+            world.Step(bodies, 1, FP64.FromFloat(0.02f), FPVector3.Zero, null, null, null);
+
+            Assert.AreEqual(0, world.DebugContactCount, "only one body — no dynamic pair");
+            Assert.AreEqual(1, world.DebugStaticContactCount);
+            Assert.AreEqual(0, world.DebugTriggerPairCount);
+
+            // the same overlap against a TRIGGER collider is a trigger pair, not a contact
+            var triggerWorld = new FPPhysicsWorld(FP64.FromInt(4));
+            triggerWorld.LoadStaticColliders(new[] { MakeStaticCollider(91, new FPVector3(FP64.Half, FP64.Zero, FP64.Zero), FP64.One, isTrigger: true) }, 1);
+            bodies[0] = MakeDynamicSphere(1, FPVector3.Zero, FP64.One, FP64.One);
+            triggerWorld.RebuildStaticBVH(bodies, 1);
+            triggerWorld.Step(bodies, 1, FP64.FromFloat(0.02f), FPVector3.Zero, null, null, null);
+
+            Assert.AreEqual(1, triggerWorld.DebugTriggerPairCount);
+            Assert.AreEqual(0, triggerWorld.DebugStaticContactCount, "a trigger overlap is not a contact");
+        }
+
+        [Test]
+        public void SnapshotStats_TruncationPredicate_DistinguishesFullFromDropped()
+        {
+            // copied == buffer.Length is NOT truncation: three contacts into a length-3 buffer is
+            // exactly full. Only copied < total is.
+            Assert.IsTrue(MakeStats(contactCopied: 2, contactTotal: 3).ContactsTruncated);
+            Assert.IsFalse(MakeStats(contactCopied: 3, contactTotal: 3).ContactsTruncated);
+            Assert.IsFalse(MakeStats(contactCopied: 0, contactTotal: 0).ContactsTruncated);
+
+            Assert.IsTrue(MakeStats(contactCopied: 2, contactTotal: 3).AnyTruncated);
+            Assert.IsTrue(MakeStats(triggerCopied: 1, triggerTotal: 9).AnyTruncated);
+            Assert.IsFalse(MakeStats(contactCopied: 3, contactTotal: 3).AnyTruncated);
+        }
+
+        [Test]
+        public void SnapshotStats_DrawsContactList_WhenTheBodysContactsWereAllTruncatedAway()
+        {
+            // the body a person came to inspect has zero contacts in the COPIED arrays precisely
+            // because they were dropped. Bailing out on zero would hide the warning from them.
+            var truncated = MakeStats(contactCopied: 2, contactTotal: 3);
+            Assert.IsTrue(truncated.ShouldDrawContactList(0, 0));
+            Assert.IsTrue(truncated.ContactListMayBeIncomplete);
+
+            var intact = MakeStats(contactCopied: 3, contactTotal: 3);
+            Assert.IsFalse(intact.ShouldDrawContactList(0, 0), "no contacts and nothing dropped -> nothing to say");
+            Assert.IsTrue(intact.ShouldDrawContactList(1, 0));
+            Assert.IsFalse(intact.ContactListMayBeIncomplete);
+        }
+
+        [Test]
+        public void CopyTruncatedCounters_CountPerCopyCall_AndPerKind()
+        {
+            var world = WorldWithThreeOverlappingSpheres(out _);
+            var small = new FPContact[2];
+
+            world.CopyContactsTo(small, out _);
+            world.CopyContactsTo(small, out _);
+
+            // the unit is the copy call, not the tick: two truncating calls, two increments.
+            Assert.AreEqual(2, world.DebugContactCopyTruncatedCount);
+            // and each kind is counted on its own — these two did not truncate.
+            Assert.AreEqual(0, world.DebugStaticContactCopyTruncatedCount);
+            Assert.AreEqual(0, world.DebugTriggerCopyTruncatedCount);
+
+            // a buffer that fits leaves the counter alone
+            world.CopyContactsTo(new FPContact[8], out _);
+            Assert.AreEqual(2, world.DebugContactCopyTruncatedCount);
+        }
+
+        static FPContactSnapshotStats MakeStats(
+            int contactCopied = 0, int contactTotal = 0,
+            int staticCopied = 0, int staticTotal = 0,
+            int triggerCopied = 0, int triggerTotal = 0)
+            => new FPContactSnapshotStats(
+                contactCopied, contactTotal,
+                staticCopied, staticTotal,
+                triggerCopied, triggerTotal,
+                0, 0, 0);
 
         [Test]
         public void CopySnapshots_NullBuffer_ReturnsZero()

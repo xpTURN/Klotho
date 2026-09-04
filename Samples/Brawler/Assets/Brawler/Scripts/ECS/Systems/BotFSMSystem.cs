@@ -191,16 +191,30 @@ namespace Brawler
             {
                 _placeCmd.ShapeId = BrawlerBuildingShapes.BoxShape;
                 _placeCmd.Orientation = rng.NextInt(0, BrawlerBuildingShapes.Directions);
-                _placeCmd.Centre = new FPVector3(
-                    FPGeoPredicates.Quantize(wx), y, FPGeoPredicates.Quantize(wz));
+                // Snapped to the box's tiling lattice like the hexagon branch below, so the demo
+                // packs flush instead of leaving a few millimetres of walkable ground between
+                // footprints. Integer arithmetic, so it stays identical on every peer.
+                BrawlerBuildingShapes.SnapPlacement(
+                    _rebakeExpansion, BrawlerBuildingShapes.BoxShape, _placeCmd.Orientation,
+                    wx, wz, out FP64 bx, out FP64 bz);
+                _placeCmd.Centre = new FPVector3(bx, y, bz);
+                // Every other box RETAINS its footprint instead of carving it, so the headless demo
+                // exercises both modes. A function of the beat — frame-derived, like everything
+                // else here — and assigned on every beat, because the reused instance would
+                // otherwise carry the previous box's mode.
+                _placeCmd.Retain = ((beat / 3) & 1) == 1;
                 _placeCmd.SequenceNumber = 0;
                 place = _placeCmd;
             }
             else
             {
-                BrawlerBuildingShapes.SnapHexPlacement(
-                    _rebakeExpansion, wx, wz, out FP64 hx, out FP64 hz);
+                BrawlerBuildingShapes.SnapPlacement(
+                    _rebakeExpansion, BrawlerBuildingShapes.HexShape, 0,
+                    wx, wz, out FP64 hx, out FP64 hz);
                 _placeHexCmd.Centre = new FPVector3(hx, y, hz);
+                // Alternates like the box above, for the same two reasons (frame-derived, reused
+                // instance) — so the demo builds retained hexagons too.
+                _placeHexCmd.Retain = ((beat / 3) & 1) == 1;
                 _placeHexCmd.SequenceNumber = 0;
                 place = _placeHexCmd;
             }
@@ -496,17 +510,49 @@ namespace Brawler
                     desiredVelocity = nav.Velocity;
                 }
 
-                // PathFailed fallback
-                if (desiredVelocity.x == FP64.Zero && desiredVelocity.y == FP64.Zero && bot.HasDestination)
+                // PathFailed fallback, narrowed to a bot standing INSIDE a retained building.
+                //
+                // It used to steer straight at the destination whenever the velocity was zero, which
+                // made it the one thing a retained footprint could not stop: FindPath refuses a
+                // destination inside one (the agents' mask excludes FPNavMeshAreas.BUILDING_AREA),
+                // the velocity comes back zero, and the straight steer walked the bot through the
+                // building the mask had just forbidden — there is no collider to say otherwise.
+                // Now a bot on ordinary ground whose path FAILED drops the destination so the FSM
+                // picks another, instead of holding still forever or walking into a wall; a bot the
+                // building landed ON keeps the steer so it can walk out. PathPending is neither: the
+                // request is simply not answered yet.
+                //
+                // What reaches this branch has narrowed since. FindPath now exempts a masked-out
+                // START, so a bot a building lands on is given an ordinary route out and never sees
+                // PathFailed at all — under the DEFAULT masks this fallback no longer fires for that
+                // case, which was the case it was written for. It is kept because per-agent masks
+                // reopened it from the other side: a bot whose PLAN mask a game narrowed still gets
+                // PathFailed inside a footprint, and the straight steer is still the only thing that
+                // gets it out. So the reachable condition moved from "the default setup" to "a
+                // narrowed plan mask", and StandsInsideBuilding is still what keeps the steer away
+                // from ordinary ground.
+                if (desiredVelocity.x == FP64.Zero && desiredVelocity.y == FP64.Zero && bot.HasDestination
+                    && frame.Has<NavAgentComponent>(entity))
                 {
-                    ref readonly var t = ref frame.GetReadOnly<TransformComponent>(entity);
-                    FPVector2 dir = new FPVector2(bot.Destination.x - t.Position.x,
-                                                  bot.Destination.z - t.Position.z);
-                    FP64 dirSqr = dir.x * dir.x + dir.y * dir.y;
-                    if (dirSqr > FP64.Zero)
+                    ref readonly var nav = ref frame.GetReadOnly<NavAgentComponent>(entity);
+                    if (nav.Status == (byte)FPNavAgentStatus.PathFailed)
                     {
-                        FP64 mag = FP64.Sqrt(dirSqr);
-                        desiredVelocity = new FPVector2(dir.x / mag, dir.y / mag);
+                        if (StandsInsideBuilding(nav.CurrentTriangleIndex))
+                        {
+                            ref readonly var t = ref frame.GetReadOnly<TransformComponent>(entity);
+                            FPVector2 dir = new FPVector2(bot.Destination.x - t.Position.x,
+                                                          bot.Destination.z - t.Position.z);
+                            FP64 dirSqr = dir.x * dir.x + dir.y * dir.y;
+                            if (dirSqr > FP64.Zero)
+                            {
+                                FP64 mag = FP64.Sqrt(dirSqr);
+                                desiredVelocity = new FPVector2(dir.x / mag, dir.y / mag);
+                            }
+                        }
+                        else
+                        {
+                            bot.HasDestination = false;
+                        }
                     }
                 }
 
@@ -515,6 +561,15 @@ namespace Brawler
             }
 
             _lastFrame = frame;
+        }
+
+        /// <summary>Is the agent's current triangle a retained building footprint? Frame-derived:
+        /// the index is agent state and the mask is part of the installed mesh.</summary>
+        bool StandsInsideBuilding(int triangleIndex)
+        {
+            FPNavMesh mesh = _navSystem.CurrentMesh;
+            return mesh != null && triangleIndex >= 0 && triangleIndex < mesh.Triangles.Length
+                && mesh.Triangles[triangleIndex].areaMask == FPNavMeshAreas.BUILDING_MASK;
         }
 
         void EmitCommands(ref Frame frame, EntityRef entity, ref BotComponent bot,

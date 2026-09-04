@@ -241,7 +241,7 @@ namespace xpTURN.Klotho.Tests.ECS.Systems
             return entity;
         }
 
-        private static PlaceBuildingCommand Place(int playerId, double x, double z)
+        private static PlaceBuildingCommand Place(int playerId, double x, double z, bool retain = false)
         {
             return new PlaceBuildingCommand
             {
@@ -249,6 +249,17 @@ namespace xpTURN.Klotho.Tests.ECS.Systems
                 ShapeId = BrawlerBuildingShapes.BoxShape,
                 Orientation = 0,
                 Centre = new FPVector3(FP64.FromDouble(x), FP64.Zero, FP64.FromDouble(z)),
+                Retain = retain,
+            };
+        }
+
+        private static PlaceHexBuildingCommand PlaceHex(int playerId, double x, double z, bool retain = false)
+        {
+            return new PlaceHexBuildingCommand
+            {
+                PlayerId = playerId,
+                Centre = new FPVector3(FP64.FromDouble(x), FP64.Zero, FP64.FromDouble(z)),
+                Retain = retain,
             };
         }
 
@@ -481,6 +492,113 @@ namespace xpTURN.Klotho.Tests.ECS.Systems
             Assert.AreEqual(empty, sim.InstalledFingerprint,
                 "the navmesh still carries a building the frame no longer describes — derived state "
                 + "does not roll back, so it has to be re-derived");
+        }
+
+        // ---------------------------------------------------------------- retain 모드
+
+        [Test]
+        public void Retain_LandsAsStampedGround_WhereACarveLandsAsAHole()
+        {
+            // The whole wiring, end to end through the real command path: the payload's mode reaches
+            // the component, the component reaches the rebaker, and the installed mesh shows it.
+            Sim sim = CreateSim();
+            sim.StepTo(5);
+            sim.Step(Place(0, -4, 0, retain: true));
+            sim.Step(Place(0, 4, 0));
+            sim.Step(PlaceHex(0, 0, 6, retain: true));   // the hexagon command carries the mode too
+            sim.StepTo(sim.Tick + PlatformerCommandSystem.BuildDelayTicks + 2);
+            Assert.AreEqual(3, LiveCount(sim.Simulation.Frame), "a placement was refused");
+
+            FPNavMesh mesh = sim.Agents.CurrentMesh;
+            var query = new FPNavMeshQuery(mesh, null);
+
+            int retained = query.FindTriangle(new FPVector2(FP64.FromInt(-4), FP64.Zero));
+            Assert.GreaterOrEqual(retained, 0, "retain: the footprint must stay ground");
+            Assert.AreEqual(FPNavMeshAreas.BUILDING_MASK, mesh.Triangles[retained].areaMask,
+                "retain: the footprint must be stamped as the building area — without the stamp the "
+                + "bots' default mask would walk straight through it");
+            Assert.Less(query.FindTriangle(new FPVector2(FP64.FromInt(4), FP64.Zero)), 0,
+                "carve: the footprint must be a hole, exactly as before");
+            int retainedHex = query.FindTriangle(new FPVector2(FP64.Zero, FP64.FromInt(6)));
+            Assert.GreaterOrEqual(retainedHex, 0, "retained hexagon: the footprint must stay ground");
+            Assert.AreEqual(FPNavMeshAreas.BUILDING_MASK, mesh.Triangles[retainedHex].areaMask,
+                "retained hexagon: the footprint must be stamped — the hexagon command's mode did not reach the rebaker");
+
+            // And the component says what the mesh shows: only the box at +4 carves.
+            var filter = sim.Simulation.Frame.Filter<BuildingComponent>();
+            while (filter.Next(out var entity))
+            {
+                ref readonly var b = ref sim.Simulation.Frame.GetReadOnly<BuildingComponent>(entity);
+                bool carvedBox = b.ShapeId == BrawlerBuildingShapes.BoxShape && b.Centre.x > FP64.Zero;
+                Assert.AreEqual(!carvedBox, b.Retain, "the component's mode does not match its command");
+            }
+        }
+
+        [Test]
+        public void Tick10_RollbackAcrossTheBoundary_ReplaysARetainedPlacementToTheSameHashes()
+        {
+            // Tick10_RollbackAcrossTheBoundaryReplaysToTheSameHashes, for a RETAINED placement. The
+            // mode is a determinism input — it changes the geometry — so it has to come back
+            // identically from a re-executed tick, and the installed fingerprint (which mixes the
+            // stamp) has to land where the forward run left it.
+            Sim sim = CreateSim();
+            sim.StepTo(5);
+            int placedAt = sim.Tick;
+            sim.Step(Place(0, 0, 0, retain: true));
+            int boundary = placedAt + PlatformerCommandSystem.BuildDelayTicks;
+
+            int before = boundary - 5;
+            sim.StepTo(before);
+
+            var forward = new List<long>();
+            while (sim.Tick < boundary + 5) { sim.Step(); forward.Add(sim.Simulation.GetStateHash()); }
+            int head = sim.Tick;
+            ulong forwardMesh = sim.InstalledFingerprint;
+            int centre = new FPNavMeshQuery(sim.Agents.CurrentMesh, null).FindTriangle(FPVector2.Zero);
+            Assert.GreaterOrEqual(centre, 0, "fixture: the retained footprint is not ground");
+            Assert.AreEqual(FPNavMeshAreas.BUILDING_MASK, sim.Agents.CurrentMesh.Triangles[centre].areaMask,
+                "fixture: the footprint is not stamped, so this would be testing a carve");
+
+            sim.Simulation.Rollback(before);
+            for (int i = 0; sim.Tick < head; i++)
+            {
+                sim.Step();
+                Assert.AreEqual(forward[i], sim.Simulation.GetStateHash(),
+                    $"replayed tick {sim.Tick} differs from its first execution");
+            }
+            Assert.AreEqual(forwardMesh, sim.InstalledFingerprint,
+                "the replay installed a different mesh — the mode did not survive the re-execution");
+        }
+
+        [Test]
+        public void BuildingDemo_IsDeterministic_AndPlacesBothModes()
+        {
+            // The headless demo alternates the box's mode by beat. Two simulations running it must
+            // agree tick for tick (the mode is a function of the frame, assigned on every issue of
+            // the pooled command), and by the end both modes must actually have been built — the
+            // alternation is real, not a flag nobody flips.
+            Sim a = CreateSim(), b = CreateSim();
+            a.Bots.SetBuildingDemo(5);
+            b.Bots.SetBuildingDemo(5);
+
+            bool sawRetain = false, sawCarve = false;
+            for (int i = 0; i < 100; i++)
+            {
+                a.Step();
+                b.Step();
+                Assert.AreEqual(a.Simulation.GetStateHash(), b.Simulation.GetStateHash(),
+                    $"tick {a.LastExecutedTick}: the two demos diverged");
+
+                var filter = a.Simulation.Frame.Filter<BuildingComponent>();
+                while (filter.Next(out var entity))
+                {
+                    if (a.Simulation.Frame.GetReadOnly<BuildingComponent>(entity).Retain) sawRetain = true;
+                    else sawCarve = true;
+                }
+            }
+            Assert.AreEqual(a.InstalledFingerprint, b.InstalledFingerprint, "the installed meshes differ");
+            Assert.IsTrue(sawCarve, "the demo never built a carved building");
+            Assert.IsTrue(sawRetain, "the demo never built a retained building — the alternation is not happening");
         }
 
         // ---------------------------------------------------------------- 슬라이싱

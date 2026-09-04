@@ -66,7 +66,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             // filled with in-domain coordinates on purpose: zeros would trip the duplicate-hole
             // guard and mask the real failure with an exception that looks like a caught bug.
             var (xs, zs, cons) = SquareRing();
-            var snap = FPConstrainedDelaunay.BuildSnapshot(xs, zs, cons);
+            var snap = FPConstrainedDelaunay.BuildSnapshotCore(xs, zs, cons);
 
             var holeXs = new long[] { 512, -512 };
             var holeZs = new long[] { 512, -512 };
@@ -100,7 +100,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             // Same failure mode one argument over: InsertConstraints derived its loop bound from
             // constraintPairs.Length, so a pooled buffer's tail would be inserted as real edges.
             var (xs, zs, cons) = SquareRing();
-            var snap = FPConstrainedDelaunay.BuildSnapshot(xs, zs, cons);
+            var snap = FPConstrainedDelaunay.BuildSnapshotCore(xs, zs, cons);
 
             var holeXs = new long[] { 512, -512, 512, -512 };
             var holeZs = new long[] { 512, -512, -512, 512 };
@@ -128,7 +128,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         public void HoleCount_OutsideArray_Throws()
         {
             var (xs, zs, cons) = SquareRing();
-            var snap = FPConstrainedDelaunay.BuildSnapshot(xs, zs, cons);
+            var snap = FPConstrainedDelaunay.BuildSnapshotCore(xs, zs, cons);
             var holeXs = new long[] { 512 };
             var holeZs = new long[] { 512 };
 

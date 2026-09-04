@@ -1,5 +1,215 @@
 # Changelog
 
+## [0.12.0] - 2026-09-04
+
+### Navigation — a building can keep its ground, and each agent decides what that means
+
+Placing a building at runtime used to mean one thing: punch a hole in the navmesh, and every unit
+routes around it. A building can now **keep its ground** and be *marked* as a building instead, and
+each agent carries **two** area masks — one for planning a route, one for walking it. Set them to
+disagree and a unit plans straight through a building it is not allowed to enter, then discovers the
+wall by walking into it. That is the shape a game needs for fog of war, stale intel or "attack what
+is in the way", and a hole cannot express it at all.
+
+- **`FPBuildingPlacement.Retain` keeps the footprint as triangulated ground.** The footprint still
+  goes in as exact constraint edges — its corners are mesh vertices, its sides are triangle edges,
+  no triangle straddles the boundary — but the interior is not erased. It is **per placement**, so
+  terrain and authored obstacles keep carving. Existing constructors are unchanged and carve, so a
+  game that does not ask for retain sees byte-identical meshes.
+
+  `Retain` is a **determinism input, not a presentation choice**: it changes the geometry, so it must
+  be a pure function of frame state and agree on every peer, exactly like the placement centre. A
+  mode read from local config or a UI toggle diverges the navmesh while the state hash still matches.
+
+- **A retained footprint comes out marked.** Every triangle inside it is stamped
+  `FPNavMeshAreas.BUILDING_MASK`, exclusively. `FPNavAgentSystem.DEFAULT_AREA_MASK` is now
+  `FPNavMeshAreas.DEFAULT_AGENT_MASK` — every area except the building's — so by default an agent
+  neither plans through a retained footprint nor walks into it, while a query that passes
+  `FPNavMeshAreas.ALL_AREAS` routes straight through. Area index 1 is reserved for the stamp, and
+  `FPNavMeshBuildPipeline.Build` now refuses a bake that carries it, naming the triangle. Both
+  editors' NavMesh visualizers shade a retained footprint distinctly, read off the mesh.
+
+  **One limit.** Under `FPBoundaryPlacementPolicy.ClipOverlap` a footprint that crosses the walkable
+  boundary is *clipped* when it carves but **refused** when it retains —
+  `FPBuildingRejection.TouchesWalkableBoundary`, a value your placement UI can show the player.
+  Under `Reject` and `Touch` retain and carve behave identically.
+
+- **`NavAgentComponent` carries its own masks: `PlanAreaMaskOverride` and `WalkAreaMaskOverride`.**
+  Plan decides what the agent may ROUTE through, walk what it may ENTER. **Zero means "no
+  override"** — that half falls back to `DEFAULT_AREA_MASK`, so an agent that names nothing behaves
+  exactly as before these fields existed. The masks are ordinary hashed frame state, so peers that
+  disagree desync loudly instead of quietly walking different routes.
+
+  Assign them through **`NavAgentComponent.SetAreaMask`**, which also drops what the old masks
+  planned — a mask change moves no geometry, so nothing else invalidates the corridor. It clears the
+  corridor, the path flags and the repath cooldown, and it releases a blocked agent. An agent that
+  does not have a destination yet stays `Idle`.
+
+- **`FPNavAgentStatus.Blocked` names the stop.** When an agent's corridor leads into ground its own
+  walk mask refuses and it has run into it, the agent stops there and says so. It is deliberately
+  distinct from `PathFailed`: that one means "no route exists", this one means "a route exists and
+  you are not allowed through it", and the two call for opposite responses. It arrives on the tick
+  the agent pushes against the edge, not when its velocity happens to reach zero. Without the status
+  such a stall is invisible — the unit keeps `Moving` with a valid path.
+
+  **Clearing it is mostly the game's call** — widen the mask, retarget, or destroy what is in the
+  way. The one engine-side exception is the event that can make the block untrue on its own: after a
+  **navmesh swap**, `ReseedAgents` hands a blocked agent that still has a destination back to the
+  planner, so demolishing the building that stopped a unit starts it moving again.
+
+- **The mask blocks going IN, not coming OUT.** A unit that finds itself standing on ground its mask
+  forbids — a building dropped on top of it, or a mask narrowed under its feet — can walk out. The
+  start triangle is exempt in `FindPath`, and a neighbour the mask refuses is expandable while the
+  triangle being expanded *from* is refused too, in the surface walk and the A\* alike. Entry from
+  accepted ground is unchanged, the destination is still gated, and the rule cannot ferry an agent
+  between two *separate* forbidden regions: the reachable set is exactly the forbidden region you
+  stand in plus the accepted ground it touches. `FPNavMeshPathfinder.DebugMaskedStartCount` reports
+  a search that began on forbidden ground, so a game can notice the unit a building landed on.
+
+  The same rule holds under crowd pressure: the position-correction pass carries each agent's own
+  walk mask, so neighbours can press a unit against a footprint but never into it, while a unit
+  already inside one can be pushed out.
+
+- **`areaMask` now gates the surface walk, not just the A\*.** It previously reached `FindPath` and
+  stopped there, so following a corridor could slide a unit across ground its own path had refused.
+  A refused neighbour is now a wall of the same class as `isBlocked`: the agent slides along its
+  edge. On every mesh the bake produces the filter is an identity, so nothing moves for a game that
+  does not use masks.
+
+- **Brawler shows the whole path.** `PlaceBuildingCommand.Retain` (and the hex command) travels on
+  the wire → `BuildingComponent.Retain` in frame state → the rebaker, so the mode survives rollback
+  and join exactly as the placement centre does. `BrawlerGameController.OnBtnPlaceRetainBuilding` /
+  `OnBtnPlaceRetainHexBuilding` are ready to wire to buttons, and an editor gizmo outlines every
+  building's footprint — red carved, cyan retained — because a retained building otherwise leaves no
+  visual trace.
+
+- **The NavMesh visualizer can place buildings and then test movement on the result**, on both
+  editors: pick a shape, place it carved or retained, undo, rebake, then run the agent simulator over
+  the new mesh — including per-agent masks, so you can watch two agents that differ only in their
+  walk mask split at a footprint edge. The data layer behind the tool ships as the public
+  `FPNavMeshPlacementProbe` in the runtime rather than in editor code, so it is covered by tests and
+  both editors drive one code path.
+
+- **Still not survivable: non-uniform areas across a runtime rebake.** The rebake copies the base
+  mesh's uniform `areaMask` over every triangle, so areas stamped at runtime through
+  `FPNavMesh.TrianglesMutable` are lost when a building is placed. The rebaker's own building stamp
+  is the one exception. Preserving authored area regions needs them kept as assets — a follow-up.
+
+### Navigation — failures that used to be silent now report
+
+`FindPath` could refuse a request without saying why, and three internal caps could bite with no
+log line at all. All of them are now counted. Every counter here is diagnostic only — outside the
+state hash, the wire and replay — and accumulates over the owning instance's lifetime.
+
+- **Caps:** `FPNavAgentSystem.DebugCollisionResolveTruncatedCount` (past `MAX_AGENTS` = 64 the
+  position-correction pass drops the tail of your array), `FPNavMeshPathfinder.DebugCorridorTruncatedCount`
+  (past `MAX_CORRIDOR` = 128 a path comes back clamped) and `DebugIterationExhaustedCount` (past
+  `MAX_ITERATIONS` = 4096 a search returns `false`). The last one keys off the open set rather than
+  the iteration number, so it separates "ask for a shorter path" from "there is genuinely no route".
+- **Refusals before the search:** `DebugBlockedEndpointCount` (an endpoint you closed yourself
+  through `TrianglesMutable` — a gate, a door), `DebugAreaMaskRejectedCount` (a destination on ground
+  the mask forbids; end-point only) and `DebugMaskedStartCount` (the start was on forbidden ground).
+  None cost anything on the hot path.
+- **`FPNavAgentSystem.Update`'s contract is written down**, including the part that surprises: the
+  correction pass writes `Position` only, so a velocity-authoritative integration never observes it
+  and can read a non-zero truncation count with no behavioural change at all.
+
+### Navigation — run the constrained triangulation on your own constraint set
+
+- **`FPConstrainedDelaunay.BuildSnapshot` and `TriangulateFromSnapshot` are public**, with
+  `CdtSnapshot` as an opaque handle. Build a base snapshot from your own vertices and constraint
+  edges once, then resume it per set of holes — the expensive half is the build, and it is shared
+  across resumes. The triangle indices feed the already-public
+  `FPNavMeshBuildPipeline.BuildFromConformingTriangulation`, which takes a `previous` mesh, so a
+  caller-authored pipeline keeps the incremental patch path. What it does not get is time-slicing:
+  this entry point runs to completion.
+
+  A resume does **not** weld duplicate coordinates (your constraint indices are positional, so
+  welding would renumber your pairs). That requirement is now enforced in release builds too: a hole
+  duplicating a base vertex or an earlier hole throws `InvalidOperationException` naming the
+  coordinate. The check is O(holes) on the public path and costs the engine's own rebake nothing.
+
+- **Inserting the same constraint segment twice is now a documented contract**, on both entry
+  points. Marking a constraint ORs the wall bit and *toggles* the parity bit, so an even count keeps
+  the wall and contributes nothing to the erase pass — that is what lets a seam block movement
+  without carving the region beside it, and it is how retain mode works. Behaviour is unchanged;
+  what changed is that it is stated and pinned by tests. Two limits come with it: an
+  odd-multiplicity **open** chain is undefined, and a constraint pair whose endpoints weld to the
+  same vertex is dropped entirely rather than becoming a parity-neutral wall.
+
+### Navigation — what a move order actually costs (measured)
+
+- **[`Navigation.md` § Crowd Scaling](Docs/Navigation.md#crowd-scaling)** now carries measurements
+  instead of estimates. The headline: the built-in ceiling binds at the **order tick**, not at ORCA.
+  At 800 agents on a 192×192-unit field, the tick where everyone receives the order costs ~970 ms
+  against ~16 ms of steady-state following — and ~42% of those searches return no path at all,
+  silently, after burning the full A\* budget.
+
+  `Update` is caller-driven, so `MAX_AGENTS` is a **per-call** cap: 50 calls of 16 agents measured
+  6.3 ms against 16.3 ms for one call of 800, and corrected all 800 agents instead of 64. The
+  section documents that call pattern, the avoidance quality it trades at cluster boundaries, a
+  worked partitioner you can copy (sort by cell, break at each cell change and again at the cap),
+  and the rule that makes it safe: the partition is simulation input, so it must be a function of
+  positions and entity ids — index chunking diverges. `MAX_AGENTS` and `BFS_FRONTIER_CAP` were
+  missing from the constants table and are now listed.
+
+### Physics — the contact snapshot says when it is showing you less than it has
+
+- **`FPPhysicsWorld` exposes the snapshot totals and per-kind truncation counters**, and
+  `IFPPhysicsWorldProvider` hands them to the debug views as one `FPContactSnapshotStats` value.
+
+  The contact and trigger copies that feed the Unity and Godot visualizers are capped at the
+  caller's buffer (256 / 256 / 64). The cap is correct — the simulation consumes its own lists, so a
+  dropped tail changes nothing but the picture — but it was **silent**: the overlay left visibly
+  overlapping bodies uncoloured, and the per-body list showed *no contacts* for exactly the body
+  someone had come to inspect. A caller could not even detect it, because `copied == buffer.Length`
+  cannot tell a full buffer from a dropped tail.
+
+  So the totals are exposed (`DebugContactCount`, `DebugStaticContactCount`, `DebugTriggerPairCount`
+  — last-`Step` values, not accumulators), the views render *copied/total* with a warning when they
+  differ, and `DebugContactCopyTruncatedCount` and its two siblings count truncations for the ticks
+  a once-per-frame view never samples. Truncation itself is not reverted. Note that the totals
+  include speculative (CCD) contacts, which the overlay never highlights, so a lower highlight count
+  is normal even at zero truncation.
+
+### Fixed
+
+- **An agent standing exactly on an obstacle corner no longer throws.** In ORCA's segment-obstacle
+  test the closed end of a segment fell between the guards and reached a division by the distance to
+  that corner — zero when the agent stands on it, and negative under a square root when it stands
+  inside the corner's clearance. Both threw. It is not an exotic position: agent coordinates and
+  obstacle ring vertices live on the same lattice, and a runtime rebake can drop a new hole ring
+  where an agent already stands. The two ends of a segment now agree, which matters because every
+  shared ring vertex is one segment's end and the next one's start.
+
+### Breaking changes — what to change when you upgrade
+
+- **`FPNavAgentSystem.ConstrainToNavMesh` takes a required `areaMask`.** Source-breaking; wire- and
+  asset-compatible. It now pairs with the **walk** mask, because "where may this agent stand" is the
+  walk's question, not the path's. **Migration: pass the agent's `WalkAreaMaskOverride`, or
+  `FPNavAgentSystem.DEFAULT_AREA_MASK` when that is zero.**
+
+- **`FPNavMeshQuery.MoveAlongSurface` and `MoveAlongSurfaceWithVisited` take an `areaMask`** in
+  fourth position — `(startPos, endPos, startTri, areaMask, multiFloorYThreshold, …)`.
+  Source-breaking; wire-, asset-, hash- and replay-compatible. **Migration is mechanical: pass `~0`
+  for the previous behaviour** (or `FPNavAgentSystem.DEFAULT_AREA_MASK`, which is the same value and
+  says why). Required rather than defaulted because the mask is a determinism input, not a tuning
+  knob — a default would let the next movement path be written without consulting it.
+
+- **`NavAgentComponent` grew: 708 → 716 bytes in memory, 700 → 708 on the wire**, and
+  **`ReplayMetadata.CURRENT_VERSION` moves 5 → 6 with it. Existing recordings must be re-recorded.**
+  A version-5 stream no longer matches what this build reads, and the mismatch does not announce
+  itself: component sizes are read without being compared, so an old block is misread rather than
+  skipped and every type after it is corrupted in turn. Both sizes are now pinned by tests.
+
+- **`FPNavAgentStatus` gains `Blocked`.** Additive, but a `switch` over the enum needs a `default:`.
+
+- **`IFPPhysicsWorldProvider` gains `GetSnapshotStats()`.** Source-breaking for outside
+  implementations; wire-, asset-, hash- and replay-compatible. **Migration: return the value the
+  engine hands you** — forward `PhysicsSystem.GetSnapshotStats()` if you wrap one, or build the
+  struct at your own copy site so `copied` and `total` come from the same tick. Not defaulted on
+  purpose: a default would have to report `total == copied`, which reads as "nothing was truncated".
+
 ## [0.11.1] - 2026-09-02
 
 ### Added — diagnostics

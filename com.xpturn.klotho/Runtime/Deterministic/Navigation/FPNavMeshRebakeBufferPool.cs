@@ -40,6 +40,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     {
         private const int POISON_INT = unchecked((int)0xCDCDCDCD);
         private const long POISON_LONG = unchecked((long)0xCDCDCDCDCDCDCDCDUL);
+        private const byte POISON_BYTE = 0xCD;
 
         /// <summary>
         /// Shared non-pooling instance: every rent allocates a fresh exact-size buffer, which
@@ -138,6 +139,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private int[] _polyStarts;
         private long[] _polyBounds;
         private FP64[] _polyYs;
+        private byte[] _polyRetain;
         private long[] _holeXs;
         private long[] _holeZs;
         private FP64[] _holeYs;
@@ -323,6 +325,17 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         internal long[] PolyBounds(int minSize) { return RentLongs(ref _polyBounds, minSize); }
         /// <summary>Per-building hole-vertex height, one entry per building.</summary>
         internal FP64[] PolyYs(int minSize) { return RentFP64s(ref _polyYs, minSize); }
+
+        /// <summary>
+        /// Per-building carve/retain mode, one entry per building: 0 = carve, 1 = retain.
+        ///
+        /// <para><c>byte</c> rather than <c>bool</c> so the DEBUG poison stays detectable. A
+        /// poisoned bool has no value that is not also a legal one, so a slot the writer forgot
+        /// would read as a MODE and silently produce a different mesh. With a byte the reader
+        /// tests <c>== 1</c> and asserts the value is 0 or 1, so poison fires in DEBUG and
+        /// degrades to carve — the pre-retain behaviour — in release.</para>
+        /// </summary>
+        internal byte[] PolyRetain(int minSize) { return RentBytes(ref _polyRetain, minSize); }
 
         internal long[] HoleXs(int minSize) { return RentLongs(ref _holeXs, minSize); }
         internal long[] HoleZs(int minSize) { return RentLongs(ref _holeZs, minSize); }
@@ -551,6 +564,18 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // fill, while their siblings — PolyXs/PolyZs/PolyStarts/PolyBounds through RentLongs and
         // RentInts, HoleYs and BuildEdges by hand but remembering — kept it. Two more helpers is
         // what stops the next hand-written rent from being the next omission.
+        private byte[] RentBytes(ref byte[] slot, int minSize)
+        {
+            if (!_reuse)
+                return Counted(new byte[minSize]);
+            if (slot == null || slot.Length < minSize)
+                slot = Counted(new byte[Grow(slot == null ? 0 : slot.Length, minSize)]);
+#if DEBUG
+            Array.Fill(slot, POISON_BYTE);
+#endif
+            return slot;
+        }
+
         private FP64[] RentFP64s(ref FP64[] slot, int minSize)
         {
             if (!_reuse)

@@ -55,6 +55,23 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             FP64 bakeAgentRadius, FP64 bakeMaxSlopeDeg,
             FP64 bakeAgentHeight, FP64 bakeAgentClimb)
         {
+            // Area 1 is the runtime's: the rebaker stamps retained building footprints with it,
+            // and the default agent mask excludes it. A baked triangle in that area would be a
+            // wall to every agent with nothing in the asset to say so. No exporter produces it
+            // today (Unity's Not Walkable never reaches the triangulation, Godot writes 0), so
+            // this refuses the one thing that could make that stop being true.
+            for (int i = 0; i < areas.Length; i++)
+            {
+                if (areas[i] != FPNavMeshAreas.BUILDING_AREA)
+                    continue;
+                logger?.KError($"[FPNavMeshBuildPipeline] triangle {i} is in area {FPNavMeshAreas.BUILDING_AREA}, " +
+                    $"which is reserved for retained building footprints (FPNavMeshAreas.BUILDING_AREA) — " +
+                    $"remap the bake's areas and export again");
+                throw new ArgumentException(
+                    $"FPNavMeshBuildPipeline: triangle {i} is in area {FPNavMeshAreas.BUILDING_AREA}, " +
+                    "which is reserved for retained building footprints (FPNavMeshAreas.BUILDING_AREA)");
+            }
+
             // 0. Snap X/Z to the exact-predicate grid + re-weld coincidences.
             //    Idempotent for on-grid input. Downstream steps never create new coordinates
             //    (T-junction splits reuse existing vertices), so the output mesh stays on-grid.

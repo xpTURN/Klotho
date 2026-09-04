@@ -12,10 +12,17 @@ namespace xpTURN.Klotho.Replay
     [Serializable]
     public class ReplayMetadata : IReplayMetadata
     {
+        // Bumped to 6 for the per-agent area masks: NavAgentComponent gained two int fields, so its
+        // wire size moved 700 -> 708 and a version-5 replay's component stream no longer matches
+        // what this build reads. That mismatch does NOT announce itself — ComponentStorageRegistry
+        // reads a component's size without comparing it, so the old block is misread rather than
+        // skipped and every type after it is corrupted in turn; LayoutFingerprint is reported at
+        // load but not applied. Bumping is what turns silent corruption into a refusal.
+        //
         // Bumped to 5 for the tick-0 entitlements. Every change to the metadata layout bumps this. There is no version branch in the codec, so a
         // number reused across two layouts cannot be told apart and the older file is misparsed rather than
         // refused — which is why 2 is skipped: it was issued by an earlier build and files carrying it exist.
-        public const int CURRENT_VERSION = 5;
+        public const int CURRENT_VERSION = 6;
 
         public int Version { get; set; } = CURRENT_VERSION;
         public string SessionId { get; set; }

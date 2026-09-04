@@ -51,10 +51,11 @@ namespace xpTURN.Klotho.Runtime.Tests.Contract
 
             Assert.IsTrue(Regex.IsMatch(src, @"TYPE_ID\s*=\s*108\b"),
                 "BuildingComponent's type id moved — the id is wire state, not an implementation detail");
-            Assert.IsTrue(Regex.IsMatch(src, @"GetSerializedSize\(\)\s*=>\s*48\b"),
+            Assert.IsTrue(Regex.IsMatch(src, @"GetSerializedSize\(\)\s*=>\s*49\b"),
                 "BuildingComponent's serialized size changed. That is a wire change: regenerate BOTH "
-                + "copies and update this pin in the same commit. 48 = the original 40 plus "
-                + "EffectiveTick and RemovalEffectiveTick");
+                + "copies and update this pin in the same commit. 49 = the original 40 plus "
+                + "EffectiveTick and RemovalEffectiveTick (48), plus Retain — a bool is one byte on "
+                + "the wire");
             Assert.IsTrue(Regex.IsMatch(src, @"maxCount:\s*40\b"),
                 "BuildingComponent's slot count changed — it feeds LayoutFingerprint, so every peer "
                 + "must ship the same value. 40 is storage, not policy: MaxBuildings still admits 32 "

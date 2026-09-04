@@ -541,7 +541,9 @@ namespace Brawler
                     // bool — it cannot tell the two apart, so neither should the wording.
                     return $"too close to another building (#{r.IndexA} and #{r.IndexB})";
                 case FPBuildingRejection.TouchesWalkableBoundary:
-                    return "too close to the edge of the walkable area";
+                    // Under ClipOverlap a crossing CARVE is clipped, so here this is only ever a
+                    // retained building reaching the edge — retain has no clip to fall back on.
+                    return "crosses the edge of the walkable area (a retained building is not clipped)";
                 case FPBuildingRejection.OutsideWalkableRegion:
                     // Under ClipOverlap this verdict means "clips to nothing" — the footprint
                     // never reaches the walkable area at all, not merely "centre is off-mesh".
@@ -584,14 +586,15 @@ namespace Brawler
                     $"shape {cmd.ShapeId} turned {cmd.Orientation} is not in the shape catalog");
                 return;
             }
-            PlaceBuildingAt(ref frame, cmd, cmd.ShapeId, cmd.Orientation, cmd.Centre);
+            PlaceBuildingAt(ref frame, cmd, cmd.ShapeId, cmd.Orientation, cmd.Centre, cmd.Retain);
         }
 
         void HandlePlaceHexBuilding(ref Frame frame, PlaceHexBuildingCommand cmd)
         {
             // The shape is a constant, not payload — a hexagon has no orientation to send, so there
-            // is nothing here to validate and nothing on the wire that could be wrong.
-            PlaceBuildingAt(ref frame, cmd, BrawlerBuildingShapes.HexShape, 0, cmd.Centre);
+            // is nothing here to validate and nothing on the wire that could be wrong. The mode IS
+            // payload, exactly as for the box.
+            PlaceBuildingAt(ref frame, cmd, BrawlerBuildingShapes.HexShape, 0, cmd.Centre, cmd.Retain);
         }
 
         /// <summary>
@@ -602,7 +605,8 @@ namespace Brawler
         /// accepted, which surfaces as a load failure and not as a rejection.
         /// </summary>
         void PlaceBuildingAt(
-            ref Frame frame, CommandBase cmd, int shapeId, int orientation, FPVector3 centre)
+            ref Frame frame, CommandBase cmd, int shapeId, int orientation, FPVector3 centre,
+            bool retain)
         {
             if (_rebakeContext == null || _botFSM == null)
             {
@@ -645,7 +649,7 @@ namespace Brawler
             // catch stays: a stale shape id is this code's bug, and reporting it as "you cannot
             // build there" would show a developer error to the player on every peer at once.
             var candidate = new FPBuildingPlacement(
-                shapeId, orientation, centre.x, centre.z, centre.y);
+                shapeId, orientation, centre.x, centre.z, centre.y, retain);
             FPBuildingRejectionInfo rejection;
             try
             {
@@ -665,7 +669,7 @@ namespace Brawler
             EntityRef entity = frame.CreateEntity();
             frame.Add(entity, new BuildingComponent
             {
-                Centre = centre, ShapeId = shapeId, Orientation = orientation,
+                Centre = centre, ShapeId = shapeId, Orientation = orientation, Retain = retain,
                 OwnerSlot = cmd.PlayerId, Sequence = _validator.NextSequence,
                 EffectiveTick = effectiveTick,
                 RemovalEffectiveTick = int.MaxValue,
@@ -683,7 +687,7 @@ namespace Brawler
             // diffing against one that was never installed.
             frame.Logger?.KInformation(
                 $"[Building][Placed] tick={frame.Tick}, player={cmd.PlayerId}, entity={entity}, "
-                + $"shape={ShapeName(shapeId, orientation)}, total={count + 1}");
+                + $"shape={ShapeName(shapeId, orientation)}, mode={(retain ? "retain" : "carve")}, total={count + 1}");
         }
 
         void HandleRemoveBuilding(ref Frame frame, RemoveBuildingCommand cmd)

@@ -35,6 +35,26 @@ namespace xpTURN.Klotho.Editor.Physics
 
             EditorGUILayout.LabelField($"Bodies: {vis.bodyCount}   StaticColliders: {vis.staticCount}");
 
+            // copied/total for the three snapshot views. Suppressed until the visualizer has
+            // actually run a frame: the contact caches are filled by DrawAll (a camera callback),
+            // not by the block above, so drawing "0/0" here would assert "nothing was truncated"
+            // in the one state where we know nothing at all.
+            if (vis.currentContacts != null)
+            {
+                var st = vis.currentStats;
+                EditorGUILayout.LabelField(
+                    $"Contacts: {st.ContactCopied}/{st.ContactTotal}"
+                    + $"   Static: {st.StaticContactCopied}/{st.StaticContactTotal}"
+                    + $"   Triggers: {st.TriggerCopied}/{st.TriggerTotal}");
+                if (st.AnyTruncated)
+                    EditorGUILayout.HelpBox(
+                        "Snapshot truncated — the overlay and the per-body list below are showing less "
+                        + "than the simulation holds. The numbers are contacts not copied into the debug "
+                        + "buffer, not collisions: the totals also include speculative (CCD) contacts, "
+                        + "which are never highlighted.",
+                        MessageType.Warning);
+            }
+
             if (vis.currentBodies == null) return;
 
             // Tab
@@ -168,10 +188,20 @@ namespace xpTURN.Klotho.Editor.Physics
                     if (vis.currentSContacts[i].entityA == bodyIdx || vis.currentSContacts[i].entityB == bodyIdx)
                         staCount++;
 
-            if (dynCount + staCount == 0) return;
+            // The bail-out has to consider truncation, not just the tally: a body whose contacts were
+            // all dropped from the copied arrays reads as zero here, and that is exactly the body
+            // someone came to inspect. Bailing out on zero would hide the warning from them.
+            bool incomplete = vis.currentStats.ContactListMayBeIncomplete;
+            if (!vis.currentStats.ShouldDrawContactList(dynCount, staCount)) return;
 
             EditorGUILayout.Space(4);
-            EditorGUILayout.LabelField($"Contacts  Dyn:{dynCount}  Static:{staCount}", EditorStyles.boldLabel);
+            // the header text itself has to say it — a warning beside "Dyn:0 Static:0" still leaves
+            // the body of the list asserting "no contacts".
+            EditorGUILayout.LabelField(
+                incomplete
+                    ? $"Contacts  Dyn:{dynCount}  Static:{staCount}  — truncated (this body's contacts may not be shown)"
+                    : $"Contacts  Dyn:{dynCount}  Static:{staCount}",
+                EditorStyles.boldLabel);
             _contactScrollPos = EditorGUILayout.BeginScrollView(_contactScrollPos, GUILayout.Height(80));
 
             if (vis.currentContacts != null)

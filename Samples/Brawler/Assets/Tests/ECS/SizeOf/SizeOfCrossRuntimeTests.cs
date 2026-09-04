@@ -26,7 +26,10 @@ namespace xpTURN.Klotho.ECS.Tests
         private const int Expected_TransformComponent             =  96;
         private const int Expected_OwnerComponent                 =   4;
         private const int Expected_ErrorCorrectionTargetComponent =   1;
-        private const int Expected_NavAgentComponent              = 708;
+        // 708 -> 716: PlanAreaMaskOverride + WalkAreaMaskOverride, two ints, neither of which fits
+        // the struct's existing padding. The CoreCLR value and the wire size are pinned separately
+        // in NavAgentComponentSizeTests; this matrix is what covers Mono and IL2CPP.
+        private const int Expected_NavAgentComponent              = 716;
         private const int Expected_HealthComponent                =   8;
         private const int Expected_CombatComponent                =   8;
         private const int Expected_MovementComponent              =  36;

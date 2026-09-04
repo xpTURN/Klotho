@@ -1227,6 +1227,77 @@ namespace Brawler
         }
 
         /// <summary>
+        /// Test entry (wire to a third UI button): the same BOX, but RETAINED — its footprint stays
+        /// walkable ground stamped <c>FPNavMeshAreas.BUILDING_AREA</c>, which the agents' default
+        /// mask treats as a wall, instead of becoming a hole. The mode goes out in the command
+        /// payload and nowhere else; see <c>BrawlerSimulationCallbacks.SendPlaceBuildingCommand</c>.
+        /// </summary>
+        public void OnBtnPlaceRetainBuilding()
+        {
+            _simCallbacks?.SendPlaceBuildingCommand(_session?.Engine, retain: true);
+        }
+
+#if UNITY_EDITOR
+        /// <summary>
+        /// Scene-view outline of every placed building, coloured by mode — the one visual trace a
+        /// RETAINED building has. Brawler's buildings are navmesh-only (no renderer, no collider):
+        /// a carve shows up as a hole in the navmesh overlay, a retain as nothing at all. Drawn from
+        /// frame state, editor only, writes nothing. Red = carved, cyan = retained, dimmed while the
+        /// building is still waiting for its effective tick.
+        /// </summary>
+        private void OnDrawGizmos()
+        {
+            if (!(_session?.Engine?.Simulation is EcsSimulation sim) || sim.Frame == null)
+                return;
+            Frame frame = sim.Frame;
+            var filter = frame.Filter<BuildingComponent>();
+            while (filter.Next(out var entity))
+            {
+                ref readonly var b = ref frame.GetReadOnly<BuildingComponent>(entity);
+                if (frame.Tick >= b.RemovalEffectiveTick)
+                    continue;   // tombstone — already out of the mesh
+                Color c = b.Retain ? Color.cyan : Color.red;
+                if (frame.Tick < b.EffectiveTick)
+                    c.a = 0.35f;   // placed, not yet in the mesh
+                Gizmos.color = c;
+                DrawFootprint(in b);
+            }
+        }
+
+        /// <summary>
+        /// The catalog footprint (before the bake-radius expansion) of one building as world-space
+        /// segments — the corner recipe of <c>FPBuildingShapeCatalog.ObbOffsets</c> and
+        /// <c>HexagonOffsets</c>, in floats, which is all a gizmo needs.
+        /// </summary>
+        private static void DrawFootprint(in BuildingComponent b)
+        {
+            const float unit = (float)FPGeoPredicates.SNAP_UNITS_PER_WORLD;
+            var centre = new Vector3(b.Centre.x.ToFloat(), b.Centre.y.ToFloat() + 0.05f, b.Centre.z.ToFloat());
+            if (b.ShapeId == BrawlerBuildingShapes.HexShape)
+            {
+                float r = BrawlerBuildingShapes.HexCircumradius / unit;
+                for (int i = 0; i < 6; i++)
+                {
+                    float a0 = i * Mathf.PI / 3f, a1 = (i + 1) * Mathf.PI / 3f;
+                    Gizmos.DrawLine(
+                        centre + new Vector3(r * Mathf.Cos(a0), 0f, r * Mathf.Sin(a0)),
+                        centre + new Vector3(r * Mathf.Cos(a1), 0f, r * Mathf.Sin(a1)));
+                }
+                return;
+            }
+            float hw = BrawlerBuildingShapes.HalfWidth / unit, hd = BrawlerBuildingShapes.HalfDepth / unit;
+            float ang = b.Orientation * 2f * Mathf.PI / BrawlerBuildingShapes.Directions;
+            float cs = Mathf.Cos(ang), sn = Mathf.Sin(ang);
+            Vector3 u = new Vector3(cs, 0f, sn) * hw, w = new Vector3(-sn, 0f, cs) * hd;
+            Vector3 c0 = centre + u + w, c1 = centre - u + w, c2 = centre - u - w, c3 = centre + u - w;
+            Gizmos.DrawLine(c0, c1);
+            Gizmos.DrawLine(c1, c2);
+            Gizmos.DrawLine(c2, c3);
+            Gizmos.DrawLine(c3, c0);
+        }
+#endif
+
+        /// <summary>
         /// Test entry (wire to a second UI button): places a HEXAGON, via its own command.
         /// The split is in the input, not the state — a hexagon has no orientation to send, and the
         /// stored BuildingComponent is the same either way.
@@ -1234,6 +1305,16 @@ namespace Brawler
         public void OnBtnPlaceHexBuilding()
         {
             _simCallbacks?.SendPlaceHexBuildingCommand(_session?.Engine);
+        }
+
+        /// <summary>
+        /// Test entry (wire to a fourth UI button): the same HEXAGON, but RETAINED — see
+        /// <see cref="OnBtnPlaceRetainBuilding"/> for what that means; the mode rides the hexagon
+        /// command's own payload.
+        /// </summary>
+        public void OnBtnPlaceRetainHexBuilding()
+        {
+            _simCallbacks?.SendPlaceHexBuildingCommand(_session?.Engine, retain: true);
         }
     }
 }

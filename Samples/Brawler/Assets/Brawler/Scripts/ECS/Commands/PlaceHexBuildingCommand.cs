@@ -25,6 +25,11 @@ namespace Brawler
         /// <summary>World position of the hexagon's centre.</summary>
         [KlothoOrder(0)] public FPVector3 Centre;
         [KlothoOrder(1)] public int SequenceNumber { get; set; }
+        /// <summary>Retain the footprint as ground (stamped <c>FPNavMeshAreas.BUILDING_AREA</c>)
+        /// instead of carving a hole — the same field, with the same reasons, as
+        /// <see cref="PlaceBuildingCommand.Retain"/>: it is a determinism input, so it rides the
+        /// payload and nothing else.</summary>
+        [KlothoOrder(2)] public bool Retain;
 
         // Same ordering class as the box: after Spawn (0), so units spawned this tick are
         // included in validation and reseed.

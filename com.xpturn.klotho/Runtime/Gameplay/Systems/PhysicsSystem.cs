@@ -30,7 +30,11 @@ namespace xpTURN.Klotho.ECS.Systems
         private FPContact[] _contactBuf       = new FPContact[256];
         private FPContact[] _staticContactBuf = new FPContact[256];
         private (int, int)[] _triggerBuf      = new (int, int)[64];
-        private int _contactCount, _staticContactCount, _triggerCount;
+
+        // Copied/total accounting for the buffers above. This is the ONLY place the copied counts
+        // live: GetContacts/GetTriggerPairs read them back out of here, so a copied count and its
+        // total can never come from different ticks.
+        private FPContactSnapshotStats _stats;
 
         // Structured trigger callbacks — dynamic×static
         public Action<EntityRef, int> OnStaticTriggerEnter;
@@ -86,16 +90,18 @@ namespace xpTURN.Klotho.ECS.Systems
                                 out FPContact[] staticContacts, out int staticContactCount)
         {
             contacts            = _contactBuf;
-            contactCount        = _contactCount;
+            contactCount        = _stats.ContactCopied;
             staticContacts      = _staticContactBuf;
-            staticContactCount  = _staticContactCount;
+            staticContactCount  = _stats.StaticContactCopied;
         }
 
         public void GetTriggerPairs(out (int, int)[] pairs, out int count)
         {
             pairs = _triggerBuf;
-            count = _triggerCount;
+            count = _stats.TriggerCopied;
         }
+
+        public FPContactSnapshotStats GetSnapshotStats() => _stats;
 
         public void LoadStaticColliders(string sceneKey, List<FPStaticCollider> colliders)
         {
@@ -259,10 +265,19 @@ namespace xpTURN.Klotho.ECS.Systems
             _world.Step(_bodies, _bodyCount, dt, _gravity,
                 _onTriggerEnter, _onTriggerStay, _onTriggerExit);
 
-            // 2-b. Snapshot copy for the visualizer (immediately after Step)
-            _world.CopyContactsTo(_contactBuf, out _contactCount);
-            _world.CopyStaticContactsTo(_staticContactBuf, out _staticContactCount);
-            _world.CopyTriggerPairsTo(_triggerBuf, out _triggerCount);
+            // 2-b. Snapshot copy for the visualizer (immediately after Step). The totals are read
+            // here and nowhere else: copied and total have to be the same tick's pair, and the early
+            // return above (_bodyCount == 0) leaves them stale together rather than mismatched.
+            _world.CopyContactsTo(_contactBuf, out int contactCopied);
+            _world.CopyStaticContactsTo(_staticContactBuf, out int staticContactCopied);
+            _world.CopyTriggerPairsTo(_triggerBuf, out int triggerCopied);
+            _stats = new FPContactSnapshotStats(
+                contactCopied, _world.DebugContactCount,
+                staticContactCopied, _world.DebugStaticContactCount,
+                triggerCopied, _world.DebugTriggerPairCount,
+                _world.DebugContactCopyTruncatedCount,
+                _world.DebugStaticContactCopyTruncatedCount,
+                _world.DebugTriggerCopyTruncatedCount);
 
             // 3. FPPhysicsBody[] → ECS Component reverse sync
             for (int i = 0; i < _bodyCount; i++)

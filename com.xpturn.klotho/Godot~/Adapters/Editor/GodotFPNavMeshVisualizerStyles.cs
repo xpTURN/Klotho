@@ -10,6 +10,11 @@ namespace xpTURN.Klotho.Godot
         // NavMesh geometry
         public static readonly Color TriangleFill = new Color(0.2f, 0.6f, 0.9f, 0.15f);
         public static readonly Color TriangleFillBlocked = new Color(0.9f, 0.2f, 0.2f, 0.25f);
+        // A retained building footprint (FPNavMeshAreas.BUILDING_AREA): walkable geometry that the
+        // default agent mask treats as a wall. Between the two above in meaning, and deliberately
+        // between them in hue — without this it renders as ordinary ground and retain has no visual
+        // trace at all (a carve at least leaves a hole).
+        public static readonly Color TriangleFillBuilding = new Color(0.65f, 0.35f, 1.0f, 0.28f);
         public static readonly Color EdgeInternal = new Color(0.3f, 0.3f, 0.3f, 0.4f);
         public static readonly Color EdgeBoundary = new Color(1.0f, 0.4f, 0.0f, 0.9f);
         public static readonly Color Vertex = new Color(1.0f, 1.0f, 0.0f, 0.8f);

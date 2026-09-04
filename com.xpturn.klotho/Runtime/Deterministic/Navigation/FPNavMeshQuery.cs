@@ -181,11 +181,45 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// reachable point closest to endPos. On a multi-floor NavMesh, neighboring
         /// triangles whose Y differs beyond the threshold are treated as walls.
         /// </summary>
+        /// <param name="areaMask">
+        /// Allowed-area filter, the same shape <see cref="FPNavMeshPathfinder.FindPath"/> takes:
+        /// a neighbour is expandable only where <c>(areaMask &amp; tri.areaMask) != 0</c>. Pass
+        /// <c>~0</c> for no filtering. See the remarks for the two contract points that are NOT
+        /// symmetric with <c>FindPath</c>.
+        /// </param>
+        /// <remarks>
+        /// <para><b>The mask gates expansion only — never the starting triangle.</b>
+        /// <c>FindPath</c> rejects a masked-out start outright, and this walk must not: the start
+        /// is where the agent already <i>is</i>, and refusing it would hand back
+        /// <paramref name="startPos"/> unchanged with nothing in the engine re-acquiring the
+        /// triangle — the same freeze <c>startTri &lt; 0</c> produces, reproduced by a mask. So the
+        /// contract is "does not walk INTO what the mask forbids", not "cannot walk OUT of it": a
+        /// game that narrows the mask under an agent's feet gets an agent that can leave, not one
+        /// that is stuck. For the same reason, movement WITHIN a masked-out starting triangle is
+        /// unfiltered — the endpoint-inside-current-triangle short circuit runs before any
+        /// neighbour is examined.</para>
+        /// <para><b>A masked-out neighbour is a wall of the same class as <c>isBlocked</c></b>, so
+        /// its edge becomes a closest-point candidate and the agent slides along it. Starting from
+        /// ground the mask ACCEPTS, a mask narrow enough to forbid every neighbour therefore pins
+        /// the agent in its starting triangle; that is the calling game's choice, not a failure
+        /// mode of this method. Starting from ground the mask REFUSES it does not pin, because the
+        /// escape rule above makes the refused neighbours expandable. Either way the situation is
+        /// diagnosable: the matching <c>FindPath</c> runs the same start rather than refusing it,
+        /// and counts it in <see cref="FPNavMeshPathfinder.DebugMaskedStartCount"/> —
+        /// <see cref="FPNavMeshPathfinder.DebugAreaMaskRejectedCount"/> is the END-point counter
+        /// and says nothing about the start.</para>
+        /// <para>Note that <c>areaMask == 0</c> on a triangle makes that triangle unreachable even
+        /// for an unfiltered (<c>~0</c>) call, since no bit can intersect. The build pipeline never
+        /// emits such a triangle (it writes <c>1 &lt;&lt; areaIndex</c>); the only producer is a
+        /// caller writing through <c>FPNavMesh.TrianglesMutable</c>, and for that mesh the walk
+        /// result — and therefore the simulation — differs from a mesh without it.</para>
+        /// </remarks>
         /// <returns>Constrained position (with height correction) and the corresponding triangle index</returns>
         public (FPVector3 resultPos, int resultTri) MoveAlongSurface(
-            FPVector3 startPos, FPVector3 endPos, int startTri, FP64 multiFloorYThreshold)
+            FPVector3 startPos, FPVector3 endPos, int startTri, int areaMask,
+            FP64 multiFloorYThreshold)
         {
-            return MoveAlongSurfaceWithVisited(startPos, endPos, startTri,
+            return MoveAlongSurfaceWithVisited(startPos, endPos, startTri, areaMask,
                 multiFloorYThreshold, null, out _);
         }
 
@@ -193,9 +227,19 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // emitted three lines for every ordinary step — 96-98% of a Brawler session log, which buries
         // every other diagnostic the level exists to show. Trace keeps them one level away for when the
         // walk itself is what you are debugging.
+        /// <inheritdoc cref="MoveAlongSurface"/>
+        /// <param name="outVisited">
+        /// Receives the BFS parent chain from the starting triangle to the result triangle, or null
+        /// to skip it. <b>Entries are not all mask-satisfying</b>, and the exceptions are exactly
+        /// the escape rule's: the first entry is the starting triangle, which the mask never gates,
+        /// and a chain that starts on refused ground stays refused for as long as it remains inside
+        /// that forbidden component — an agent walking OUT of a building reports a parent chain of
+        /// building triangles. What does hold is the other direction: no entry is ground the mask
+        /// refuses that was ENTERED from ground it accepts (see remarks).
+        /// </param>
         public (FPVector3 resultPos, int resultTri) MoveAlongSurfaceWithVisited(
-            FPVector3 startPos, FPVector3 endPos, int startTri, FP64 multiFloorYThreshold,
-            int[] outVisited, out int visitedCount)
+            FPVector3 startPos, FPVector3 endPos, int startTri, int areaMask,
+            FP64 multiFloorYThreshold, int[] outVisited, out int visitedCount)
         {
             visitedCount = 0;
 
@@ -257,8 +301,30 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     FPVector2 eb = _navMesh.Vertices[vb].ToXZ();
                     int neighbor = tri.GetNeighbor(e);
 
+                    // The mask sits beside isBlocked because it is the same kind of predicate —
+                    // "this neighbour is not passable for this query" — and not beside the
+                    // multi-floor test, which is a tuning threshold. Placement cannot change the
+                    // result (every term here is a pure read, and a rejected neighbour takes the
+                    // same wall fallthrough whichever term rejected it); what it changes is which
+                    // reason a reader sees, which is the only question this walk gets debugged for.
+                    // The escape rule: a neighbour the mask refuses is still expandable when the
+                    // triangle we are expanding FROM is refused too. The guarantee stays "does not
+                    // walk INTO what the mask forbids" — entry from accepted ground is unchanged —
+                    // while an agent that is already inside forbidden ground can cross it and
+                    // leave. Without this, exempting the starting triangle only frees an agent
+                    // whose own triangle happens to touch accepted ground; two building footprints
+                    // snapped flush produce interior triangles with no accepted neighbour at all,
+                    // and an agent there was stuck for good — measured on two flush footprints,
+                    // four of the ten interior triangles.
+                    //
+                    // It cannot become a way in, and it cannot carry an agent between two separate
+                    // forbidden regions: crossing accepted ground resets the condition, so the
+                    // reachable set is exactly "the forbidden component you stand in, plus the
+                    // accepted ground it touches".
                     if (neighbor >= 0
                         && !_navMesh.Triangles[neighbor].isBlocked
+                        && ((areaMask & _navMesh.Triangles[neighbor].areaMask) != 0
+                            || (areaMask & _navMesh.Triangles[curTri].areaMask) == 0)
                         && _moveVisitedGen[neighbor] != _moveGeneration)
                     {
                         // Multi-floor validation: based on the starting triangle
@@ -279,7 +345,16 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                         }
                     }
 
-                    // Wall edge (boundary / different floor / blocked / visited) → closest point to endPos
+                    // The mask's own wall reason. Re-tested here rather than hoisted into a flag
+                    // so the production path (no logger) pays nothing: `_logger != null` short
+                    // circuits before the second array read, and the interpolation never runs.
+                    if (_logger != null && neighbor >= 0
+                        && (areaMask & _navMesh.Triangles[neighbor].areaMask) == 0)
+                    {
+                        _logger.KTrace($"[MoveAlongSurface] tri={curTri} e={e} neighbor={neighbor} areaMask=0x{areaMask:X8} vs tri.areaMask=0x{_navMesh.Triangles[neighbor].areaMask:X8} → wall");
+                    }
+
+                    // Wall edge (boundary / different floor / blocked / masked out / visited) → closest point to endPos
                     FPVector2 cp = ClosestPointOnSegment2D(endXZ, ea, eb);
                     FP64 dist = FPVector2.SqrDistance(endXZ, cp);
                     if (dist < bestDist)

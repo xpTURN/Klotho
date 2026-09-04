@@ -111,8 +111,11 @@ Three things happen inside that affect what you pass:
 - **Buildings are checked, never adjusted.** A placement that will not work is refused and the
   original mesh is left alone — see [4.5](#45-what-gets-rejected).
 - **The agent radius is added for you.** You give the building's real size; the rebaker widens the
-  carved hole so agents do not clip the wall. That is why the offset to a flush neighbour has to be
-  asked for rather than derived from the size you authored ([4.3](#43-placing-shapes-flush)).
+  carved hole so agents do not clip the wall. **Every check runs on that widened ring**, so the
+  distances that matter — to a neighbour, to a wall — are a full agent radius larger per side than
+  the size you authored. That is why a flush offset has to be asked for rather than derived
+  ([4.3](#43-placing-shapes-flush)), and why a building that looks clear of the boundary can still be
+  refused ([4.5](#45-what-gets-rejected)).
 - **The result is an ordinary NavMesh.** It goes through the same final assembly the offline baker
   uses and inherits the same bake settings, so nothing downstream can tell the two apart.
 
@@ -423,10 +426,20 @@ if (!FPNavMeshRebaker.TryRebakePlacements(
 }
 ```
 
+**Every geometric refusal below is judged on the *expanded* footprint, not the one you authored.**
+The rebaker adds the bake agent radius (plus two snap units of padding to absorb the vertex snap), so
+the ring the checks see is **a full agent radius larger on every side** — at radius 0.5 that is 0.5 m
+per side, and the padding is a rounding term at 2/1024 m. A building drawn half a metre clear of a
+wall is therefore *touching* it as far as the boundary tests are concerned, and one drawn half a metre
+from its neighbour already overlaps. That is the same arithmetic as the flush spacing in
+[4.3](#43-placing-shapes-flush) seen from the other side: you cannot read either distance off the size
+you authored. `FPBuildingShapeExpansion.ExpandedX/ExpandedZ` is where the realised extent lives, and a
+placement ghost that wants to warn before the click should measure with it.
+
 | `rejection.Reason` | Meaning | Indices |
 | --- | --- | --- |
 | `BuildingsOverlap` | Two buildings are too close once the agent radius is added. This also covers buildings that merely touch, when your rules forbid touching — the check cannot tell the two cases apart, so tell the player "too close" rather than "overlapping". | `IndexA`, `IndexB` |
-| `TouchesWalkableBoundary` | The footprint reaches the edge of the walkable region. Under `Touch` only a transversal crossing reports this — flush contact carves. | `IndexA` |
+| `TouchesWalkableBoundary` | The **expanded** footprint reaches the edge of the walkable region. Under `Touch` only a transversal crossing reports this — flush contact carves. Under `ClipOverlap` a carve is clipped instead, but a **retained** footprint is refused here ([4.7](#47-retaining-a-footprint-instead-of-carving-it)). | `IndexA` |
 | `OutsideWalkableRegion` | The footprint is not on the mesh at all. Under `ClipOverlap` it means **clips to nothing** — the footprint never reaches the walkable region. | `IndexA` |
 | `SwallowsBakedHole` | It swallowed a pillar or other baked hole, which would flip that hole back to walkable. | `IndexA`, and `Site` — *which* hole, which a building index alone cannot say |
 | `EmptyWalkableRegion` | Nothing walkable was left. No placement can cause this under the default policy; under `Touch`/`ClipOverlap` a footprint flush on every side can cover the whole region. | — |
@@ -547,6 +560,102 @@ There is a second form for callers that hold no context, and three rules come wi
 
 
 ---
+
+### 4.7 Retaining a footprint instead of carving it
+
+`FPBuildingPlacement.Retain` keeps the footprint as **triangulated ground**. The ring still goes in
+as exact constraint edges — no triangle straddles the boundary, the corners are still mesh vertices —
+but the interior is not erased.
+
+```csharp
+// Terrain and authored obstacles keep carving; only this one retains.
+var placements = new[]
+{
+    new FPBuildingPlacement(rockShape, cx, cz, y),                 // carves, as always
+    new FPBuildingPlacement(barracksShape, bx, bz, y, retain: true),
+};
+```
+
+**What the rebaker claims about a retained placement: one thing — it is a building.** It makes the
+triangles exist, marks them, and leaves the decision to the caller's area mask. Concretely, and all
+three matter:
+
+- **The footprint is stamped `FPNavMeshAreas.BUILDING_MASK`, exclusively.** `FindTriangle` still
+  reports it (it is ground, not `isBlocked`), but `FindPath` and `MoveAlongSurface` see it through
+  the mask the caller passes. `FPNavAgentSystem.DEFAULT_AREA_MASK` is
+  `FPNavMeshAreas.DEFAULT_AGENT_MASK` — every area except the building's — so an agent neither
+  plans through a retained footprint nor walks into it: a destination inside is refused (and counted
+  in `DebugAreaMaskRejectedCount`), and the walk slides along its edge as along a wall. A caller
+  that passes `FPNavMeshAreas.ALL_AREAS` plans straight through it. Which mask you pass is the gate;
+  the engine's own agents default to the wall side. The stamp is exclusive because masks
+  *intersect*: `base | BUILDING` would still share the base bit with every default query and block
+  nothing — so the base area of a retained triangle is gone from the mesh, by design. Area index 1
+  is reserved for this (Unity's Not Walkable never reaches the triangulation, Godot writes 0) and
+  `FPNavMeshBuildPipeline.Build` refuses a bake that carries it.
+- **No ORCA obstacle is emitted for it.** The obstacle extractor seeds rings from edges with no
+  walkable neighbour, and a retained footprint has walkable triangles on both sides of every edge,
+  so local avoidance does not know the building is there.
+- **Changing your own belief invalidates nothing on its own — but there is now a call for it.** A
+  placement changes the mesh, so the swap and `ReseedAgents` drop stale corridors for you. Deciding
+  later that a retained building should block someone changes no geometry, so no swap happens.
+  `NavAgentComponent.SetAreaMask(ref nav, planMask, walkMask)` is the call: it assigns the masks and
+  drops the corridor the old ones planned, **including the repath cooldown**, so the agent replans on
+  the next tick. Reaching for `SetDestination` instead leaves `LastRepathTick` alone and the agent
+  can sit for up to `PathRepathCooldown` ticks first.
+
+  **A building dropped on top of a unit is the other direction, and it no longer traps it.** A unit
+  standing inside a retained footprint can route and walk out under its own mask: the start triangle
+  is exempt and the escape rule lets both the path and the walk cross forbidden ground *outward*.
+  Entry from ordinary ground is unchanged. `FPNavMeshPathfinder.DebugMaskedStartCount` is the only
+  trace that it happened, so read that if the game wants to react (a rescue, a refund, a warning).
+
+Why it exists: a game that models knowledge — fog of war, ghost or memory mechanics, AI planning on
+stale information — needs a route to be *computable* through a building the planner is not supposed
+to know about. A hole cannot be planned through at all; retained ground can, and the layer above
+decides who believes what.
+
+**The agent layer expresses that split directly.** An agent carries two masks — `PlanAreaMaskOverride`
+for what it may route through, `WalkAreaMaskOverride` for what it may enter — so *plan permissively,
+walk restrictively* is one call rather than a game-side scheme. The unit then walks into the building
+it was not told about and stops there, reporting `FPNavAgentStatus.Blocked`; widening its mask later
+releases it. Zero on either field means "no override" and resolves to `DEFAULT_AREA_MASK`, so this
+changed nothing for an agent that names no mask. The four pairs and what each produces are tabulated
+in [Navigation.md § The area filter](Navigation.md#the-area-filter).
+
+**Seeing it without writing a game.** Both editors' NavMesh visualizers can do the whole loop: place
+a retained building, spawn an agent, hand it `plan = all areas` + `walk = agent default`, and set its
+destination **inside the footprint**. The destination has to be inside — with both endpoints outside,
+A\* routes around a small footprint whichever mask it was given (the corridor cost is a portal-midpoint
+polyline), so the agent arrives normally and the run proves nothing. Applying a wider walk mask to the
+stopped agent is the other half: it replans and walks in.
+
+**Two limits.**
+
+- **Under `FPBoundaryPlacementPolicy.ClipOverlap`, the building's clip transitions decide.** A
+  transition-free footprint is admitted and retained exactly as under `Touch` (the identity path
+  emits it verbatim). A footprint that crosses the walkable boundary is refused with
+  `FPBuildingRejection.TouchesWalkableBoundary` — a rejection value, because the player caused it
+  and is meant to see it — where a carve of the same footprint would have been clipped: the clip
+  stage rewrites a crossing footprint into lattice-conforming rings, and a retained ring has no
+  defined way to close against them, so retain has no clip to fall back on. Both ghost-only preview
+  forms (`TryValidateOnePlacement`) report the same verdict and reason as the real placement.
+
+  **Where this surprises people: the transitions are counted on the *expanded* ring** (see
+  [4.5](#45-what-gets-rejected)). A retained building drawn comfortably clear of a wall — by less
+  than the agent radius — already crosses, so it is refused while a carve dropped on the very same
+  spot succeeds by being clipped. If you want to know how far in "in" is, place the same footprint as
+  a carve and look at the hole: cut off at the wall means there were transitions. Building against a
+  wall and keeping its ground is not available in v1; carve the ones that touch and retain the
+  interior ones — the flag is per placement precisely so a game can mix them.
+- **Acceptance is otherwise unchanged.** Retain does not widen what the rebaker accepts: under
+  `Reject` and `Touch` a footprint that crosses the walkable boundary is still refused exactly as a
+  carve is. That is not conservatism — a retained ring only survives because the placement rules
+  keep the footprint inside the walkable region, and a crossing constraint is a triangulation error
+  rather than a policy question.
+
+> Retain is a **determinism input**, like the placement centre. It changes the geometry, so it must
+> be a pure function of frame state and agree on every peer. A mode read from local config or a UI
+> toggle diverges the navmesh while the state hash still matches.
 
 ## 5. Lifecycle and threading
 
@@ -1042,7 +1151,7 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | **Convex footprints** | Each footprint must be convex. An L-shape is expressible as touching convex pieces, but they are separate placements. |
 | **No crossing constraints** | Two building edges may not cross transversally; overlap is rejected before it can happen. |
 | **Shape size ceiling** | Around a kilometre of extent, the miter arithmetic runs out of Int64 and refuses by name. Real footprints are a few metres. |
-| **Uniform area/cost only** | A base with non-uniform `areaMask`/`costMultiplier` loses per-triangle values on re-triangulation; the rebaked mesh keeps pipeline defaults and logs an error. |
+| **Uniform area/cost only** | A base with non-uniform `areaMask`/`costMultiplier` loses per-triangle values on re-triangulation; the rebaked mesh keeps pipeline defaults and logs an error. The one exception is the rebaker's own stamp: retained footprints get `FPNavMeshAreas.BUILDING_MASK` after the inherit, on the full and the patch path alike (§4.7). |
 | **A rebake is not per-tick** | It is a discrete event; do not call it every frame. The driver's own per-tick work is separate and cheap — one pass over your placement table plus an integer compare, and zero allocation. |
 | **A preview cannot report `EmptyWalkableRegion`** | *Nothing walkable was left* is only discovered while the ground is being cut. Unreachable under the default policy; under `Touch`/`ClipOverlap` a footprint that covers the whole region shows green and is then refused ([4.6](#46-showing-the-player-before-they-click)). |
 | **`ClipOverlap`: the preview's time grows with the building count** | Flat under the other policies. Under `ClipOverlap` answering means building the clip rings, so it goes 0.231 ms → 0.622 ms between 4 and 32 buildings ([8](#the-per-frame-preview)). Allocation does not grow — no preview allocates in steady state. |
@@ -1076,6 +1185,7 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 | `context.DiscardProduced()` | Forget the last output instead of installing it. `TryPreviewPlacements` does this for you |
 | `context.ShapeExpansion` | The stage's expanded shape table |
 | `context.PatchOutcome` | Running tally of how often this context patched instead of rebuilt |
+| `FPNavMeshPlacementProbe` | **Tooling.** A base mesh plus an editable, ordered placement list, rebaked from the base on demand — see [11](#an-editable-placement-list-for-tooling) |
 
 **Use the context form.** `Rebake` / `RebakePlacements` also accept a snapshot or a bare `FPNavMesh`
 instead of a context. Those exist for tests and one-off tooling and are much slower — they skip the
@@ -1349,6 +1459,64 @@ ever report it. You would just have the wrong map.
 ```csharp
 FPNavMesh mesh = FPNavMeshRebaker.Rebake(rebake, _rectScratch, logger, rules, buildingCount: count);
 ```
+
+### An editable placement list for tooling
+
+A tool wants something the rebaker deliberately does not have: a list you can add to, remove from and
+throw away, with a base to return to. `FPNavMeshPlacementProbe` is that bookkeeping — a base mesh, an
+ordered list of `FPBuildingPlacement`, and a rebake from the base on demand. It is what both NavMesh
+visualizers drive when you place buildings in the editor.
+
+```csharp
+var probe = new FPNavMeshPlacementProbe(baseMesh, shapeCatalog, logger)
+{
+    Rules = new FPBuildingPlacementRules(allowBuildingTouch: true),
+    SnapToTilingLattice = true,   // centres land where footprints pack flush
+};
+
+// A refusal is a value, not an exception: pointing at ground you cannot build on is normal use,
+// and a refused placement is not added to the list.
+if (!probe.TryPlace(shapeId, orientation, cx, cz, y, retain: true,
+                    out FPNavMesh mesh, out FPBuildingRejectionInfo rejection))
+    ShowThePlayer(rejection.Reason);
+
+probe.TryRemoveAt(probe.Count - 1, out mesh, out rejection);   // undo the last one
+FPNavMesh baseAgain = probe.Revert();                          // back to the base mesh instance
+```
+
+Every call that changes the list hands back the mesh it now bakes to, so the caller installs one
+mesh per edit and never has to ask what the current one is. `Revert` returns the **same** base
+instance it was constructed with, not a zero-placement rebake.
+
+It lives in the **runtime**, not in editor code, for two reasons that are worth repeating if you are
+tempted to copy it into a tool: an editor assembly cannot be reached by the test suites, and the
+Godot adapters compile as source into the consuming project, where nothing in this package can reach
+an `internal` type. A game does not need it — it builds placements from frame state and drives
+`FPNavMeshRebakeDriver`.
+
+### Running the triangulation yourself
+
+`FPConstrainedDelaunay.BuildSnapshot` and `TriangulateFromSnapshot` are public, with `CdtSnapshot` as
+an opaque handle: build a base snapshot from your own vertices and constraint edges **once**, then
+resume it per set of holes. The expensive half is the build, and it is shared across resumes. The
+triangle indices go into `FPNavMeshBuildPipeline.BuildFromConformingTriangulation`, which takes a
+`previous` mesh — so a caller-authored pipeline keeps the incremental patch path. What it does not
+get is **slicing**: this entry point runs to completion.
+
+Three rules come with it.
+
+- **A resume does not weld duplicate coordinates**, the way `Triangulate` does. Your constraint
+  indices are positional, so welding would renumber your pairs. A hole that duplicates a base vertex
+  or an earlier hole throws `InvalidOperationException` naming the coordinate — in release builds
+  too, not only under `DEBUG`.
+- **The same constraint segment inserted twice stays geometrically present but parity-neutral.**
+  Marking a constraint ORs the wall bit and *toggles* the parity bit, so an even count keeps the wall
+  and contributes nothing to the erase pass. That is how a seam blocks movement without carving the
+  region beside it — and it is exactly how retain mode works ([4.7](#47-retaining-a-footprint-instead-of-carving-it)):
+  the footprint ring is emitted twice.
+- **An odd-multiplicity OPEN chain is undefined**, and a constraint pair whose two endpoints weld to
+  the same vertex is dropped entirely rather than becoming a parity-neutral wall. Welding happens
+  before constraint insertion, so coincident input coordinates reach this.
 
 ### If you rebake without a context
 

@@ -74,6 +74,17 @@ namespace xpTURN.Klotho.Unity.Physics
         [System.NonSerialized] public FPContact[] currentSContacts      = null;
         [System.NonSerialized] public int         currentSContactCount  = 0;
 
+        // copied-vs-total accounting for the three caches above (the inspector draws copied/total
+        // from this). Deliberately declared with the other cache fields, OUTSIDE the #if below:
+        // the editor reads it unconditionally.
+        [System.NonSerialized] public FPContactSnapshotStats currentStats = default;
+
+        // Truncation warning latch. The counters are compared against their previous values rather
+        // than the copied/total pair, because this runs once per frame while the snapshot is
+        // overwritten every tick — a tick that is not the last of a frame would otherwise slip past.
+        bool _warnedSnapshotTruncated;
+        int _lastSeenContactTrunc, _lastSeenStaticTrunc, _lastSeenTriggerTrunc;
+
         bool[] _collidingMark;
         bool[] _triggerMark;
         bool[] _triggerStaticMark;
@@ -134,6 +145,8 @@ namespace xpTURN.Klotho.Unity.Physics
             Provider.GetContacts(out var contacts, out int cCount,
                                   out var sContacts, out int scCount);
             Provider.GetTriggerPairs(out var triggerPairs, out int tCount);
+            currentStats = Provider.GetSnapshotStats();
+            WarnOnceIfSnapshotTruncated();
 
             // 0. Refresh cache
             bodyCount             = bc;
@@ -258,6 +271,34 @@ namespace xpTURN.Klotho.Unity.Physics
             if (body.rigidBody.isStatic)    return staticBodyShapeColor;
             if (body.rigidBody.isKinematic) return kinematicShapeColor;
             return dynamicShapeColor;
+        }
+
+        // ---- Truncation warning ----
+
+        void WarnOnceIfSnapshotTruncated()
+        {
+            bool grew = currentStats.ContactTruncatedCount       != _lastSeenContactTrunc
+                     || currentStats.StaticContactTruncatedCount != _lastSeenStaticTrunc
+                     || currentStats.TriggerTruncatedCount       != _lastSeenTriggerTrunc;
+
+            _lastSeenContactTrunc = currentStats.ContactTruncatedCount;
+            _lastSeenStaticTrunc  = currentStats.StaticContactTruncatedCount;
+            _lastSeenTriggerTrunc = currentStats.TriggerTruncatedCount;
+
+            if (!grew || _warnedSnapshotTruncated) return;
+            _warnedSnapshotTruncated = true;
+
+            // once per instance: at high body counts this would otherwise fire every frame. The
+            // live numbers are the inspector's job. "not copied", not "collisions" — the totals
+            // include speculative (CCD) contacts, which are never highlighted.
+            Debug.LogWarning(
+                $"[FPPhysicsWorldVisualizer] contact/trigger snapshot truncated — the overlay and the "
+                + $"inspector's per-body list are showing less than the simulation holds. "
+                + $"Contacts {currentStats.ContactCopied}/{currentStats.ContactTotal}, "
+                + $"Static {currentStats.StaticContactCopied}/{currentStats.StaticContactTotal}, "
+                + $"Triggers {currentStats.TriggerCopied}/{currentStats.TriggerTotal}. "
+                + $"Truncating copies so far: {currentStats.ContactTruncatedCount}/"
+                + $"{currentStats.StaticContactTruncatedCount}/{currentStats.TriggerTruncatedCount}.");
         }
 
         // ---- Collision marking ----

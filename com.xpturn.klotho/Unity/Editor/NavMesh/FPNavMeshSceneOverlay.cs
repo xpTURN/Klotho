@@ -148,6 +148,12 @@ namespace xpTURN.Klotho.Editor
                     Handles.color = FPNavMeshVisualizerStyles.TriangleFillBlocked;
                 else if (tri.isBlocked)
                     continue;
+                // Equality, not a bit test: the rebaker stamps a retained footprint EXCLUSIVELY
+                // (see FPNavMeshAreas), so a triangle carrying the bit alongside a baked area is
+                // not something this build produces — and shading it as a building would be a
+                // guess. isBlocked still wins: it is the stronger claim and owns the skip above.
+                else if (tri.areaMask == FPNavMeshAreas.BUILDING_MASK)
+                    Handles.color = FPNavMeshVisualizerStyles.TriangleFillBuilding;
                 else
                     Handles.color = FPNavMeshVisualizerStyles.TriangleFill;
 
@@ -663,7 +669,12 @@ namespace xpTURN.Klotho.Editor
             FPVector3 start = snap.Position;
             FPVector3 end = snap.Destination;
 
-            if (!_runtimePathfinder.FindPath(start, end, ~0, out int[] corridor, out int corridorLength))
+            // The AGENT's mask, not ~0. This reconstructs the route a live agent would take, and
+            // the two stopped being the same value: ~0 admits a retained building footprint while
+            // the agent's mask refuses it, so ~0 here would draw a path through a building the
+            // agent will never enter — a wrong answer wearing the agent's label.
+            if (!_runtimePathfinder.FindPath(start, end, FPNavAgentSystem.DEFAULT_AREA_MASK,
+                    out int[] corridor, out int corridorLength))
             {
                 // No path found — fallback to straight line
                 Handles.color = new Color(

@@ -134,9 +134,14 @@ namespace xpTURN.Klotho.Godot
                 {
                     ref TriangleRenderData tri = ref _data.CachedTriangles[i];
                     if (tri.isBlocked && !ShowBlockedTriangles) continue;
+                    // Equality, not a bit test — the rebaker stamps a retained footprint
+                    // EXCLUSIVELY (see FPNavMeshAreas); isBlocked still wins, being the stronger
+                    // claim. Mirrors FPNavMeshSceneOverlay.DrawTriangles.
                     Color c = tri.isBlocked
                         ? GodotFPNavMeshVisualizerStyles.TriangleFillBlocked
-                        : GodotFPNavMeshVisualizerStyles.TriangleFill;
+                        : tri.areaMask == FPNavMeshAreas.BUILDING_MASK
+                            ? GodotFPNavMeshVisualizerStyles.TriangleFillBuilding
+                            : GodotFPNavMeshVisualizerStyles.TriangleFill;
                     AddTri(fill, c, tri.v0, tri.v1, tri.v2);
                 }
             }

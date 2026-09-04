@@ -30,6 +30,69 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         public const int MAX_CORRIDOR = 128;
         public const int MAX_ITERATIONS = 4096;
 
+        // Diagnostic counters. Deliberately never reset: they are totals, and a caller that wants
+        // a delta takes two readings. What "lifetime" means across a navmesh swap depends on which
+        // overload the swap went through, and the two differ — SwapNavMesh(mesh) rebinds THIS
+        // instance (Rebind resizes buffers and leaves these alone), so the totals carry across a
+        // runtime rebake, which is the path FPNavAgentInstaller takes and what you want in a match
+        // that rebakes repeatedly. The four-argument overload installs a caller-built pathfinder,
+        // so the totals start again from zero there. FPNavAgentSystem's own counter survives both,
+        // being on the system rather than here.
+        private int _corridorTruncatedCount;
+        private int _iterationExhaustedCount;
+        private int _blockedEndpointCount;
+        private int _areaMaskRejectedCount;
+        private int _maskedStartCount;
+
+        /// <summary>
+        /// Diagnostic: paths whose triangle chain was longer than <see cref="MAX_CORRIDOR"/> and
+        /// therefore returned truncated (the end-side triangles are dropped, so the agent runs off
+        /// the corridor end and repaths). Accumulated over this instance's lifetime, never reset;
+        /// outside the state hash.
+        /// </summary>
+        public int DebugCorridorTruncatedCount => _corridorTruncatedCount;
+
+        /// <summary>
+        /// Diagnostic: <c>FindPath</c> calls that failed with search work still queued — i.e. the
+        /// <see cref="MAX_ITERATIONS"/> budget ran out rather than the graph being exhausted. This
+        /// is the half of the silent <c>false</c> that means "ask again with a shorter path", as
+        /// opposed to "there is genuinely no route". Accumulated over this instance's lifetime.
+        /// </summary>
+        public int DebugIterationExhaustedCount => _iterationExhaustedCount;
+
+        /// <summary>
+        /// Diagnostic: calls rejected because the start or end triangle is flagged
+        /// <c>isBlocked</c>. This is the one silent failure a game produces on purpose — nothing in
+        /// the engine sets that flag, and the rebaker carves geometry away rather than blocking it,
+        /// so a non-zero count means someone closed a triangle through
+        /// <c>FPNavMesh.TrianglesMutable</c> (a gate, a door) and units are now being ordered
+        /// through it. The search never starts, so this is not a budget problem.
+        /// </summary>
+        public int DebugBlockedEndpointCount => _blockedEndpointCount;
+
+        /// <summary>
+        /// Diagnostic: calls rejected because the requested <c>areaMask</c> shares no bit with the
+        /// <b>end</b> triangle — a destination on ground the mask forbids.
+        ///
+        /// <para>The START is not counted here and no longer refuses the call at all; it is exempt,
+        /// and <see cref="DebugMaskedStartCount"/> reports it instead. Before that exemption this
+        /// counter conflated the two, and the start case is the one a game is likely to care about
+        /// (a unit standing on ground it may not use), so they are split.</para>
+        /// </summary>
+        public int DebugAreaMaskRejectedCount => _areaMaskRejectedCount;
+
+        /// <summary>
+        /// Diagnostic: searches that STARTED on ground the requested <c>areaMask</c> forbids.
+        ///
+        /// <para>Not a failure — the search runs, and the escape rule lets it leave the forbidden
+        /// region it began in. It is here because the alternative is silence: the agent gets an
+        /// ordinary route out and nothing in the result says it was ever stuck inside a building.
+        /// A game that wants to notice that (to play a rescue, to refund, to warn) has this and
+        /// nothing else. Same conventions as the other counters — outside the state hash, the wire
+        /// and replay, never reset, and a resimulated tick counts again.</para>
+        /// </summary>
+        public int DebugMaskedStartCount => _maskedStartCount;
+
         public FPNavMeshPathfinder(FPNavMesh navMesh, FPNavMeshQuery query, IKLogger logger)
         {
             _navMesh = navMesh;
@@ -114,12 +177,31 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 return false;
             }
 
+            // The two rejections below happen before the search starts, so counting them costs
+            // nothing on the hot path — and without the counters they are indistinguishable from
+            // "no route exists", which is the failure they most look like from the outside.
             if (_navMesh.Triangles[startTri].isBlocked || _navMesh.Triangles[endTri].isBlocked)
+            {
+                _blockedEndpointCount++;
                 return false;
+            }
 
-            if ((areaMask & _navMesh.Triangles[startTri].areaMask) == 0 ||
-                (areaMask & _navMesh.Triangles[endTri].areaMask) == 0)
+            // The END is still refused: a destination on ground the mask forbids has no answer,
+            // and that is the half of the filter callers rely on.
+            if ((areaMask & _navMesh.Triangles[endTri].areaMask) == 0)
+            {
+                _areaMaskRejectedCount++;
                 return false;
+            }
+
+            // The START is exempt, matching the walk, which never gates the triangle an agent is
+            // already standing on. Refusing it produced a unit that could not be given a route out
+            // of ground it had been placed on — a building dropped on top of it, most concretely —
+            // and since the agent system only walks along a corridor, no corridor meant no
+            // movement at all. Counted separately so the situation stays observable: the endpoint
+            // counter above would otherwise fall silent on the one case a game most wants to see.
+            if ((areaMask & _navMesh.Triangles[startTri].areaMask) == 0)
+                _maskedStartCount++;
 
             // Same triangle
             if (startTri == endTri)
@@ -164,7 +246,21 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                         continue;
                     if (_navMesh.Triangles[neighbor].isBlocked)
                         continue;
-                    if ((areaMask & _navMesh.Triangles[neighbor].areaMask) == 0)
+                    // The escape rule, identical to the walk's (FPNavMeshQuery.MoveAlongSurface):
+                    // a neighbour the mask refuses is still expandable when the node we expand FROM
+                    // is refused too, so a path can leave forbidden ground but never enter it.
+                    //
+                    // Admissibility therefore depends on the parent, which normally breaks a closed
+                    // set — the same node would be reachable through one parent and not another.
+                    // It does not break here, and the reason is worth keeping: the rule forbids
+                    // accepted -> refused, so a refused node is only ever reached from a refused
+                    // parent, chaining back to the start. The refused nodes in the search are
+                    // exactly the start's own connected refused component, and every accepted
+                    // node's admissibility is parent-independent as before. No (node, inside) state
+                    // pairing is needed. Observed by
+                    // FPNavMaskedStartEscapeTests.E7_TheEscapeIsConfinedToTheRegionYouStandIn.
+                    if ((areaMask & _navMesh.Triangles[neighbor].areaMask) == 0
+                        && (areaMask & _navMesh.Triangles[current].areaMask) != 0)
                         continue;
 
                     TouchNode(neighbor);
@@ -198,6 +294,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     }
                 }
             }
+
+            // Budget exhaustion vs a genuinely exhausted graph. The discriminator is the OPEN SET,
+            // not the iteration count: a search whose last pop empties the set on exactly the
+            // MAX_ITERATIONS-th iteration completed its work and found nothing, and counting that
+            // as a truncation would report a budget problem that does not exist.
+            if (_openSet.Count > 0)
+                _iterationExhaustedCount++;
 
             return false;
         }
@@ -251,6 +354,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             }
 
             int skip = totalLength > MAX_CORRIDOR ? totalLength - MAX_CORRIDOR : 0;
+            if (skip > 0)
+                _corridorTruncatedCount++;
 
             int count = 0;
             int index = 0;

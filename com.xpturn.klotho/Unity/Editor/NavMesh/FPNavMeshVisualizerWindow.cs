@@ -39,8 +39,47 @@ namespace xpTURN.Klotho.Editor
         private bool _foldoutAgents = true;
         private bool _foldoutGrid;
         private bool _foldoutInfo;
+        private bool _foldoutBuildings = true;
         private string _spawnStartText = "0.0, 0.0, 0.0";
         private string _spawnDestText = "1.0, 0.0, 1.0";
+
+        // Placement tool state. All of it is INPUT: the geometry lives in the data layer's probe.
+        private bool _placeRetain = true;
+        private int _placeShapeIndex;                  // 0 = box, 1 = hexagon
+        private int _placeOrientation;
+        private FPBoundaryPlacementPolicy _placePolicy = FPBoundaryPlacementPolicy.Touch;
+        private bool _placeAllowTouch = true;
+        private string _placeStatus;
+
+        // Which mask the Find Path button uses. It used to be hardcoded ~0, which was the same
+        // thing as the agents' mask until a retained footprint could exist; now the two disagree,
+        // and being able to flip between them on one mesh is the point of the tool.
+        private enum PathMask { AgentDefault, AllAreas }
+        private PathMask _pathMask = PathMask.AgentDefault;
+
+        private int ResolvePathMask() =>
+            _pathMask == PathMask.AllAreas
+                ? FPNavMeshAreas.ALL_AREAS
+                : FPNavAgentSystem.DEFAULT_AREA_MASK;
+
+        // The masks handed to the SELECTED agent, and the same two-value vocabulary as above. An
+        // agent carries two: the plan mask decides what it may route through, the walk mask what it
+        // may enter. The combination worth reaching for is Plan = AllAreas with Walk = AgentDefault
+        // — the path is drawn straight through a retained building and the agent walks into it and
+        // stops, reporting Blocked in the list below. Applied per agent rather than globally so two
+        // agents can differ on one mesh and split on the same tick.
+        private PathMask _agentPlanMask = PathMask.AgentDefault;
+        private PathMask _agentWalkMask = PathMask.AgentDefault;
+
+        private static int ResolveAgentMask(PathMask m) =>
+            m == PathMask.AllAreas ? FPNavMeshAreas.ALL_AREAS : FPNavAgentSystem.DEFAULT_AREA_MASK;
+
+        /// <summary>Short label for an agent's stored override — 0 is "no override".</summary>
+        private static string MaskLabel(int mask) =>
+            mask == 0 ? "dflt"
+            : mask == FPNavMeshAreas.ALL_AREAS ? "all"
+            : mask == FPNavAgentSystem.DEFAULT_AREA_MASK ? "dflt"
+            : $"0x{mask:X}";
 
         private void OnEnable()
         {
@@ -59,6 +98,11 @@ namespace xpTURN.Klotho.Editor
             _interaction.OnTriangleSelected += OnTriangleSelected;
             _interaction.OnAgentPlaced += OnAgentPlaced;
             _interaction.OnAgentDestinationSet += OnAgentDestinationSet;
+            _interaction.OnBuildingPlaced += OnBuildingPlaced;
+
+            // The simulation half of adopting a rebake. Set here so the data layer's
+            // InstallRebakedMesh is the only way to install one and cannot be done halfway.
+            _data.AgentSwap = mesh => _agentSim.SwapNavMesh(mesh);
 
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             SceneView.duringSceneGui += OnSceneGUI;
@@ -75,6 +119,8 @@ namespace xpTURN.Klotho.Editor
             _interaction.OnTriangleSelected -= OnTriangleSelected;
             _interaction.OnAgentPlaced -= OnAgentPlaced;
             _interaction.OnAgentDestinationSet -= OnAgentDestinationSet;
+            _interaction.OnBuildingPlaced -= OnBuildingPlaced;
+            _data.AgentSwap = null;
 
             EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
             SceneView.duringSceneGui -= OnSceneGUI;
@@ -192,6 +238,7 @@ namespace xpTURN.Klotho.Editor
             {
                 DrawNavMeshSection();
                 DrawLayerToggles();
+                DrawBuildingSection();
                 DrawPathSection();
                 DrawAgentSection();
                 DrawGridSection();
@@ -390,6 +437,203 @@ namespace xpTURN.Klotho.Editor
 
         #endregion
 
+        #region Buildings (placement probe)
+
+        /// <summary>
+        /// Area masks for the selected agent. Two dropdowns rather than one, because an agent
+        /// carries two and the interesting setting is the pair where they disagree.
+        ///
+        /// <para>Applying goes through <c>SetAgentAreaMask</c> → <c>NavAgentComponent.SetAreaMask</c>,
+        /// which drops the corridor the old masks planned — so applying to a walking agent makes it
+        /// replan on the next tick rather than keep following a route its new mask refuses.</para>
+        /// </summary>
+        private void DrawAgentAreaMaskControls()
+        {
+            int sel = _interaction.SelectedAgentIndex;
+            bool has = sel >= 0 && sel < _agentSim.AgentCount;
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField(
+                has ? $"Area masks for #{sel}" : "Area masks (select an agent)");
+
+            // GUILayout.Label, not EditorGUILayout.LabelField: this section runs one indent level
+            // in, and LabelField takes that indent out of the width it is given — a 4-letter label
+            // in 28px keeps 13px and clips. GUILayout.Label ignores indentLevel, which is why the
+            // "Sim Speed" row above already uses it.
+            EditorGUILayout.BeginHorizontal();
+            using (new EditorGUI.DisabledScope(!has))
+            {
+                GUILayout.Label("plan", GUILayout.Width(34));
+                _agentPlanMask = (PathMask)EditorGUILayout.EnumPopup(
+                    _agentPlanMask, GUILayout.Width(115));
+                GUILayout.Label("walk", GUILayout.Width(36));
+                _agentWalkMask = (PathMask)EditorGUILayout.EnumPopup(
+                    _agentWalkMask, GUILayout.Width(115));
+
+                if (GUILayout.Button("Apply", GUILayout.Width(50)))
+                {
+                    _agentSim.SetAgentAreaMask(sel,
+                        ResolveAgentMask(_agentPlanMask), ResolveAgentMask(_agentWalkMask));
+                    SceneView.RepaintAll();
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (_agentPlanMask == PathMask.AllAreas && _agentWalkMask == PathMask.AgentDefault)
+                EditorGUILayout.LabelField(
+                    "   plans through buildings, cannot enter them → walks in and reports Blocked",
+                    EditorStyles.miniLabel);
+        }
+
+        /// <summary>
+        /// Place Carve/Retain buildings on the loaded mesh and rebake. The geometry work lives in
+        /// the data layer's probe; everything here is input.
+        ///
+        /// <para>Edit mode only. In play mode the game owns the placements and the bridge follows
+        /// its mesh — a list here would be a second, competing account of what is built.</para>
+        /// </summary>
+        private void DrawBuildingSection()
+        {
+            _foldoutBuildings = EditorGUILayout.Foldout(_foldoutBuildings, "Buildings", true);
+            if (!_foldoutBuildings || !_data.IsLoaded) return;
+
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.HelpBox(
+                "These shapes belong to the TOOL, not to any game: a 2x1 box and a hexagon. "
+                + "Acceptance here says nothing about a game whose shape catalog differs.",
+                MessageType.None);
+
+            EditorGUILayout.BeginHorizontal();
+            DrawModeButton("Place Building", InteractionMode.PlaceBuilding);
+            _placeRetain = EditorGUILayout.ToggleLeft(
+                "Retain (keep ground)", _placeRetain, GUILayout.Width(160));
+            EditorGUILayout.EndHorizontal();
+
+            // Flush packing needs the centre on the shape's tiling lattice, and those spacings are
+            // not round numbers — a 2x1 box at radius 0.5 meets its neighbour at 2.003906, so a
+            // free-hand click leaves about four millimetres of walkable ground between footprints
+            // and the engine cannot tell that from a door. Off is for looking at a near-miss.
+            _data.SnapPlacementToLattice = EditorGUILayout.ToggleLeft(
+                "Snap to tiling lattice (flush)", _data.SnapPlacementToLattice);
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Shape", GUILayout.Width(70));
+            _placeShapeIndex = EditorGUILayout.Popup(
+                _placeShapeIndex, new[] { "Box", "Hexagon" }, GUILayout.Width(120));
+            if (_placeShapeIndex == 0)
+            {
+                EditorGUILayout.LabelField("Turn", GUILayout.Width(40));
+                _placeOrientation = EditorGUILayout.IntSlider(
+                    _placeOrientation, 0, FPNavMeshPlacementProbe.ToolBoxDirections - 1);
+            }
+            else
+            {
+                // A hexagon has no orientation in the catalog: no integer hexagon is symmetric
+                // under 60 degrees, so the turns a slider would offer do not exist.
+                EditorGUILayout.LabelField("(no turns)");
+            }
+            EditorGUILayout.EndHorizontal();
+
+            // Placement rules. Touch is the default rather than a game's ClipOverlap because under
+            // ClipOverlap a RETAINED footprint that crosses the walkable boundary is refused (a
+            // carve would be clipped instead) — worth seeing on purpose, not by default.
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Boundary", GUILayout.Width(70));
+            var policy = (FPBoundaryPlacementPolicy)EditorGUILayout.EnumPopup(
+                _placePolicy, GUILayout.Width(120));
+            bool allowTouch = EditorGUILayout.ToggleLeft(
+                "Allow contact", _placeAllowTouch, GUILayout.Width(120));
+            EditorGUILayout.EndHorizontal();
+            if (policy != _placePolicy || allowTouch != _placeAllowTouch)
+            {
+                _placePolicy = policy;
+                _placeAllowTouch = allowTouch;
+                _data.PlacementRules = new FPBuildingPlacementRules(_placeAllowTouch, _placePolicy);
+                if (_data.PlacementCount > 0
+                    && !_data.TryRebakeBuildings(out FPBuildingRejectionInfo ruleRejection))
+                {
+                    _placeStatus = $"Rules refused the current set: {ruleRejection.Reason}";
+                }
+                SceneView.RepaintAll();
+            }
+
+            // The list, newest last, with the mode spelled out — retain leaves no hole, so the
+            // text is the only place the two are unambiguous without reading the overlay colour.
+            EditorGUILayout.LabelField("Placed", $"{_data.PlacementCount}");
+            int removeAt = -1;
+            for (int i = 0; i < _data.PlacementCount; i++)
+            {
+                FPBuildingPlacement p = _data.PlacementAt(i);
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField(
+                    $"#{i}  {(p.Retain ? "retain" : "carve")}  "
+                    + $"({p.CentreX.ToFloat():F2}, {p.CentreZ.ToFloat():F2})",
+                    GUILayout.Width(230));
+                if (GUILayout.Button("Remove", GUILayout.Width(70)))
+                    removeAt = i;
+                EditorGUILayout.EndHorizontal();
+            }
+            if (removeAt >= 0)
+            {
+                _data.TryRemoveBuilding(removeAt);
+                _placeStatus = null;
+                SceneView.RepaintAll();
+            }
+
+            if (GUILayout.Button("Revert to loaded mesh", GUILayout.Width(180)))
+            {
+                _data.RevertBuildings();
+                _placeStatus = null;
+                SceneView.RepaintAll();
+            }
+
+            if (!string.IsNullOrEmpty(_placeStatus))
+                EditorGUILayout.HelpBox(_placeStatus, MessageType.Warning);
+
+            EditorGUI.indentLevel--;
+            EditorGUILayout.Space(4);
+        }
+
+        /// <summary>
+        /// Shift+Click in Place Building mode. A refusal is a VALUE shown as text — pointing
+        /// somewhere you cannot build is normal use, not an error.
+        /// </summary>
+        private void OnBuildingPlaced(Vector3 point)
+        {
+            // Pausing first: the simulator steps on a timer, and the engine's contract is that a
+            // swap happens at a tick boundary. A swap landing between two steps of the same tick
+            // is undefined rather than merely untidy.
+            bool wasRunning = _agentSim.IsRunning;
+            if (wasRunning)
+                _agentSim.Pause();
+
+            int shapeId = _placeShapeIndex == 0
+                ? FPNavMeshPlacementProbe.ToolBoxShape
+                : FPNavMeshPlacementProbe.ToolHexShape;
+            int orientation = _placeShapeIndex == 0 ? _placeOrientation : 0;
+
+            if (_data.TryPlaceBuilding(point, shapeId, orientation, _placeRetain,
+                    out FPBuildingRejectionInfo rejection))
+            {
+                _placeStatus = null;
+                if (!_overlay.ShowTriangles)
+                    _placeStatus = "Placed. Turn the Triangles layer on to see it.";
+            }
+            else
+            {
+                _placeStatus = $"Refused: {rejection.Reason}";
+            }
+
+            if (wasRunning)
+                _agentSim.Start();
+
+            Repaint();
+            SceneView.RepaintAll();
+        }
+
+        #endregion
+
         #region Pathfinding
 
         private void DrawPathSection()
@@ -408,6 +652,15 @@ namespace xpTURN.Klotho.Editor
 
             EditorGUILayout.LabelField("Mode", GetModeLabel(_interaction.Mode));
             EditorGUILayout.HelpBox("Shift + Click to set position.", MessageType.Info);
+
+            // The area filter. Agent default excludes the building area, so a retained footprint is
+            // a wall to it; All areas plans straight through one. Same mesh, opposite answers.
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Area mask", GUILayout.Width(70));
+            _pathMask = (PathMask)EditorGUILayout.EnumPopup(_pathMask, GUILayout.Width(120));
+            EditorGUILayout.LabelField(
+                _pathMask == PathMask.AllAreas ? "~0 (through buildings)" : "~BUILDING_MASK (agents)");
+            EditorGUILayout.EndHorizontal();
 
             // Start/end point display
             EditorGUILayout.BeginHorizontal();
@@ -437,9 +690,13 @@ namespace xpTURN.Klotho.Editor
             GUI.enabled = _data.HasStart && _data.HasEnd;
             if (GUILayout.Button("Find Path"))
             {
-                bool found = _data.FindPath(_data.StartPoint, _data.EndPoint);
+                bool found = _data.FindPath(_data.StartPoint, _data.EndPoint, ResolvePathMask());
                 if (!found)
-                    Debug.LogWarning("[FPNavMeshVisualizer] Path not found.");
+                    Debug.LogWarning(
+                        "[FPNavMeshVisualizer] Path not found"
+                        + (_pathMask == PathMask.AgentDefault
+                            ? " — an endpoint inside a retained building footprint is refused by the agent mask."
+                            : "."));
                 SceneView.RepaintAll();
             }
             GUI.enabled = true;
@@ -542,7 +799,12 @@ namespace xpTURN.Klotho.Editor
                     if (!rd.hasDestination) extra = " [No Dest]";
                     else if (!rd.hasPath) extra = " [No Path]";
                     else if (rd.currentTriangleIndex < 0) extra = " [Off Mesh]";
-                    EditorGUILayout.LabelField($"#{i}: {status}{extra} {pos}");
+                    // The masks are shown because a mixed scene is otherwise unreadable — two
+                    // agents at the same spot with the same status look identical, and which of
+                    // them may enter the building is the whole question.
+                    string masks = $" [{MaskLabel(rd.planAreaMask)}/{MaskLabel(rd.walkAreaMask)}]";
+                    string sel = _interaction.SelectedAgentIndex == i ? "▸" : " ";
+                    EditorGUILayout.LabelField($"{sel}#{i}: {status}{extra}{masks} {pos}");
 
                     if (GUILayout.Button("Select", GUILayout.Width(40)))
                     {
@@ -557,6 +819,8 @@ namespace xpTURN.Klotho.Editor
                     }
                     EditorGUILayout.EndHorizontal();
                 }
+
+                DrawAgentAreaMaskControls();
             }
 
             EditorGUILayout.BeginHorizontal();
@@ -708,7 +972,7 @@ namespace xpTURN.Klotho.Editor
 
             // Auto-find path when both start and end are set
             if (_data.HasStart && _data.HasEnd)
-                _data.FindPath(_data.StartPoint, _data.EndPoint);
+                _data.FindPath(_data.StartPoint, _data.EndPoint, ResolvePathMask());
 
             SceneView.RepaintAll();
             Repaint();
@@ -720,7 +984,7 @@ namespace xpTURN.Klotho.Editor
             _data.HasEnd = true;
 
             if (_data.HasStart && _data.HasEnd)
-                _data.FindPath(_data.StartPoint, _data.EndPoint);
+                _data.FindPath(_data.StartPoint, _data.EndPoint, ResolvePathMask());
 
             SceneView.RepaintAll();
             Repaint();
@@ -792,6 +1056,7 @@ namespace xpTURN.Klotho.Editor
                 case InteractionMode.InspectTriangle: return "Inspect Triangle (Shift+Click)";
                 case InteractionMode.PlaceAgent: return "Place Agent (Shift+Click)";
                 case InteractionMode.SetAgentDest: return "Set Destination (Shift+Click)";
+                case InteractionMode.PlaceBuilding: return "Place Building (Shift+Click)";
                 default: return "None";
             }
         }

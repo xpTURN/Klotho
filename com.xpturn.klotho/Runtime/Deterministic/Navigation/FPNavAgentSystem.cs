@@ -65,6 +65,22 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <summary>Diagnostic: times the BFS frontier cap truncated a query (coverage cliff).</summary>
         public int DebugBfsFrontierOverflowCount => _bfsFrontierOverflowCount;
 
+        private int _collisionResolveTruncatedCount;
+
+        /// <summary>
+        /// Diagnostic: agents dropped from the position-correction pass because the array was
+        /// longer than <see cref="MAX_AGENTS"/>, accumulated over the lifetime of this instance
+        /// (never reset — same convention as <see cref="DebugBfsFrontierOverflowCount"/>, so a
+        /// tick split across several <see cref="Update"/> calls sums instead of overwriting).
+        /// <para>
+        /// Reading it: a rollback resimulation counts the same tick again, so the total runs ahead
+        /// of the number of distinct ticks that truncated. And a non-zero count only means agents
+        /// were skipped — whether that is observable depends on the consumer model documented on
+        /// <see cref="Update"/>.
+        /// </para>
+        /// </summary>
+        public int DebugCollisionResolveTruncatedCount => _collisionResolveTruncatedCount;
+
         /// <summary>
         /// Upper bound for the position-correction pass buffers. entityCount beyond this is still
         /// moved by ProcessMovement but not collision-resolved (guarded, no overflow). Callers should
@@ -116,9 +132,38 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         public int OffCorridorRepathThreshold = 10;
 
         /// <summary>
-        /// Default areaMask value (all areas allowed).
+        /// The areaMask this system passes to a path or a walk when the agent names none: every
+        /// baked area, but not <see cref="FPNavMeshAreas.BUILDING_AREA"/> — such an agent neither
+        /// plans through nor walks into a retained building footprint. See
+        /// <see cref="FPNavMeshAreas"/>.
         /// </summary>
-        public const int DEFAULT_AREA_MASK = ~0;
+        /// <remarks>
+        /// This is the value a ZERO override resolves to, not a value forced on everyone: an agent
+        /// can name its own plan and walk masks through
+        /// <see cref="NavAgentComponent.SetAreaMask"/>, and asking for different ones on the two
+        /// sides is the point (see <see cref="ResolvePlanMask"/>). Leaving both at zero — which is
+        /// what every agent carries until something assigns them — keeps this constant in force,
+        /// so per-agent masks changed no existing behaviour.
+        /// </remarks>
+        public const int DEFAULT_AREA_MASK = FPNavMeshAreas.DEFAULT_AGENT_MASK;
+
+        /// <summary>
+        /// The mask for PLANNING this agent's path: what it may route through.
+        ///
+        /// <para>Separate from <see cref="ResolveWalkMask"/> because a game may want an agent to
+        /// plan as if a building were not there and then discover it by walking into it. That is
+        /// the asymmetry per-agent masks exist for: plan permissively, walk restrictively, and the
+        /// unit learns by contact instead of by knowing.</para>
+        /// </summary>
+        private static int ResolvePlanMask(in NavAgentComponent nav)
+            => nav.PlanAreaMaskOverride != 0 ? nav.PlanAreaMaskOverride : DEFAULT_AREA_MASK;
+
+        /// <summary>
+        /// The mask for WALKING: what this agent may actually enter. A triangle this refuses is a
+        /// wall to the walk, exactly like an unwalkable one.
+        /// </summary>
+        private static int ResolveWalkMask(in NavAgentComponent nav)
+            => nav.WalkAreaMaskOverride != 0 ? nav.WalkAreaMaskOverride : DEFAULT_AREA_MASK;
 
         public FPNavAgentSystem(FPNavMesh navMesh, FPNavMeshQuery query,
             FPNavMeshPathfinder pathfinder, FPNavMeshFunnel funnel, IKLogger logger)
@@ -280,10 +325,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// CurrentTriangleIndex from the agent position on the new mesh and invalidates the
         /// cached corridor (both live in the hashed frame state — stale values over rebuilt
         /// triangle indices would corrupt determinism and gameplay alike). Agents that still
-        /// have a destination are set to PathPending with the repath cooldown bypassed, so the
-        /// next Update repaths them deterministically. Agents whose position no longer lies on
-        /// the mesh (e.g. standing inside a carved hole — placement rules should prevent this)
-        /// fail their path and are reported.
+        /// have a destination and were moving, planning or
+        /// <see cref="FPNavAgentStatus.Blocked"/> are set to PathPending with the repath cooldown
+        /// bypassed, so the next Update repaths them deterministically. Arrived and PathFailed are
+        /// left alone on purpose: the first would re-plan every rebake, and re-trying "no route
+        /// exists" on every mesh swap is a policy the game decides, not this pass. Agents whose
+        /// position no longer lies on the mesh (e.g. standing inside a carved hole — placement
+        /// rules should prevent this) fail their path and are reported.
         /// </summary>
         public unsafe void ReseedAgents(ref Frame frame, EntityRef[] entities, int entityCount)
         {
@@ -345,9 +393,15 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     continue;
                 }
 
+                // Blocked belongs here and it is not obvious: that state is TERMINAL — once set,
+                // ProcessSteering and ProcessMovement both return on `Status != Moving`, so no
+                // engine path writes the status again. The mesh swap is the one event that can
+                // make the block untrue (the building that stopped this agent is gone), and
+                // leaving it out meant a demolished building left its units frozen for good.
                 if (nav.HasNavDestination
                     && (nav.Status == (byte)FPNavAgentStatus.Moving
-                        || nav.Status == (byte)FPNavAgentStatus.PathPending))
+                        || nav.Status == (byte)FPNavAgentStatus.PathPending
+                        || nav.Status == (byte)FPNavAgentStatus.Blocked))
                 {
                     nav.Status = (byte)FPNavAgentStatus.PathPending;
                     nav.LastRepathTick = 0; // bypass the repath cooldown: repath on the next Update
@@ -383,15 +437,55 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <summary>
         /// Constrains a position to the NavMesh (uses MoveAlongSurface internally).
         /// </summary>
-        public FPVector3 ConstrainToNavMesh(FPVector3 newPos, FPVector3 oldPos, int currentTri)
+        /// <remarks>
+        /// <para>The mask is a required argument, following <c>MoveAlongSurface</c>: this method
+        /// takes no agent, so it cannot resolve one, and defaulting it would silently constrain a
+        /// narrow-masked agent against ground it may not stand on. Pass
+        /// <see cref="NavAgentComponent.WalkAreaMaskOverride"/> (or
+        /// <see cref="DEFAULT_AREA_MASK"/> when it is zero) to agree with what that agent's walk
+        /// will accept.</para>
+        ///
+        /// <para><b>It pairs with the WALK, not with the path</b>, and that is a correction: this
+        /// remark used to promise agreement with <c>FindPath</c>, which held only while one mask
+        /// served both. It no longer does — an agent may plan through a building on purpose and be
+        /// refused entry to it, so agreeing with the path would mean constraining a position INTO
+        /// a footprint the agent cannot occupy. Constrain answers "where may this agent stand",
+        /// which is the walk's question.</para>
+        /// </remarks>
+        public FPVector3 ConstrainToNavMesh(FPVector3 newPos, FPVector3 oldPos, int currentTri,
+            int areaMask)
         {
-            var (resultPos, _) = _query.MoveAlongSurface(oldPos, newPos, currentTri, MultiFloorYThreshold);
+            var (resultPos, _) = _query.MoveAlongSurface(oldPos, newPos, currentTri,
+                areaMask, MultiFloorYThreshold);
             return resultPos;
         }
 
         /// <summary>
         /// Updates all agents by one tick based on NavAgentComponent data.
         /// </summary>
+        /// <remarks>
+        /// The caller owns the array: who is in it, in what order, and how many calls a tick takes
+        /// are all game-side decisions. Three consequences worth knowing before splitting it up:
+        /// <list type="bullet">
+        /// <item><description>
+        /// <b>Past <see cref="MAX_AGENTS"/> the position-correction pass silently drops the tail.</b>
+        /// Every agent is still steered and moved; only the pass that pushes residual overlaps apart
+        /// takes the first <see cref="MAX_AGENTS"/>. Nothing throws and nothing logs —
+        /// <see cref="DebugCollisionResolveTruncatedCount"/> is the only signal.
+        /// </description></item>
+        /// <item><description>
+        /// <b>That pass is effective only for position-authoritative consumers.</b> It writes
+        /// <c>NavAgentComponent.Position</c> and nothing else, so an integration that drives the
+        /// character from <c>Velocity</c> and re-syncs Position from an external transform each tick
+        /// never observes it — there the counter can be non-zero with no behavioural change at all.
+        /// </description></item>
+        /// <item><description>
+        /// <b>Diagnostic counters accumulate over the instance lifetime and are not rollback-aware.</b>
+        /// A resimulated tick is counted again. They are diagnostic fields, outside the state hash,
+        /// wire and replay.
+        /// </description></item>
+        /// </list>
+        /// </remarks>
         public unsafe void Update(ref Frame frame, EntityRef[] entities, int entityCount, int currentTick, FP64 dt)
         {
             for (int i = 0; i < entityCount; i++)
@@ -593,7 +687,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             nav.LastRepathTick = currentTick;
 
-            bool found = _pathfinder.FindPath(nav.Position, nav.Destination, DEFAULT_AREA_MASK,
+            bool found = _pathfinder.FindPath(nav.Position, nav.Destination, ResolvePlanMask(nav),
                 out int[] corridor, out int corridorLength);
             if (found)
             {
@@ -717,27 +811,92 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 nav.Velocity.y * dt);
             FPVector3 newPos = nav.Position + displacement;
 
+            int walkMask = ResolveWalkMask(nav);
             var (resultPos, resultTri) = _query.MoveAlongSurfaceWithVisited(
-                nav.Position, newPos, nav.CurrentTriangleIndex, MultiFloorYThreshold,
-                _visitedBuffer, out int visitedCount);
+                nav.Position, newPos, nav.CurrentTriangleIndex, walkMask,
+                MultiFloorYThreshold, _visitedBuffer, out int visitedCount);
 
-            nav.CurrentTriangleIndex = resultTri;
-            nav.Position = resultPos;
-
+            // Stop-on-contact: this agent's corridor leads into ground its walk mask refuses, and
+            // it has now run into it. Two conditions, and BOTH are needed.
+            //
+            //   (1) the walk did not move. A refused neighbour is a wall to MoveAlongSurface, so a
+            //       head-on approach is clipped to the edge and comes back where it started. The
+            //       walk cannot tell us WHY it refused — every reason falls through the same wall
+            //       path, and that is deliberate (the query re-tests the mask only to log it, so
+            //       the production path pays nothing) — which is why the reason is derived here.
+            //   (2) the next corridor triangle is refused by this mask. This is what separates a
+            //       building from a real wall: against a real wall the corridor's next triangle is
+            //       still enterable, so the agent keeps sliding, which is the behaviour that must
+            //       survive.
+            //
+            // Condition (1) alone would fire on any wall. Condition (2) alone would fire on the
+            // FIRST tick of every such path — an agent crossing its current triangle is "not
+            // advancing" for as many ticks as the crossing takes, so it would stop before it ever
+            // touched anything.
+            //
+            // And (1) needs the ATTEMPT, not just the outcome: `resultPos == nav.Position` is also
+            // true of an agent that requested no displacement at all, so a unit held still by a
+            // crowd one triangle short of a footprint used to report Blocked without having
+            // touched anything. Comparing against newPos costs nothing — it is already computed —
+            // and it is what makes this state mean "stopped where it touched" rather than "is not
+            // moving". The cost is that Blocked now arrives on the tick the agent pushes against
+            // the edge instead of the tick its velocity reaches zero, which is the correct
+            // definition of contact.
+            //
+            // Left to itself this stall is silent: the agent keeps Status = Moving and a valid
+            // path, and the off-corridor repath never fires because standing still inside the
+            // corridor's current triangle counts as being ON the corridor and resets that counter.
+            // Naming it is the whole point — the game decides what to do about a Blocked agent.
+            //
+            // Which triangle is "the next one" is decided by THIS agent's index in its corridor,
+            // found once here and used twice — by the verdict below and by the advance further
+            // down, which used to search for it a second time. Off the corridor the search comes
+            // back empty (idx < 0) and both readers take their off-corridor branch: the verdict is
+            // SKIPPED, because the corridor head is not an off-corridor agent's next step and
+            // latching the terminal Blocked on it would pre-empt the off-corridor repath that is
+            // the actual answer for that agent.
+            int corridorIdx = -1;
             if (nav.PathIsValid && nav.CorridorLength > 0)
             {
-                int advanceIdx = -1;
                 fixed (int* p = nav.Corridor)
                 {
                     for (int i = 0; i < nav.CorridorLength; i++)
                     {
                         if (p[i] == resultTri)
                         {
-                            advanceIdx = i;
+                            corridorIdx = i;
                             break;
                         }
                     }
+                }
+            }
 
+            if (corridorIdx >= 0 && corridorIdx + 1 < nav.CorridorLength
+                && newPos != nav.Position && resultPos == nav.Position)
+            {
+                int nextTri;
+                fixed (int* p = nav.Corridor)
+                    nextTri = p[corridorIdx + 1];
+
+                if (nextTri >= 0 && nextTri < _navMesh.Triangles.Length
+                    && (walkMask & _navMesh.Triangles[nextTri].areaMask) == 0)
+                {
+                    nav.Velocity = FPVector2.Zero;
+                    nav.DesiredVelocity = FPVector2.Zero;
+                    nav.CurrentSpeed = FP64.Zero;
+                    nav.Status = (byte)FPNavAgentStatus.Blocked;
+                    return;
+                }
+            }
+
+            nav.CurrentTriangleIndex = resultTri;
+            nav.Position = resultPos;
+
+            if (nav.PathIsValid && nav.CorridorLength > 0)
+            {
+                int advanceIdx = corridorIdx; // found once, above the contact verdict
+                fixed (int* p = nav.Corridor)
+                {
                     if (advanceIdx > 0)
                     {
                         int newLen = nav.CorridorLength - advanceIdx;
@@ -808,6 +967,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private void ResolveCollisions(ref Frame frame, EntityRef[] entities, int entityCount)
         {
             int n = entityCount < MAX_AGENTS ? entityCount : MAX_AGENTS;
+            if (entityCount > MAX_AGENTS)
+                _collisionResolveTruncatedCount += entityCount - MAX_AGENTS;
 
             for (int iter = 0; iter < COLLISION_RESOLVE_ITERATIONS; iter++)
             {
@@ -869,8 +1030,23 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     FPVector2 d = _disp[a] * iw;
 
                     FPVector3 newPos = na.Position + new FPVector3(d.x, FP64.Zero, d.y);
+                    // This agent's own walk mask, NOT FPNavMeshAreas.ALL_AREAS: a crowd may press a
+                    // unit against ground it is not allowed to enter, never into it. Unfiltered,
+                    // this pass is the one way an agent ends up standing inside a retained
+                    // building's footprint — and if it is Blocked when that happens it parks there,
+                    // because Blocked is terminal and nothing recomputes it.
+                    //
+                    // Passing the mask does NOT trap an agent that is already inside forbidden
+                    // ground: the walk's expansion rule exempts refused neighbours while the
+                    // triangle it expands FROM is refused too, so such an agent can be pushed
+                    // across its forbidden component and out. That asymmetry — the mask blocks
+                    // entering, not leaving — lives in MoveAlongSurface and must not be
+                    // re-implemented here; ALL_AREAS would additionally allow what that rule
+                    // deliberately forbids, carrying an agent between two SEPARATE forbidden
+                    // regions.
                     var (resultPos, resultTri) = _query.MoveAlongSurface(
-                        na.Position, newPos, na.CurrentTriangleIndex, MultiFloorYThreshold);
+                        na.Position, newPos, na.CurrentTriangleIndex, ResolveWalkMask(na),
+                        MultiFloorYThreshold);
 
                     na.CurrentTriangleIndex = resultTri;
                     na.Position = resultPos;

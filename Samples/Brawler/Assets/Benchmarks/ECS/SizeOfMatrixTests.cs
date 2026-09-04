@@ -39,7 +39,11 @@ namespace xpTURN.Klotho.ECS.Benchmarks
         private const int Expected_TransformComponent             = 96;  // FPVector3(24) + FP64(8) + FPVector3(24) + FPVector3(24) + FP64(8) + bool(1) + int(4) + Pack=4 tail padding(3)
         private const int Expected_OwnerComponent                 = 4;
         private const int Expected_ErrorCorrectionTargetComponent = 1;
-        private const int Expected_NavAgentComponent              = 708;
+        // 708 -> 716: PlanAreaMaskOverride + WalkAreaMaskOverride, two ints, neither of which fits
+        // the struct's existing padding. This is the EditMode-reachable pin of the three — the
+        // others are SizeOfCrossRuntimeTests (PlayMode, Mono + IL2CPP) and, for CoreCLR and the
+        // wire size, NavAgentComponentSizeTests in the dotnet suite.
+        private const int Expected_NavAgentComponent              = 716;
         private const int Expected_HealthComponent                = 8;
         private const int Expected_CombatComponent                = 8;
         private const int Expected_MovementComponent              = 36;

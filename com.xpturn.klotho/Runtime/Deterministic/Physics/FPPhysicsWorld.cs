@@ -31,6 +31,10 @@ namespace xpTURN.Klotho.Deterministic.Physics
         FPContact[] _meshContactBuffer;
         bool _skipStaticGroundResponse;
 
+        int _contactCopyTruncatedCount;
+        int _staticContactCopyTruncatedCount;
+        int _triggerCopyTruncatedCount;
+
         public FPPhysicsWorld(FP64 cellSize)
         {
             _grid = new FPSpatialGrid(cellSize);
@@ -842,34 +846,69 @@ namespace xpTURN.Klotho.Deterministic.Physics
             }
         }
 
+        /// <summary>
+        /// Contacts produced by the last <see cref="Step"/>. This is the TOTAL the world holds, not
+        /// what a caller copied: pair it with the copied count to tell "the buffer was exactly full"
+        /// apart from "the tail was dropped". Last-Step value, NOT an accumulator — a rollback
+        /// resimulation overwrites it rather than adding to it, so there is no double counting.
+        /// </summary>
+        public int DebugContactCount => _contacts.Count;
+
+        /// <summary>Static contacts of the last <see cref="Step"/>. See <see cref="DebugContactCount"/>.</summary>
+        public int DebugStaticContactCount => _staticContacts.Count;
+
+        /// <summary>Trigger pairs of the last <see cref="Step"/>. See <see cref="DebugContactCount"/>.</summary>
+        public int DebugTriggerPairCount => _triggerPairs.Count;
+
+        /// <summary>
+        /// How many times <see cref="CopyContactsTo"/> dropped a tail. Instance-lifetime accumulator
+        /// with no reset, and the unit is the COPY CALL, not the tick: a tick makes three copies
+        /// (contacts / static contacts / trigger pairs) and each kind has its own counter, so a
+        /// rollback resimulation counts that tick's copies again. Its job is the truncation a view
+        /// cannot see: the views sample once per frame while the snapshot is overwritten every tick,
+        /// so a tick that is not the last of a frame is invisible to them — but not to this.
+        /// </summary>
+        public int DebugContactCopyTruncatedCount => _contactCopyTruncatedCount;
+
+        /// <summary>Truncating <see cref="CopyStaticContactsTo"/> calls. See <see cref="DebugContactCopyTruncatedCount"/>.</summary>
+        public int DebugStaticContactCopyTruncatedCount => _staticContactCopyTruncatedCount;
+
+        /// <summary>Truncating <see cref="CopyTriggerPairsTo"/> calls. See <see cref="DebugContactCopyTruncatedCount"/>.</summary>
+        public int DebugTriggerCopyTruncatedCount => _triggerCopyTruncatedCount;
+
         // Contact/trigger snapshot copies for the debug visualizers. The caller supplies a
         // fixed-size buffer, so the copy is CAPPED at buffer.Length and `count` reports what was
         // actually copied — at high body counts the tail is dropped rather than overrunning the
         // buffer. Simulation state is unaffected (these views feed drawing only), and the cap is
-        // the caller's array length, so every peer truncates identically.
+        // the caller's array length, so every peer truncates identically. CopyCapped is an instance
+        // method because this is the only place that knows a cap was hit, so it is the only place
+        // that can count it.
         public void CopyContactsTo(FPContact[] buffer, out int count)
         {
-            count = CopyCapped(_contacts, buffer);
+            count = CopyCapped(_contacts, buffer, ref _contactCopyTruncatedCount);
         }
 
         public void CopyStaticContactsTo(FPContact[] buffer, out int count)
         {
-            count = CopyCapped(_staticContacts, buffer);
+            count = CopyCapped(_staticContacts, buffer, ref _staticContactCopyTruncatedCount);
         }
 
         public void CopyTriggerPairsTo((int, int)[] buffer, out int count)
         {
-            count = CopyCapped(_triggerPairs, buffer);
+            count = CopyCapped(_triggerPairs, buffer, ref _triggerCopyTruncatedCount);
         }
 
-        static int CopyCapped<T>(List<T> source, T[] buffer)
+        static int CopyCapped<T>(List<T> source, T[] buffer, ref int truncatedCount)
         {
             if (buffer == null)
                 return 0;
 
             int count = source.Count;
             if (count > buffer.Length)
+            {
                 count = buffer.Length;
+                truncatedCount++;
+            }
 
             for (int i = 0; i < count; i++) buffer[i] = source[i];
             return count;

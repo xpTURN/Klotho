@@ -30,6 +30,11 @@ namespace Brawler
         /// <summary>World position of the building's centre.</summary>
         [KlothoOrder(2)] public FPVector3 Centre;
         [KlothoOrder(3)] public int SequenceNumber { get; set; }
+        /// <summary>Retain the footprint as ground (stamped <c>FPNavMeshAreas.BUILDING_AREA</c>)
+        /// instead of carving a hole. On the wire because it is a determinism input: a mode read from
+        /// local state at the handler would diverge the navmesh while the state hash still matched.
+        /// <see cref="PlaceHexBuildingCommand.Retain"/> is the hexagon's counterpart.</summary>
+        [KlothoOrder(4)] public bool Retain;
 
         // Both indices arrive from the network, so both are untrusted, and the pair is validated
         // together in the handler — a shape that exists says nothing about whether it turns that
