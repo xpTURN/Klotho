@@ -9,6 +9,7 @@ using xpTURN.Klotho.Deterministic.Navigation;
 using xpTURN.Klotho.Deterministic.Physics;
 using xpTURN.Klotho.ECS;
 using xpTURN.Klotho.Helper.Tests;
+using xpTURN.Klotho.Logging;
 using xpTURN.Klotho.Network;
 using xpTURN.Klotho.Replay;
 
@@ -72,6 +73,122 @@ namespace xpTURN.Klotho.Core.Tests
         /// EcsSimulation, not a double: the breakdown returns all-zero for anything else, which is exactly
         /// how these gates would go vacuous.
         /// </summary>
+        #region The navigation anchor is a GATE, not just a label
+
+        /// <summary>Playback engine; <paramref name="navFp"/> 0 registers no nav source at all.</summary>
+        private static KlothoEngine NewPlaybackEngine(long navFp, out LogCapture log)
+        {
+            var sim = new EcsSimulation(64, maxRollbackTicks: 4, deltaTimeMs: 50);
+            if (navFp != 0)
+                sim.AddSystem(new FakeNav(navFp), SystemPhase.Update);
+
+            log = new LogCapture();
+            var engine = new KlothoEngine(new SimulationConfig(), new SessionConfig());
+            engine.Initialize(sim, log);
+            engine.SetCommandFactory(new CommandFactory());
+            return engine;
+        }
+
+        private static IReplayData Recorded(out FakeSdNetworkService net)
+        {
+            var engine = NewRecordingEngine(out net, out _, out _, out _);
+            net.RaiseGameStart();
+            engine.Stop();
+            var data = engine.GetCurrentReplayData();
+            Assert.IsNotNull(data, "recording produced no replay data");
+            Assert.AreEqual(NavFp, data.Metadata.NavFingerprint, "fixture: the anchor must be set");
+            return data;
+        }
+
+        /// <summary>
+        /// A recording made against different navigation is refused instead of diverging.
+        ///
+        /// <para>The nav anchor folds the mesh AND the pathfinding revision, so this one gate covers
+        /// both "recorded on another stage" and "recorded on a build that plans other corridors".
+        /// Neither was catchable before: the format has no per-tick hash, so the file simply
+        /// desynced somewhere and blamed the player.</para>
+        /// </summary>
+        [Test]
+        public void NavFingerprintMismatch_IsRefused_NotPlayedIntoADivergence()
+        {
+            var data = Recorded(out _);
+            var engine = NewPlaybackEngine(NavFp ^ 0x0F0F, out _);
+
+            var ex = Assert.Throws<InvalidDataException>(() => engine.StartReplay(data));
+            StringAssert.Contains("navigation fingerprint mismatch", ex.Message);
+            StringAssert.Contains("Re-record", ex.Message,
+                "the message is what a game shows the player, so it must say what to do");
+        }
+
+        /// <summary>The matching case still plays — the gate must not refuse everything.</summary>
+        [Test]
+        public void NavFingerprintMatch_Plays()
+        {
+            var data = Recorded(out _);
+            var engine = NewPlaybackEngine(NavFp, out _);
+
+            Assert.DoesNotThrow(() => engine.StartReplay(data));
+        }
+
+        /// <summary>
+        /// The refusal lands BEFORE anyone is told the game started. <c>StartReplay</c> ends with
+        /// <c>Play()</c> and <c>OnGameStart</c>; refusing after those would leave a half-started
+        /// world and a fired callback behind, so the check sits in the one window between the world
+        /// being built and anything being announced.
+        /// </summary>
+        [Test]
+        public void NavFingerprintMismatch_RefusesBeforeOnGameStartFires()
+        {
+            var data = Recorded(out _);
+            var engine = NewPlaybackEngine(NavFp ^ 0x0F0F, out _);
+
+            bool started = false;
+            engine.OnGameStart += () => started = true;
+
+            Assert.Throws<InvalidDataException>(() => engine.StartReplay(data));
+            Assert.IsFalse(started,
+                "OnGameStart must not have fired — a refusal after it leaves observers believing a "
+                + "playback began that never will");
+        }
+
+        /// <summary>
+        /// A local 0 does not refuse — the sentinel every fingerprint path uses — but it must not be
+        /// silent either. On this path 0 usually means "no nav source registered", i.e. the check
+        /// could not run, which is otherwise indistinguishable from the gate not existing. (This is
+        /// the <i>Vacuity</i> hazard in the class remarks, seen from the playback side.)
+        /// </summary>
+        [Test]
+        public void NoLocalNavSource_DoesNotRefuse_ButSaysTheCheckDidNotRun()
+        {
+            var data = Recorded(out _);
+            var engine = NewPlaybackEngine(0, out var log);
+
+            Assert.DoesNotThrow(() => engine.StartReplay(data));
+            Assert.IsTrue(log.Contains(KLogLevel.Warning, "was NOT checked"),
+                "silence here is indistinguishable from the gate not running");
+        }
+
+        /// <summary>
+        /// A recording that did not build its own tick 0 is warned about, never refused. Its anchor
+        /// is the mesh at the SNAPSHOT instant, and an SD client bootstrapped mid-match anchored a
+        /// REBAKED mesh; playback loads the base asset, so the two legitimately differ.
+        /// <see cref="SdBootstrap_RecordsTheSnapshotTickAndHash"/> is the fixture for that shape.
+        /// </summary>
+        [Test]
+        public void MidMatchBootstrapRecording_IsWarnedAboutButPlayable()
+        {
+            var data = Recorded(out _);
+            ((ReplayMetadata)data.Metadata).InitialStateTick = 7;   // stands in for an SD mid-match join
+            var engine = NewPlaybackEngine(NavFp ^ 0x0F0F, out var log);
+
+            Assert.DoesNotThrow(() => engine.StartReplay(data),
+                "the comparison does not apply to an anchor that describes a rebaked mesh");
+            Assert.IsTrue(log.Contains(KLogLevel.Warning, "started mid-match"),
+                "and the reader must be told why it was not checked");
+        }
+
+        #endregion
+
         private static KlothoEngine NewRecordingEngine(
             out FakeSdNetworkService net, out FakeColliders colliders, out FakeNav nav, out FakeGame game)
         {

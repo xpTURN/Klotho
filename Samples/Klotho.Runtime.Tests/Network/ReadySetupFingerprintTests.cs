@@ -49,6 +49,32 @@ namespace xpTURN.Klotho.Network.Tests
             Assert.IsTrue(KlothoEngine.FingerprintsDiffer(0x1234, 0x5678), "both provided and unequal");
         }
 
+        /// <summary>
+        /// Two peers whose navigation plans DIFFERENT corridors from the same content must be
+        /// reported as different at Ready. The nav term folds
+        /// <c>FPNavAgentSystem.NAV_BEHAVIOUR_REVISION</c> as well as the mesh, so a build-to-build
+        /// pathfinding change moves the environment fingerprint — which is what this exchange
+        /// compares, before the match starts.
+        ///
+        /// <para>Two builds are not needed to gate it: the difference reaches the comparison as a
+        /// plain value, and that is the whole surface being pinned.</para>
+        /// </summary>
+        [Test]
+        public void PeersWhosNavigationDiffers_AreReportedAsDifferent()
+        {
+            const long Colliders = 0x0000_1111_2222_3333L;
+            const long Game      = 0x0000_7777_8888_9999L;
+            const long NavRev1   = 0x0000_4444_5555_6666L;
+            long navRev2 = NavRev1 ^ 0x0F0F;          // the same mesh under a bumped revision
+
+            long local  = Colliders ^ NavRev1 ^ Game;
+            long remote = Colliders ^ navRev2 ^ Game;
+
+            Assert.IsTrue(KlothoEngine.FingerprintsDiffer(local, remote),
+                "a navigation revision difference must survive the XOR fold into the environment "
+                + "term — if it cancels, two peers that plan different paths shake hands");
+        }
+
         // ── layout ^ environment split (bit-identity + orthogonality) ──────
 
         [Test]

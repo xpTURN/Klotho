@@ -184,6 +184,45 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 "fingerprint must change with the building set");
         }
 
+        // ── the fingerprint answers "same content AND same pathfinding", not just content ──
+
+        /// <summary>
+        /// <c>NAV_BEHAVIOUR_REVISION</c> is actually folded in. Without it two builds that plan
+        /// DIFFERENT corridors from the SAME mesh report the same fingerprint, and the Ready
+        /// exchange waves them through — the divergence then surfaces as a state-hash mismatch
+        /// with nothing pointing at navigation.
+        ///
+        /// <para>Asserted as "the fingerprint is not the bare mesh fold" rather than by varying the
+        /// constant, which a <c>const</c> cannot do at runtime.</para>
+        /// </summary>
+        [Test]
+        public void NavFingerprint_FoldsTheBehaviourRevision_NotJustTheMesh()
+        {
+            FPNavMesh baseMesh = BuildBase();
+            var (system, _) = CreateSystem(baseMesh);
+
+            long meshOnly = unchecked((long)FPNavMeshRebaker.ComputeFingerprint(baseMesh));
+            Assert.AreNotEqual(meshOnly, system.GetNavFingerprint(),
+                "the nav fingerprint must carry the behaviour revision as well as the mesh — if "
+                + "these are equal the revision is not folded and the peer check cannot see a "
+                + "pathfinding change");
+        }
+
+        /// <summary>
+        /// The 0 sentinel survives the fold. <c>KlothoEngine.FingerprintsDiffer</c> reads 0 as
+        /// "not provided", so a system with no mesh must still answer 0 — folding the revision
+        /// outside the null check would make a navigation-less peer look like a mismatch against
+        /// one that has navigation.
+        /// </summary>
+        [Test]
+        public void NavFingerprint_WithoutAMesh_IsStillZero()
+        {
+            var system = new FPNavAgentSystem(null, null, null, null, null);
+
+            Assert.AreEqual(0L, system.GetNavFingerprint(),
+                "no mesh must stay the 'not provided' sentinel, revision or not");
+        }
+
         // ── V8 — the one-argument overload is the four-argument one, minus the allocation ──
 
         [Test]
@@ -306,14 +345,25 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.AreEqual(0, nav.CorridorLength);
         }
 
+        /// <summary>
+        /// The mesh half of the fold, pinned per-mesh. The value is no longer the bare rebaker
+        /// fingerprint — <c>NAV_BEHAVIOUR_REVISION</c> is folded in as well (see
+        /// <see cref="NavFingerprint_FoldsTheBehaviourRevision_NotJustTheMesh"/>) — so what stays
+        /// true is that the mesh determines it: the same mesh answers the same value, a different
+        /// mesh answers a different one, and it is never the 0 sentinel while a mesh is present.
+        /// </summary>
         [Test]
-        public void GetNavFingerprint_MatchesRebakerFingerprint_NeverZero()
+        public void GetNavFingerprint_IsDeterminedByTheMesh_NeverZero()
         {
             FPNavMesh baseMesh = BuildBase();
             var (system, _) = CreateSystem(baseMesh);
+            var (twin, _) = CreateSystem(baseMesh);
 
-            long expected = unchecked((long)FPNavMeshRebaker.ComputeFingerprint(baseMesh));
-            Assert.AreEqual(expected == 0 ? 1L : expected, system.GetNavFingerprint());
+            long fp = system.GetNavFingerprint();
+            Assert.AreNotEqual(0L, fp, "never the 'not provided' sentinel while a mesh is present");
+            Assert.AreEqual(fp, twin.GetNavFingerprint(),
+                "the same mesh on the same build must answer the same value — that is what makes "
+                + "it comparable across peers");
         }
 
         [Test]
@@ -412,6 +462,48 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             CollectionAssert.AreEquivalent(expected, SelectedSegments(livedAv),
                 "a peer that lived through place+remove must collect the same obstacle segments "
                 + "as one that joined straight onto the same mesh");
+        }
+
+        /// <summary>
+        /// A swap RE-DERIVES the obstacle inset from the mesh and discards whatever the caller had
+        /// set. That is deliberate — riding the asset's recorded bake radius is what keeps lockstep
+        /// peers symmetric without a hand-synced constant — and the doc on LoadNavMeshObstacles
+        /// says so: <i>Consumers may still override the field after this call.</i> This pins the
+        /// half that consumers keep getting wrong: the override does NOT survive, so a consumer
+        /// that wants one has to re-apply it after every swap.
+        ///
+        /// <para>Characterization, not a regression net: it is GREEN the moment it is written. It
+        /// earns its place by turning red if the runtime is ever made to preserve the override —
+        /// at which point the editor simulators' re-apply becomes a double-write to argue about.</para>
+        /// </summary>
+        [Test]
+        public void SwapNavMesh_ReDerivesTheObstacleInset_DiscardingAnyOverride()
+        {
+            FPNavMesh baseMesh = BuildBase();
+            FPNavMesh rebaked = FPNavMeshRebaker.Rebake(baseMesh, new[] { CenterBuilding() });
+
+            // The fixture bakes at radius 0.5, so an override of ZERO is genuinely distinguishable
+            // from the value a swap restores. Equal values here would make the assertion vacuous.
+            Assert.AreNotEqual(FP64.Zero, baseMesh.BakeAgentRadius,
+                "fixture: the base must carry a non-zero bake radius, else the override below is "
+                + "indistinguishable from what the swap re-derives");
+            Assert.AreEqual(baseMesh.BakeAgentRadius, rebaked.BakeAgentRadius,
+                "fixture: a rebake inherits the base's bake radius — that is why the swap can "
+                + "silently restore it");
+
+            FPNavAgentSystem system = CreateSystemForBfs(
+                baseMesh, out _, out FPNavAvoidance avoidance);
+            Assert.AreEqual(baseMesh.BakeAgentRadius, avoidance.ObstacleRadiusInset,
+                "LoadNavMeshObstacles applies the asset's bake radius at load");
+
+            // The consumer's override — the editor tool's diagnostic knob at its 'uncorrected
+            // double clearance' setting.
+            avoidance.ObstacleRadiusInset = FP64.Zero;
+
+            Swap(system, rebaked, out _);
+
+            Assert.AreEqual(rebaked.BakeAgentRadius, avoidance.ObstacleRadiusInset,
+                "the swap re-derives the inset from the new mesh; the override is gone");
         }
     }
 }

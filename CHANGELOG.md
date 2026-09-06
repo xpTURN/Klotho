@@ -1,5 +1,290 @@
 # Changelog
 
+## [0.12.1] - 2026-09-06
+
+### Added
+
+- **Navigation caps are now per instance — `FPNavTuning`.** Ten limits that used to be
+  compile-time constants are values on a new struct: `MaxAgents`, `CollisionResolveIterations`,
+  `BfsFrontierCap` (graph-local obstacle query), `MaxIterations` (the A\* budget), `MaxPortals` /
+  `MaxWaypoints` (the funnel that turns a triangle corridor into corner points), `MaxNeighbors` /
+  `MaxOrcaLines` (avoidance, with the obstacle budget derived as the difference), `MoveMaxQueue`
+  (surface walk) and `CorridorCap`. Pass one as the **optional** last constructor argument to
+  `FPNavMeshQuery`, `FPNavMeshPathfinder`, `FPNavMeshFunnel`, `FPNavAvoidance` or
+  `FPNavAgentSystem`; omit it and nothing changes, because the defaults are the values that shipped
+  before. Read `Tuning` on any of them to see what a given instance actually runs with.
+
+  **A tuning is build identity, not a preference.** Every cap can change where an agent ends up, so
+  all lockstep peers must build navigation with the same tuning and a replay must be played back
+  with the tuning it recorded. Two guards enforce that: `FPNavAgentSystem` compares the tuning of
+  everything handed to it — the constructor, `SetAvoidance`, and the four-argument `SwapNavMesh` —
+  and throws, naming the collaborator and the first cap that differs; and the navigation
+  fingerprint folds the tuning in, so two differently tuned peers are caught at the Ready exchange
+  before the match starts (see below). `FPNavTuning` compares by value (`Equals`, `==`, `!=`), and
+  `Validate()` throws instead of clamping when a value cannot work: every cap must be positive,
+  `MaxNeighbors` must leave room for obstacle lines, and `CorridorCap` must fit the fixed corridor
+  storage in `NavAgentComponent`.
+
+  Two caps behave differently from the rest. The funnel **truncates** rather than failing when a
+  path needs more portals or waypoints than it has room for — it clamps to its own buffers — so
+  those two caps trade path detail for memory. And `CorridorCap` buys copy and replan behaviour,
+  not reservation: the corridor buffer inside `NavAgentComponent` is a fixed compile-time size, so
+  lowering the cap does not shrink the frame heap.
+
+  `NavCorridorHelper.SetCorridor` now returns how many corridor triangles it had to drop, and
+  `FPNavAgentSystem` accumulates that into `DebugCorridorCopyTruncatedCount`. Under one consistent
+  tuning the copy cannot truncate, so **0 is the only correct value**; anything else means the
+  search and the component storage were built from different caps.
+
+- **Queries that only answer with ground the agent may actually use.** `FPNavMeshQuery` gained
+  `FindPassableTriangle`, `FindPassableTriangleForEndpoint`, `ClosestPassablePoint` and
+  `ProjectToPassable`. `FindPath` and `MoveAlongSurface` have always honoured `isBlocked` and
+  `areaMask`; the "nearest point on the navmesh" lookups did not, and since retained footprints
+  arrived in 0.12.0 that gap is easy to hit — a footprint is *on* the mesh, so an unfiltered lookup
+  hands it back as a perfectly good answer and the caller commits to a destination its own
+  `FindPath` will refuse. The new members take an `areaMask` and skip blocked or out-of-mask
+  ground.
+
+  **The four existing unfiltered members are unchanged, deliberately** — that is why these are new
+  names rather than a new parameter. Three engine callers need the unfiltered answer: `FindPath`
+  (it resolves the endpoints first and then attributes a block/mask refusal to
+  `DebugBlockedEndpointCount` / `DebugAreaMaskRejectedCount`, which would collapse into "off-mesh"
+  otherwise), the post-swap agent reseed (an agent standing on forbidden ground still needs a valid
+  triangle to escape from), and `ClosestPointOnNavMesh`'s own first step.
+
+  `ProjectToPassable` has one failure mode the unfiltered projection does not: if the nearest
+  *passable* point is beyond `maxDist` while impassable ground lies inside it, the call fails
+  rather than returning a point the caller cannot use. Code that treats failure as "stop" will stop
+  more often near buildings; `maxDist` is the knob.
+
+  **Hash-neutral** — purely additive, no existing path changed.
+
+- **`FPNavMeshQuery.FindTriangleForEndpoint` — the endpoint rule the engine itself uses.** Public,
+  so a tool can resolve a destination exactly the way `FindPath` does. Its tie-break is described
+  under *Fixed*.
+
+- **`FPNavPathFailure` — a name for why an agent is not moving.**
+  `Diagnose(in nav, query, mesh, failurePredatesSwap)` re-walks `FindPath`'s guard chain, read-only,
+  and returns an `FPNavPathFailureReason`; `Describe` turns it into the short label a tool prints.
+  Both editor visualizers use it, so Unity and Godot report the same wording. It is public runtime
+  API rather than `internal` because the Godot adapter ships as source and compiles into whatever
+  assembly the consuming project happens to be — there is no assembly list to grant access to.
+
+- **The navigation fingerprint now answers "same mesh, same pathfinding, same caps".**
+  `FPNavAgentSystem.GetNavFingerprint()` folds a behaviour revision and the tuning digest alongside
+  the mesh content. Peers on builds that plan different paths, or that are tuned differently, now
+  differ at the Ready exchange — which already compares this value in both P2P and server-driven
+  modes — instead of desyncing mid-match with nothing pointing at navigation. Nothing new goes over
+  the wire, and `0` still means "no navigation registered", so a peer without navigation is never
+  reported as a mismatch.
+
+- **`StartReplay` refuses a recording whose navigation fingerprint disagrees with this process** —
+  a different stage, or a build that plans different corridors. The value was already recorded in
+  0.12.0 but only reported, so such a file used to load and then drift with nothing to say where.
+  The refusal happens before playback starts and before `OnGameStart` fires. Three cases are
+  warnings rather than refusals: `0` on either side keeps its "not provided" meaning, and a
+  recording that started mid-match describes a rebaked mesh rather than the base asset. This is
+  attribution, not integrity — a forged file can rewrite the anchor along with the payload.
+
+- **`FPNavMeshPlacementProbe.TryPrepare(out string reason)`** builds the rebake snapshot up front
+  and reports an unsupported base mesh as a value, so a tool can disable its placement UI and show
+  why instead of failing at the user's first click. When a stage is unsupported, `TryPlace` returns
+  false with the new `FPBuildingRejection.BaseMeshUnsupported` (`IndexA` is -1: no building is at
+  fault, the stage is).
+
+- **The editor NavMesh visualizers (Unity window, Godot dock) say WHY an agent will not move.**
+  `PathFailed` used to be one word for five situations. The agent row now names the cause against
+  the mesh as it stands: off the mesh, standing on blocked ground, destination off the mesh,
+  destination blocked, destination outside the agent's plan mask, the failure is *stale* (its cause
+  is gone), or there is genuinely no route.
+
+  The pathfinder's diagnostic counters are deliberately not used. The tool shares one
+  `FPNavMeshPathfinder` between the agent simulator and the Start/End path preview, so a delta
+  cannot be attributed to one agent; the counters never reset; and the failure the tool most needs
+  to explain — an agent that a rebake left off-mesh — never calls `FindPath` at all, so no counter
+  moves for it. The tool re-walks the guard chain instead, only for rows that actually failed.
+
+- **The visualizers gate their Buildings section on `TryPrepare`**, showing the refusal instead of
+  controls that cannot work, and a new **`Dest Snap Max`** knob sets how far a destination click may
+  be pulled onto walkable ground. It defaults to the mesh's `GridCellSize`, which is what the
+  projection can actually cover.
+
+### Changed
+
+- **The generator's debug dump is opt-in, and no longer rewrites files it did not change.**
+  `KlothoGenerator` used to write every generated `.g.cs` to `<projectRoot>/Tools/Generated/<assembly>/`
+  on every compilation — creating the folder whether you asked for it or not, and rewriting each
+  file unconditionally, so version control that watches timestamps (Plastic, Perforce) saw churn on
+  every recompile and an IDE, which runs generators as you type, wrote to disk that often. Reported
+  as [#9](https://github.com/xpTURN/Klotho/issues/9).
+
+  The dump is now written **only if `Tools/Generated/` already exists**, and the generator never
+  creates it: `mkdir -p Tools/Generated` turns it on, deleting the folder turns it off. A project
+  that already has the folder keeps getting the dump — that is the one case where nothing changes
+  for you. When it is on, a file whose content already matches is left untouched, timestamp
+  included. One consequence to know about: because unchanged types are not rewritten, creating the
+  folder while an IDE is running gives you a **partial** dump — only types edited afterwards are
+  re-emitted. A complete one needs an IDE restart or a clean build. Turning the dump off needs
+  neither.
+
+  The dump was never a build input: nothing references those files, Unity compiles the generator's
+  output in memory, and deleting them changes no build. To read generated sources without the dump,
+  `dotnet build -p:EmitCompilerGeneratedFiles=true` writes them under `obj/`. Generated code is
+  **byte-identical** — this changes when files are written, not what is in them.
+
+- **The retained-footprint stamp walks the broadphase grid instead of the whole mesh.**
+  `FPNavMeshRebaker` used to scan every triangle once per retained building, in a single
+  time-sliced step that no work-unit budget covers. It now visits only the grid cells the
+  footprint's bounding box touches. **Output is bit-identical** (checked against a golden asset with
+  1, 8 and 32 retained buildings), allocation is unchanged, and only which triangles the predicate
+  is fed has changed. Measured on 51k triangles with 32 retained buildings: **3.55 ms → 0.13 ms**,
+  and the cost stops tracking triangle count (205k × 32 is also 0.13 ms). At the Brawler sample's
+  stage sizes the old form was already noise; this matters for stages an order of magnitude larger,
+  where it was reintroducing the very spike that time-sliced rebaking exists to remove.
+
+- **Brawler sample: bots ask the passable questions.** `BotFSMHelper.SnapDestination` takes an
+  `areaMask` and uses the filtered members, so a bot no longer commits to a destination on a
+  retained footprint. The two position re-snaps ask the questions *in that order* — the unfiltered
+  lookup for "where am I", and only if that answers nothing the filtered projection for "where may
+  I go" — because an agent standing on a footprint should be left where it stands and carried out
+  by the walk's escape clause, not teleported to a position whose triangle index still names the
+  footprint.
+
+  **The frame hash moves only where a retained footprint exists.** Nothing else in the sample makes
+  ground impassable, and on plain ground the agent mask intersects every triangle, so all five call
+  sites return what they returned before; a session that places no retained building is
+  byte-identical and its replays still play back. Where a retained building *is* placed, bot
+  destinations and snapped positions differ — identically on every peer, so a desync check will not
+  report it and the tests are the only detector, and a replay containing such a placement no longer
+  plays back. Concretely: a destination on a footprint used to leave the bot at `PathFailed`; now
+  the point is projected to the footprint's edge and the bot walks up to the building.
+
+- **Docs.** `Docs/Navigation.md` covers the tuning, the passable query family and the navigation
+  fingerprint; `Docs/Navigation.Rebake.md` covers the base-mesh refusals; `Docs/Replay.md` covers
+  the fingerprint check; `Docs/Serialization.md` §9 covers the opt-in dump.
+
+### Fixed
+
+- **A stacked base mesh is refused at load instead of crashing — or, worse, being accepted.** The
+  rebaker has always been single-level only, but the guard enforcing that looked for XZ-**duplicate
+  vertices**, and stacked levels that share no exact coordinate walked straight past it.
+  `FPNavMeshRebaker.CreateSnapshot` now refuses two more families with `NotSupportedException`,
+  matching the two refusals it already had:
+
+  **Boundary rings that cross in projection.** The triangulator already refused these, but the
+  refusal escaped as an `InvalidOperationException` from wherever the snapshot happened to be built
+  — for a tool that builds it lazily, a crash on the user's first click, in an exception type that
+  also means "this placement was refused". It is now reported where it belongs, with the two
+  offending segments named. The triangulator's own refusal is preserved as the inner exception and
+  gained a type, `FPConstraintCrossingException`, which derives from `InvalidOperationException`, so
+  existing `catch` blocks are unaffected.
+
+  **Overlaps that do not cross** — a platform nested entirely inside a floor. Nothing crossed, so
+  nothing refused it: the inner ring was read as a hole, the platform vanished, the floor beneath it
+  was carved away, and the rim kept the platform's height, tilting what was left. Every peer
+  computed the same wrong mesh, so no fingerprint comparison could catch it. `CreateSnapshot` now
+  rebakes zero buildings and requires the walkable area to come back exactly, in integer
+  arithmetic; the message names the area lost. This validation runs on every load, including
+  IL2CPP/AOT builds, which is exactly where a silently wrong navmesh would otherwise ship. It costs
+  two area sums on the default path (~2 ms on a 22k-triangle asset). Note its limit: it compares one
+  number, total walkable area, so damage that happens to preserve area — a hole that moved, two
+  equal regions swapped — is not caught by it.
+
+- **A refused removal no longer loses the building.** `FPNavMeshPlacementProbe.TryRemoveAt` dropped
+  the placement and *then* rebaked, with nothing kept to put back if the rebake refused. Its note
+  claimed a removal cannot be refused, because the remaining set is a subset of one already
+  accepted — which stops being true the moment `Rules` changes, and `Rules` is a public setter both
+  editors expose: accept two buildings under `ClipOverlap`, tighten the boundary policy to
+  `Reject`, remove one, and the survivor is judged under the new rules and loses. The list then no
+  longer held a building the scene still showed, and the next successful rebake shipped a mesh
+  missing it. The removal is now undone on refusal, exactly as `TryPlace` undoes its append, and an
+  out-of-range index throws instead of reading off the end of the list. `TryPlace` also undoes its
+  append in a `finally` now, so a rebake that *throws* cannot leave behind a placement that was
+  never accepted. Both visualizers show the reason and say the building is still placed, instead of
+  silently blanking the status line.
+
+- **A destination snapped onto a building boundary was refused about half the time.** The filtered
+  projection returns the closest point on a triangle *edge*, so a destination pushed off a retained
+  footprint lands exactly ON the footprint's boundary — a point genuinely inside both triangles.
+  `FindPath` then looked the point up again with a lookup that only updates on a *strictly* smaller
+  height distance, so on a tie the lower triangle index won; where that was the footprint, the
+  endpoint was refused by mask, and that path only bumps `DebugAreaMaskRejectedCount`, so nothing
+  appeared in the log. Measured on an 8×8 field with one retained building: of 729 clicks inside the
+  footprint, **351 (48%)** produced a destination the projection had certified as walkable and
+  `FindPath` then refused. Which positions fail is fixed by triangle numbering, so it reproduces
+  exactly per position while looking intermittent overall.
+
+  `FindPath` now resolves its **endpoint** with `FindTriangleForEndpoint`, which breaks a height tie
+  toward ground the mask allows. The tie-break is deliberately narrow: it first restricts to the
+  candidates that *minimise* the height distance, and only takes the tie between candidates on the
+  same surface. A destination on a forbidden upper floor is still refused rather than answered with
+  the walkable floor below — a different floor is a different place, not a second reading of the
+  same one.
+
+  The **start** keeps the plain lookup. Its mask check is an exemption whose whole value is being
+  reported (`DebugMaskedStartCount`), and resolving an ambiguous start toward walkable ground would
+  silence that at exactly the boundary positions it exists to report.
+
+  **This affected the Brawler bot, not just the editor tool** — `BotFSMHelper.SnapDestination`
+  produces the same boundary points, so 0.12.0's "the bot walks up to the building" held only where
+  the triangle numbering happened to favour the walkable side.
+
+- **The visualizers' destination click could not be walked to** *(editor tools)*. Clicking a
+  retained building handed `NavAgentComponent.SetDestination` the raw click; `FindPath` refused the
+  endpoint by mask and the agent sat at `PathFailed` — on screen, "it has somewhere to go and will
+  not move", indistinguishable from being stuck. The click now goes through `ProjectToPassable` with
+  the agent's resolved plan mask, and Y is resampled at the snapped XZ (keeping the click's own y
+  would pair a moved XZ with an unrelated height, which on a multi-floor mesh lands on the wrong
+  floor). When nothing passable is in reach the destination is **not** set: the agent is stopped, so
+  the status reads `Idle` rather than `PathFailed`, and the reason is shown in the window along with
+  the `Dest Snap Max` reach and the one-cell-ring limit past which no larger value can find
+  anything.
+
+  Editor tools only, apart from one engine change: `FPNavAgentSystem.ResolvePlanMask` /
+  `ResolveWalkMask` are now `public static`, because a tool that sets per-agent mask overrides must
+  fold `0 → DEFAULT_AREA_MASK` exactly as the system does. Duplicating that fold and getting it
+  wrong would pass a mask of 0, which shares a bit with nothing and makes every triangle
+  impassable — the same symptom this fix removes.
+
+- **`[Off Mesh]` was unreachable in the agent row and now is not** *(editor tools)*. The row's tag
+  chain tested "has destination", then "has path", then the triangle index — but the post-rebake
+  reseed clears `HasPath` for every agent *before* looking the triangle up, so an agent left
+  off-mesh by a rebake always reported `[No Path]`: the symptom, hiding the one cause no counter can
+  explain. Off-mesh is checked first now, in both engines.
+
+- **One edited file no longer re-generates every type in the assembly (in an IDE).** Four of the
+  generator's per-type pipelines combined against the `Compilation` object itself just to recover
+  two strings (project root, assembly name). A compilation is a new instance on every edit, so
+  nothing downstream could ever be cached and every type re-ran on every keystroke. They now
+  combine against those two strings, which compare by value, and the project root is resolved once
+  per compilation instead of once per emitted type. Unity is unaffected — it recompiles a whole
+  assembly regardless — and generated output is byte-identical.
+
+### Breaking changes — what to check when you upgrade
+
+- **The navigation fingerprint value changed**, because it now folds the behaviour revision (at 2:
+  `FindPath`'s endpoint resolution moved and its tie-break was narrowed). All peers in a match must
+  be on the same build, and **replays recorded before this change are refused by `StartReplay`**
+  rather than played back into a drift. The tuning term is normalised so that `FPNavTuning.Default`
+  contributes nothing, so using the defaults costs you no further change.
+
+- **The frame hash moves on meshes that carry forbidden ground** — retained footprints, blocked
+  triangles, or an area mask that excludes something — and only for destinations on the boundary of
+  such ground. On ordinary ground every tied candidate is passable, so "first passable" is "first"
+  and the answer is bit-identical (verified over 3,969 points on a plain field, 1,281 of them on
+  shared edges: zero differences). Where it does move, every peer moves identically, so a desync
+  check will not report it.
+
+- **Base meshes that used to load may now be refused** with `NotSupportedException` from
+  `FPNavMeshRebaker.CreateSnapshot`. A stacked or self-overlapping base was never supported; it was
+  producing a silently wrong navmesh. Flatten the mesh into a single level, or split it.
+
+- **`NavCorridorHelper.SetCorridor` returns `int`** (dropped triangle count) instead of `void`.
+
+- **Samples:** the editor visualizers' `SetAgentDestination` takes an `FPVector3` instead of the
+  engine's `Vector3`; callers convert with the `ToFPVector3()` extension. This made the Unity and
+  Godot bodies identical, so a fix to one is a fix to both.
+
 ## [0.12.0] - 2026-09-04
 
 ### Navigation — a building can keep its ground, and each agent decides what that means

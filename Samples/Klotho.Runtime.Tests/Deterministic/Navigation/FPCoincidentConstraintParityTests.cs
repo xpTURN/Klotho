@@ -295,7 +295,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
 
             // Marked once, then crossed: T1 NotAllowed. This is the established behaviour.
             var onceThenCross = new List<int>(hull) { 1, 3, 0, 2 };
-            Assert.Throws<InvalidOperationException>(
+            Assert.Throws<FPConstraintCrossingException>(
                 () => FPConstrainedDelaunay.Triangulate(
                     xs.ToArray(), zs.ToArray(), onceThenCross.ToArray(), eraseOuterAndHoles: false),
                 "sanity: a constraint may not cross another constraint");
@@ -304,7 +304,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             // must refuse identically. Under a XOR'd Constrained it would be accepted and the
             // channel would carve through the shared wall.
             var twiceThenCross = new List<int>(hull) { 1, 3, 3, 1, 0, 2 };
-            Assert.Throws<InvalidOperationException>(
+            Assert.Throws<FPConstraintCrossingException>(
                 () => FPConstrainedDelaunay.Triangulate(
                     xs.ToArray(), zs.ToArray(), twiceThenCross.ToArray(), eraseOuterAndHoles: false),
                 "a twice-marked edge is STILL a wall — an edge two buildings share must not "
@@ -367,7 +367,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             var crossing = new List<int>(cons) { 7, 8 };
             xs.Add(S(3.5)); zs.Add(S(3));
             xs.Add(S(3.5)); zs.Add(S(7));
-            Assert.Throws<InvalidOperationException>(
+            Assert.Throws<FPConstraintCrossingException>(
                 () => FPConstrainedDelaunay.Triangulate(
                     xs.ToArray(), zs.ToArray(), crossing.ToArray(), eraseOuterAndHoles: true),
                 "a twice-marked seam is STILL a wall — parity-neutral is not the same as absent");
@@ -422,7 +422,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 Ring(crossing, 4, 4);
             crossing.Add(8); crossing.Add(9);
 
-            Assert.Throws<InvalidOperationException>(
+            Assert.Throws<FPConstraintCrossingException>(
                 () => FPConstrainedDelaunay.TriangulateFromSnapshot(
                     FPConstrainedDelaunay.BuildSnapshot(baseXs, baseZs, baseCons.ToArray()),
                     crossXs, crossZs, crossing.ToArray(), eraseOuterAndHoles: true),

@@ -22,6 +22,7 @@ namespace xpTURN.Klotho.Godot
         private Label _pathInfo;
         private Label _tick;
         private Label _agentList;
+        private Label _destRefusal;
         private Label _hoverCell;
         private Label _triInfo;
         private Button _playBtn;
@@ -29,6 +30,23 @@ namespace xpTURN.Klotho.Godot
         private LineEdit _spawnDest;
         private Label _buildingList;
         private Label _buildingStatus;
+        // The Buildings section is built ONCE and then switched between three states in Refresh
+        // (not loaded / loaded+supported / loaded+unsupported). Rebuilding it is not an option:
+        // five of its own controls call Refresh, so a rebuild would free the node whose signal is
+        // being handled — and the sections are added flat onto this VBox, so there is no "section"
+        // to rebuild without introducing this container first.
+        private VBoxContainer _placementBody;
+        private Label _placementUnsupportedLbl;
+        private HBoxContainer _turnRow;
+        // The two knobs the simulator writes behind the dock's back: Initialize syncs both from
+        // the loaded mesh (bake radius / cell size). A retained SpinBox seeded at Init therefore
+        // shows a value the simulation stopped using, and nudging it writes that stale value back.
+        // _seen* is the last simulator value the dock pushed — comparing against the WIDGET would
+        // fight Step's snapping and the 0..100 range instead.
+        private SpinBox _obstInsetSpin;
+        private SpinBox _snapMaxSpin;
+        private double _seenObstInset = double.NaN;
+        private double _seenSnapMax = double.NaN;
 
         public void Init(GodotFPNavMeshVisualizer ctrl)
         {
@@ -71,6 +89,29 @@ namespace xpTURN.Klotho.Godot
             if (_buildingStatus != null)
                 _buildingStatus.Text = _ctrl.PlaceStatus ?? string.Empty;
 
+            // Three states, decided here because none of them is knowable when the tree is built:
+            // Init runs before any mesh exists, so IsLoaded is false and the reason does not yet
+            // exist. Unity's IMGUI window re-evaluates the same three every repaint.
+            bool unsupported = data.IsLoaded && !data.PlacementSupported;
+            if (_placementBody != null)
+                _placementBody.Visible = data.IsLoaded && !unsupported;
+            if (_placementUnsupportedLbl != null)
+            {
+                _placementUnsupportedLbl.Visible = unsupported;
+                _placementUnsupportedLbl.Text = unsupported
+                    ? "Placement is unavailable for this mesh:\n" + data.PlacementUnsupportedReason
+                    : string.Empty;
+            }
+            if (_turnRow != null)
+                _turnRow.Visible = _ctrl.PlaceShapeIndex == 0;
+
+            // Only when the SIMULATOR moved — writing every Refresh would fight a value being
+            // typed, and Refresh runs on every simulated tick.
+            if (!Mathf.IsEqualApprox((float)_seenObstInset, sim.ObstacleRadiusInset))
+                PushSpin(_obstInsetSpin, sim.ObstacleRadiusInset, ref _seenObstInset);
+            if (!Mathf.IsEqualApprox((float)_seenSnapMax, sim.DestinationSnapMaxDist))
+                PushSpin(_snapMaxSpin, sim.DestinationSnapMaxDist, ref _seenSnapMax);
+
             if (data.IsLoaded)
             {
                 int blocked = 0;
@@ -100,16 +141,22 @@ namespace xpTURN.Klotho.Godot
                 for (int i = 0; i < sim.AgentCount; i++)
                 {
                     var rd = sim.GetAgentRenderData(i);
-                    string extra = !rd.hasDestination ? " [No Dest]"
-                        : !rd.hasPath ? " [No Path]"
-                        : rd.currentTriangleIndex < 0 ? " [Off Mesh]" : "";
+                    // Off-mesh FIRST — same reason as the Unity window: the reseed clears
+                    // HasPath before it looks the triangle up, so an agent a rebake left off-mesh
+                    // always had hasPath == false and was reported as [No Path], hiding the cause.
+                    string extra = rd.currentTriangleIndex < 0 ? " [Off Mesh]"
+                        : !rd.hasDestination ? " [No Dest]"
+                        : !rd.hasPath ? " [No Path]" : "";
                     // The masks are shown because a mixed scene is otherwise unreadable — two
                     // agents at the same spot with the same status look identical, and which of
                     // them may enter the building is the whole question.
                     string masks = $" [{GodotFPNavMeshVisualizer.MaskLabel(rd.planAreaMask)}"
                         + $"/{GodotFPNavMeshVisualizer.MaskLabel(rd.walkAreaMask)}]";
+                    // WHY it failed, judged against the mesh as it is now — separate from the
+                    // destination refusal below (that one says the click was refused).
+                    string why = FPNavPathFailure.Describe(rd.failureReason);
                     string sel = _ctrl.Interaction?.SelectedAgentIndex == i ? "▸" : " ";
-                    sb.Append($"{sel}#{i}: {rd.status}{extra}{masks} {Fmt(rd.position)}\n");
+                    sb.Append($"{sel}#{i}: {rd.status}{extra}{masks}{why} {Fmt(rd.position)}\n");
                 }
                 _agentList.Text = sb.ToString();
             }
@@ -117,6 +164,9 @@ namespace xpTURN.Klotho.Godot
             {
                 _agentList.Text = "(no agents)";
             }
+
+            _destRefusal.Text = string.IsNullOrEmpty(sim.LastDestinationRefusal)
+                ? "" : $"⚠ {sim.LastDestinationRefusal}";
 
             // Info (selected or hovered triangle)
             int idx = it.SelectedTriangleIndex >= 0 ? it.SelectedTriangleIndex : it.HoveredTriangleIndex;
@@ -192,17 +242,34 @@ namespace xpTURN.Klotho.Godot
         private void BuildBuildingsSection()
         {
             AddChild(Header("Buildings"));
-            AddChild(Lbl("Shapes belong to the TOOL, not to any game: a 2x1 box and a hexagon."));
+
+            // A stacked base cannot be rebaked at all, and that is known at load. This label says
+            // so INSTEAD of the controls — it lives outside _placementBody so it can show while
+            // the body is hidden. Width is pinned and wrapping is allowed for this one label: the
+            // text is an exception message with no newlines of its own, and an unpinned label that
+            // long would push the dock column wide (the reason Lbl() forbids autowrap at all).
+            _placementUnsupportedLbl = new Label
+            {
+                AutowrapMode = TextServer.AutowrapMode.Word,
+                CustomMinimumSize = new Vector2(260, 0),
+                Visible = false,
+            };
+            AddChild(_placementUnsupportedLbl);
+
+            _placementBody = new VBoxContainer { Visible = false };
+            AddChild(_placementBody);
+
+            _placementBody.AddChild(Lbl("Shapes belong to the TOOL, not to any game: a 2x1 box and a hexagon."));
 
             var row = new HBoxContainer();
             row.AddChild(Btn("Place Building", () => ToggleMode(InteractionMode.PlaceBuilding)));
             row.AddChild(Check("Retain (keep ground)", _ctrl.PlaceRetain, v => _ctrl.PlaceRetain = v));
-            AddChild(row);
+            _placementBody.AddChild(row);
 
             // Flush packing needs the centre on the shape's tiling lattice, and those spacings are
             // not round numbers (a 2x1 box at radius 0.5 meets its neighbour at 2.003906) — a
             // free-hand click otherwise leaves millimetres of walkable ground between footprints.
-            AddChild(Check("Snap to tiling lattice (flush)", _ctrl.Data.SnapPlacementToLattice,
+            _placementBody.AddChild(Check("Snap to tiling lattice (flush)", _ctrl.Data.SnapPlacementToLattice,
                 v => _ctrl.Data.SnapPlacementToLattice = v));
 
             var shapeRow = new HBoxContainer();
@@ -213,15 +280,14 @@ namespace xpTURN.Klotho.Godot
             shape.Selected = _ctrl.PlaceShapeIndex;
             shape.ItemSelected += i => { _ctrl.PlaceShapeIndex = (int)i; Refresh(); };
             shapeRow.AddChild(shape);
-            AddChild(shapeRow);
+            _placementBody.AddChild(shapeRow);
 
             // A hexagon has no orientation in the catalog: no integer hexagon is symmetric under
-            // 60 degrees, so the turns a slider would offer do not exist.
-            if (_ctrl.PlaceShapeIndex == 0)
-            {
-                AddChild(SliderRow("Turn", 0, FPNavMeshPlacementProbe.ToolBoxDirections - 1,
-                    _ctrl.PlaceOrientation, v => _ctrl.PlaceOrientation = (int)v));
-            }
+            // 60 degrees, so the turns a slider would offer do not exist. Built always and hidden
+            // for the hexagon — the shape can change after this runs, and Refresh cannot rebuild.
+            _turnRow = SliderRow("Turn", 0, FPNavMeshPlacementProbe.ToolBoxDirections - 1,
+                _ctrl.PlaceOrientation, v => _ctrl.PlaceOrientation = (int)v);
+            _placementBody.AddChild(_turnRow);
 
             // Touch is the default rather than a game's ClipOverlap: under ClipOverlap a RETAINED
             // footprint that crosses the walkable boundary is refused (a carve is clipped instead),
@@ -241,10 +307,10 @@ namespace xpTURN.Klotho.Godot
             ruleRow.AddChild(policy);
             ruleRow.AddChild(Check("Allow contact", _ctrl.PlaceAllowTouch,
                 v => { _ctrl.PlaceAllowTouch = v; _ctrl.ApplyPlacementRules(); }));
-            AddChild(ruleRow);
+            _placementBody.AddChild(ruleRow);
 
             _buildingList = Lbl();
-            AddChild(_buildingList);
+            _placementBody.AddChild(_buildingList);
 
             var acts = new HBoxContainer();
             acts.AddChild(Btn("Remove last", () =>
@@ -253,10 +319,10 @@ namespace xpTURN.Klotho.Godot
                     _ctrl.RemoveBuilding(_ctrl.Data.PlacementCount - 1);
             }));
             acts.AddChild(Btn("Revert to loaded mesh", () => _ctrl.RevertBuildings()));
-            AddChild(acts);
+            _placementBody.AddChild(acts);
 
             _buildingStatus = Lbl();
-            AddChild(_buildingStatus);
+            _placementBody.AddChild(_buildingStatus);
             AddChild(new HSeparator());
         }
 
@@ -321,7 +387,23 @@ namespace xpTURN.Klotho.Godot
             AddChild(Check("Avoidance", sim.EnableAvoidance, v => sim.EnableAvoidance = v));
             // Bake inset carried by the loaded mesh boundary (R_sim = R_bake convention → set to
             // the bake Agent Radius; 0 = uncorrected double clearance). Applied live.
-            AddChild(SpinRow("Obst Inset", sim.ObstacleRadiusInset, v => sim.SetObstacleRadiusInset((float)v)));
+            AddChild(SpinRow("Obst Inset", sim.ObstacleRadiusInset, v =>
+            {
+                sim.SetObstacleRadiusInset((float)v);
+                PushSpin(_obstInsetSpin, sim.ObstacleRadiusInset, ref _seenObstInset);
+            }, out _obstInsetSpin));
+            // How far a destination click may be moved onto ground the agent's plan mask allows.
+            // The default is the mesh's GridCellSize, which is what the projection ALWAYS reaches;
+            // the ceiling is 3 cells because the search covers one cell ring and past its far
+            // corner (~2.83 cells) there is nothing left to find.
+            AddChild(SpinRow("Dest Snap Max", sim.DestinationSnapMaxDist, v =>
+            {
+                sim.DestinationSnapMaxDist = Mathf.Clamp((float)v, 0f, 3f * CellSizeOrOne());
+                // Push the CLAMPED value back, not just the bookkeeping: the box accepts up to 100
+                // while the ceiling is three cells, so without this the widget would keep showing
+                // a number the simulator refused and Refresh would see nothing to correct.
+                PushSpin(_snapMaxSpin, sim.DestinationSnapMaxDist, ref _seenSnapMax);
+            }, out _snapMaxSpin));
 
             var modes = new HBoxContainer();
             modes.AddChild(Btn("Place Agent", () => ToggleMode(InteractionMode.PlaceAgent)));
@@ -360,6 +442,11 @@ namespace xpTURN.Klotho.Godot
 
             _agentList = Lbl();
             AddChild(_agentList);
+            // Why the last destination click was refused. A lasting state rather than a GD message:
+            // a refusal is "it will not move" for as long as it stands, and Unity's window shows
+            // the same field, so both engines refuse in the same shape.
+            _destRefusal = Lbl();
+            AddChild(_destRefusal);
             AddChild(new HSeparator());
         }
 
@@ -408,6 +495,8 @@ namespace xpTURN.Klotho.Godot
             return l;
         }
 
+        // The wording lives here, not in the simulator: the simulator hands over an enum so the
+        // pattern tests can compare exactly and the phrasing can be tuned without breaking them.
         private static Label Lbl(string text = "")
         {
             // No autowrap: labels use explicit '\n'. An autowrap Label inside a container/ScrollContainer
@@ -440,14 +529,35 @@ namespace xpTURN.Klotho.Godot
             return row;
         }
 
+        // The snap knob's ceiling is expressed in cells, so it needs the loaded mesh's cell size;
+        // 1 keeps the clamp harmless before a mesh is loaded.
+        private float CellSizeOrOne()
+            => _ctrl?.Data != null && _ctrl.Data.IsLoaded
+                ? _ctrl.Data.NavMesh.GridCellSize.ToFloat() : 1f;
+
         private static HBoxContainer SpinRow(string label, double value, Action<double> onChanged)
+            => SpinRow(label, value, onChanged, out _);
+
+        // The out parameter rather than a changed return type: callers add the ROW to the tree, and
+        // only the two knobs the simulator rewrites need to be held onto.
+        private static HBoxContainer SpinRow(
+            string label, double value, Action<double> onChanged, out SpinBox spin)
         {
             var row = new HBoxContainer();
             row.AddChild(new Label { Text = label, CustomMinimumSize = new Vector2(70, 0) });
-            var sb = new SpinBox { MinValue = 0, MaxValue = 100, Step = 0.1, Value = value, SizeFlagsHorizontal = SizeFlags.ExpandFill };
-            sb.ValueChanged += v => onChanged(v);
-            row.AddChild(sb);
+            spin = new SpinBox { MinValue = 0, MaxValue = 100, Step = 0.1, Value = value, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+            spin.ValueChanged += v => onChanged(v);
+            row.AddChild(spin);
             return row;
+        }
+
+        // SetValueNoSignal, so a push is never mistaken for the user turning the knob — this is
+        // called from inside ValueChanged and a plain Value assignment there would re-enter.
+        private static void PushSpin(SpinBox spin, float value, ref double seen)
+        {
+            if (spin == null) return;
+            spin.SetValueNoSignal(value);
+            seen = value;
         }
 
         private static string Fmt(Vector3 v) => $"({v.X:F2}, {v.Y:F2}, {v.Z:F2})";

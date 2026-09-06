@@ -448,6 +448,7 @@ placement ghost that wants to warn before the click should measure with it.
 | `ClipCandidateMissing` | `ClipOverlap`: the placement barely grazes the walkable region (sliver under ~4 mm). Move it. | `IndexA` |
 | `ClipSplitsWalkableRegion` | `ClipOverlap`: the clipped shape would split into several regions (a spur through the footprint, or a chain enclosing a whole boundary ring). | `IndexA` |
 | `ClipRunsInterleave` | `ClipOverlap`: degenerate interleaved wall contact the clip cannot represent. | `IndexA` |
+| `BaseMeshUnsupported` | Not about this placement at all: the **stage** cannot be rebaked (see [The stage itself can be refused](#the-stage-itself-can-be-refused)). Returned by `FPNavMeshPlacementProbe` so an unsupported base is a value like every other refusal; ask `TryPrepare` at load and you never see it. | `IndexA` is `-1` — no building is at fault |
 
 `Rebake` / `RebakePlacements` do exactly the same thing but throw an `InvalidOperationException`
 instead of returning `false`. Use those for one-off work such as tests or tooling, and the `Try…`
@@ -491,11 +492,17 @@ and mean the asset cannot be rebaked at all:
 | Refusal | Type | Meaning |
 | --- | --- | --- |
 | `base mesh is not predicate-grid snapped` | `NotSupportedException` | The asset's vertices are not on the placement grid — re-export it. |
-| `base mesh has XZ-duplicate vertices (multi-level)` | `NotSupportedException` | Stacked floors — see [Limits](#9-limits). |
+| `base mesh has XZ-duplicate vertices (multi-level)` | `NotSupportedException` | Stacked floors that share a vertex — see [Limits](#9-limits). |
+| `base mesh boundary rings cross in XZ (stacked floors?)` | `NotSupportedException` | Stacked levels whose boundaries cross when projected. The message names the two segments in snapped grid coordinates, and the triangulator's own refusal rides along as the inner `FPConstraintCrossingException` (which derives from `InvalidOperationException`, so existing `catch` blocks are unaffected) with the crossing coordinates as fields. |
+| `zero-building rebake did not reproduce the base walkable region` | `NotSupportedException` | Stacked levels that overlap without crossing — a platform nested inside a floor. Caught by rebaking nothing and comparing the walkable area exactly; the message names the area lost. |
 
 Handle these at load time, where you can still fall back to running that stage without runtime
 building at all. If one shows up in a command handler instead, it means you built the context lazily
 on the first placement — build it at load.
+
+The area comparison in the last row is one number — total walkable area — so it catches a level that
+went missing but not damage that happens to preserve area (a hole that moved, two equal regions
+swapped). It is a guard against the silent case, not a proof of correctness.
 
 ### 4.6 Showing the player before they click
 
@@ -921,6 +928,12 @@ cheaper — nothing to carve differently.
 
 The base mesh dominates; each building already on the map adds roughly **0.07 ms**.
 
+**Retaining a footprint costs the same on a large stage as on a small one.** The stamp that marks a
+retained footprint `BUILDING_MASK` (§4.7) visits only the broadphase grid cells the footprint's
+bounding box touches, so its cost tracks footprint area rather than mesh size: 32 retained buildings
+cost **0.13 ms** on a 51k-triangle mesh and the same 0.13 ms on a 205k-triangle one. That matters
+because the stamp runs inside a single sliced step, which no work-unit budget can split.
+
 > **`ClipOverlap` costs the same as the other policies until a footprint actually overhangs.** Four
 > interior footprints on a synthetic grid, same placements, policy the only variable:
 >
@@ -1147,7 +1160,7 @@ retired), so a 22k-triangle stage holds roughly 5.9 MB of triangle data.
 
 | Limit | Detail |
 | --- | --- |
-| **Single level** | The base mesh must have XZ-unique vertices. Stacked floors and bridges are rejected at `CreateContext`. |
+| **Single level** | The base mesh must not overlap itself in XZ — one sheet, seen from above. Stacked floors and bridges are rejected at `CreateContext`, by three checks: XZ-duplicate vertices, boundary rings that cross in projection, and a zero-building rebake that fails to reproduce the base walkable area exactly (the case where nothing crosses because a platform nests wholly inside a floor). The third one runs whether or not you ask for the prewarm — a stacked base that is *accepted* produces a mesh that is wrong identically on every peer, which no fingerprint comparison can report. |
 | **Convex footprints** | Each footprint must be convex. An L-shape is expressible as touching convex pieces, but they are separate placements. |
 | **No crossing constraints** | Two building edges may not cross transversally; overlap is rejected before it can happen. |
 | **Shape size ceiling** | Around a kilometre of extent, the miter arithmetic runs out of Int64 and refuses by name. Real footprints are a few metres. |
@@ -1474,6 +1487,12 @@ var probe = new FPNavMeshPlacementProbe(baseMesh, shapeCatalog, logger)
     SnapToTilingLattice = true,   // centres land where footprints pack flush
 };
 
+// Ask ONCE, right after loading: a base the rebaker cannot take at all (see 4.5) is a load-time
+// refusal, and this is what keeps it from arriving as an exception inside the first click. Gate
+// the placement UI on it and show the reason; the rest of the tool still works on that mesh.
+if (!probe.TryPrepare(out string why))
+    DisablePlacementAndSay(why);
+
 // A refusal is a value, not an exception: pointing at ground you cannot build on is normal use,
 // and a refused placement is not added to the list.
 if (!probe.TryPlace(shapeId, orientation, cx, cz, y, retain: true,
@@ -1487,6 +1506,19 @@ FPNavMesh baseAgain = probe.Revert();                          // back to the ba
 Every call that changes the list hands back the mesh it now bakes to, so the caller installs one
 mesh per edit and never has to ask what the current one is. `Revert` returns the **same** base
 instance it was constructed with, not a zero-placement rebake.
+
+**A refusal never changes the list**, in either direction. `TryPlace` undoes its append, and
+`TryRemoveAt` puts the building back — which matters more than it sounds, because a removal *can* be
+refused: `Rules` is a public setter, so tightening the boundary policy and then removing one of two
+buildings has the survivor judged under the new rules. Without the undo the list would stop holding a
+building the scene still shows, and the next successful rebake would ship a mesh missing it. An
+out-of-range index is a caller bug and throws `ArgumentOutOfRangeException` rather than being read
+off the end.
+
+**An unsupported stage is a value here too.** `TryPrepare` remembers its verdict, so a base the
+rebaker cannot take is decided once instead of rebuilding the triangulation on every click, and
+`TryPlace` / `TryRemoveAt` / `TryRebake` return false with `FPBuildingRejection.BaseMeshUnsupported`
+instead of throwing out of an API whose contract is to report a refusal as a value.
 
 It lives in the **runtime**, not in editor code, for two reasons that are worth repeating if you are
 tempted to copy it into a tool: an editor assembly cannot be reached by the test suites, and the

@@ -246,20 +246,28 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.Throws<NotSupportedException>(() => FPNavMeshRebaker.Rebake(offGrid, null));
         }
 
+        /// <summary>
+        /// <c>prewarm</c> gates the TIMING LOG, not the work. The zero-building rebake that warms
+        /// the path is also the validation that the base survives one, and a stage cannot opt out
+        /// of being validated — least of all under IL2CPP, which is where a silently wrong navmesh
+        /// would ship. This pair used to be named and worded as if the warming itself were
+        /// optional; it passed either way, which is how the wording outlived the truth.
+        /// </summary>
         [Test]
-        public void CreateSnapshot_EmbedsPrewarm_OptOutAvailable()
+        public void CreateSnapshot_AlwaysWarms_AndOnlyTheTimingLogIsOptional()
         {
             FPNavMesh baseMesh = BuildBase();
 
             var capture = new LogCapture();
             FPNavMeshRebaker.CreateSnapshot(baseMesh, capture);
             Assert.IsTrue(capture.Contains(KLogLevel.Information, "prewarmed"),
-                "default CreateSnapshot must run the embedded prewarm (non-IL2CPP build)");
+                "the default reports the timing of the rebake it just ran");
 
             var silent = new LogCapture();
             FPNavMeshRebaker.CreateSnapshot(baseMesh, silent, prewarm: false);
             Assert.IsFalse(silent.Contains(KLogLevel.Information, "prewarmed"),
-                "prewarm: false must skip the warming step");
+                "prewarm: false suppresses that LOG — the rebake underneath still runs, because it "
+                + "is the base-planarity validation and no caller may skip it");
         }
 
         [Test]
@@ -280,12 +288,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 baseMesh.BakeAgentHeight, baseMesh.BakeAgentClimb);
 
             Assert.Throws<NotSupportedException>(() => FPNavMeshRebaker.CreateSnapshot(multiLevel));
-        }
-
-        [Test]
-        public void Prewarm_NullSnapshot_NoOp()
-        {
-            Assert.DoesNotThrow(() => FPNavMeshRebaker.Prewarm(null));
         }
 
         // ── buildingCount: a reused buffer instead of an exact-size copy ─────

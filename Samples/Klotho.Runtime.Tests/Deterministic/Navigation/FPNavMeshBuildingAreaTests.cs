@@ -355,5 +355,272 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.AreNotEqual(stamped, FPNavMeshRebaker.ComputeFingerprint(a),
                 "the stamp is not part of the fingerprint");
         }
+
+        // ── C-6: the stamp's TRAVERSAL ───────────────────────────────────────
+        //
+        // C-1 pins one building at one position on one stage. What the stamp DOES with the mesh —
+        // which triangles it even looks at — is a separate axis, and these widen C-1's oracle along
+        // it: building count, position relative to the broadphase grid, and stage size.
+        //
+        // The oracle is deliberately C-1's and not a second implementation. "Inside" is recomputed
+        // here in doubles from the engine's own expansion, so these assert what the stamp SHOULD
+        // have done rather than that two implementations agree — a duplicated implementation would
+        // be green against the implementation it duplicates and would verify nothing.
+        //
+        // The grid matters because the field's broadphase cell is 8 world units (CELL * 4) while a
+        // footprint is ~3.5 across: a footprint sits inside one cell, straddles two, or straddles
+        // four depending on where it lands, and a traversal that walks cells has to get all three
+        // right.
+
+        /// <summary>Field extent in world units for a `cells` x `cells` lattice.</summary>
+        private static double Extent(int cells) => cells * 2.0;
+
+        private static FPNavMesh RetainedAt(int cells, params (double x, double z)[] centres)
+        {
+            var placements = new FPBuildingPlacement[centres.Length];
+            for (int i = 0; i < centres.Length; i++)
+                placements[i] = NavAgentTestHelper.Building(centres[i].x, centres[i].z, retain: true);
+            return NavAgentTestHelper.RebakeWithBuildings(
+                NavAgentTestHelper.CreateOpenFieldNavMesh(cells), placements);
+        }
+
+        /// <summary>
+        /// C-1's assertion over an arbitrary footprint set: every triangle, both directions.
+        /// <paramref name="half"/> is the engine's own expanded half extent, and the footprints are
+        /// axis-aligned squares of it, so "inside any" is the union test.
+        /// </summary>
+        private static void AssertStampedExactly(
+            FPNavMesh mesh, double half, params (double x, double z)[] centres)
+        {
+            int baseMask = 1 << 0;
+            int inside = 0, outside = 0;
+            var vs = mesh.Vertices;
+            for (int t = 0; t < mesh.Triangles.Length; t++)
+            {
+                ref readonly FPNavMeshTriangle tri = ref mesh.Triangles[t];
+                double cx = (vs[tri.v0].x.ToDouble() + vs[tri.v1].x.ToDouble() + vs[tri.v2].x.ToDouble()) / 3.0;
+                double cz = (vs[tri.v0].z.ToDouble() + vs[tri.v1].z.ToDouble() + vs[tri.v2].z.ToDouble()) / 3.0;
+
+                bool within = false;
+                foreach ((double x, double z) c in centres)
+                {
+                    if (System.Math.Abs(cx - c.x) < half - 1e-9 && System.Math.Abs(cz - c.z) < half - 1e-9)
+                    {
+                        within = true;
+                        break;
+                    }
+                }
+
+                if (within)
+                {
+                    inside++;
+                    Assert.AreEqual(FPNavMeshAreas.BUILDING_MASK, tri.areaMask,
+                        $"triangle {t} (centroid {cx:F3}, {cz:F3}) is inside a retained footprint " +
+                        "but was not stamped — the traversal missed it");
+                }
+                else
+                {
+                    outside++;
+                    Assert.AreEqual(baseMask, tri.areaMask,
+                        $"triangle {t} (centroid {cx:F3}, {cz:F3}) is outside every footprint " +
+                        "but carries the building bit");
+                }
+            }
+            Assert.Greater(inside, 0, "fixture: nothing inside a footprint");
+            Assert.Greater(outside, 0, "fixture: nothing outside every footprint");
+        }
+
+        /// <summary>Non-overlapping lattice of centres, stepped wider than a full footprint.</summary>
+        private static (double x, double z)[] Lattice(int count, double first, double step)
+        {
+            int perSide = (int)System.Math.Ceiling(System.Math.Sqrt(count));
+            var result = new (double x, double z)[count];
+            for (int i = 0; i < count; i++)
+                result[i] = (first + (i % perSide) * step, first + (i / perSide) * step);
+            return result;
+        }
+
+        [Test]
+        public void C6_OneFootprint_OnACellBoundary_IsStampedExactly()
+        {
+            // Centre (8,8) with an 8-unit cell: the footprint straddles FOUR cells.
+            var centres = new[] { (8.0, 8.0) };
+            FPNavMesh mesh = RetainedAt(8, centres);
+            AssertStampedExactly(mesh, NavAgentTestHelper.ExpandedBuildingHalf(mesh), centres);
+        }
+
+        [Test]
+        public void C6_OneFootprint_InsideASingleCell_IsStampedExactly()
+        {
+            // Centre (4,4): the whole footprint [2.25, 5.75] lives in cell (0,0).
+            var centres = new[] { (4.0, 4.0) };
+            FPNavMesh mesh = RetainedAt(8, centres);
+            AssertStampedExactly(mesh, NavAgentTestHelper.ExpandedBuildingHalf(mesh), centres);
+        }
+
+        [Test]
+        public void C6_OneFootprint_AtTheMapCorner_IsStampedExactly()
+        {
+            // As close to (0,0) as the expansion allows: cell (0,0) is also the grid's first cell,
+            // so a range computed with a sign slip lands outside and stamps nothing.
+            var centres = new[] { (2.0, 2.0) };
+            FPNavMesh mesh = RetainedAt(8, centres);
+            AssertStampedExactly(mesh, NavAgentTestHelper.ExpandedBuildingHalf(mesh), centres);
+        }
+
+        [Test]
+        public void C6_AFlushPair_IsStampedExactly()
+        {
+            // Two footprints sharing an edge — the shared run is interior ground, and a triangle
+            // there belongs to exactly one of the two rings.
+            FPNavMesh probe = RetainedAt(8, (4.0, 4.0));
+            double half = NavAgentTestHelper.ExpandedBuildingHalf(probe);
+
+            var centres = new[] { (4.0, 4.0), (4.0 + 2 * half, 4.0) };
+            FPNavMesh mesh = RetainedAt(8, centres);
+            AssertStampedExactly(mesh, half, centres);
+        }
+
+        [Test]
+        public void C6_TwoFootprints_InDifferentCells_AreStampedExactly()
+        {
+            var centres = new[] { (4.0, 4.0), (12.0, 12.0) };
+            FPNavMesh mesh = RetainedAt(8, centres);
+            AssertStampedExactly(mesh, NavAgentTestHelper.ExpandedBuildingHalf(mesh), centres);
+        }
+
+        [Test]
+        public void C6_EightFootprints_OnALargerStage_AreStampedExactly()
+        {
+            var centres = Lattice(8, first: 4.0, step: 6.0);
+            FPNavMesh mesh = RetainedAt(32, centres);
+            AssertStampedExactly(mesh, NavAgentTestHelper.ExpandedBuildingHalf(mesh), centres);
+        }
+
+        [Test]
+        public void C6_ThirtyTwoFootprints_AreStampedExactly()
+        {
+            // The policy cap. The building loop is what this change restructures, so the count is
+            // the axis that matters most and no other test asserts masks with more than one.
+            var centres = Lattice(32, first: 4.0, step: 6.0);
+            FPNavMesh mesh = RetainedAt(32, centres);
+            AssertStampedExactly(mesh, NavAgentTestHelper.ExpandedBuildingHalf(mesh), centres);
+        }
+
+        // ── C-7: the defensive edges, reached by calling the stamp directly ──
+        //
+        // A footprint outside the mesh cannot be PLACED — validation refuses it — so these go
+        // through the internal entry point. That is the honest shape: this is a guard, not a
+        // reachable defect, and a test that pretended otherwise would be asserting on a rejection.
+
+        private const byte RetainByte = 1;   // FPNavMeshRebaker.RETAIN — private const, hence the literal
+        private const byte CarveByte = 0;    // FPNavMeshRebaker.CARVE
+
+        private static void Ring(
+            double minX, double minZ, double maxX, double maxZ,
+            out long[] px, out long[] pz, out int[] start)
+        {
+            long u = FPGeoPredicates.SNAP_UNITS_PER_WORLD;
+            long x0 = (long)(minX * u), z0 = (long)(minZ * u);
+            long x1 = (long)(maxX * u), z1 = (long)(maxZ * u);
+            px = new[] { x0, x1, x1, x0 };
+            pz = new[] { z0, z0, z1, z1 };
+            start = new[] { 0, 4 };
+        }
+
+        [Test]
+        public void C7_AFootprintWhollyOutsideTheGrid_StampsNothing()
+        {
+            FPNavMesh mesh = RetainedAt(8, (8.0, 8.0));
+            var before = new int[mesh.Triangles.Length];
+            for (int t = 0; t < before.Length; t++)
+                before[t] = mesh.Triangles[t].areaMask;
+
+            foreach ((double x0, double z0, double x1, double z1) box in new[]
+            {
+                (-100.0, -100.0, -90.0, -90.0),   // below the origin in both axes
+                (100.0, 100.0, 110.0, 110.0),     // past the far corner
+                (-100.0, 4.0, -90.0, 12.0),       // left of the grid, overlapping in z
+            })
+            {
+                Ring(box.x0, box.z0, box.x1, box.z1, out long[] px, out long[] pz, out int[] start);
+                FPNavMeshRebaker.StampRetainedFootprints(
+                    mesh, px, pz, start, 1, new[] { RetainByte });
+            }
+
+            for (int t = 0; t < before.Length; t++)
+                Assert.AreEqual(before[t], mesh.Triangles[t].areaMask,
+                    $"triangle {t} moved for a footprint that is entirely outside the mesh");
+        }
+
+        [Test]
+        public void C7_AFootprintHalfOutsideTheGrid_StampsTheHalfInside()
+        {
+            // Clamping the cell range must not lose the part that IS on the mesh.
+            FPNavMesh mesh = RetainedAt(8, (12.0, 12.0));
+            Ring(-4.0, -4.0, 4.0, 4.0, out long[] px, out long[] pz, out int[] start);
+            FPNavMeshRebaker.StampRetainedFootprints(
+                mesh, px, pz, start, 1, new[] { RetainByte });
+
+            // Union of the placed footprint and the hand-made ring's on-mesh part.
+            double half = NavAgentTestHelper.ExpandedBuildingHalf(mesh);
+            int stamped = 0;
+            var vs = mesh.Vertices;
+            for (int t = 0; t < mesh.Triangles.Length; t++)
+            {
+                ref readonly FPNavMeshTriangle tri = ref mesh.Triangles[t];
+                double cx = (vs[tri.v0].x.ToDouble() + vs[tri.v1].x.ToDouble() + vs[tri.v2].x.ToDouble()) / 3.0;
+                double cz = (vs[tri.v0].z.ToDouble() + vs[tri.v1].z.ToDouble() + vs[tri.v2].z.ToDouble()) / 3.0;
+                bool inRing = cx > -4.0 && cx < 4.0 && cz > -4.0 && cz < 4.0;
+                bool inPlaced = System.Math.Abs(cx - 12.0) < half - 1e-9
+                             && System.Math.Abs(cz - 12.0) < half - 1e-9;
+                if (inRing || inPlaced)
+                {
+                    stamped++;
+                    Assert.AreEqual(FPNavMeshAreas.BUILDING_MASK, tri.areaMask,
+                        $"triangle {t} (centroid {cx:F3}, {cz:F3}) is inside the clipped ring but was not stamped");
+                }
+            }
+            Assert.Greater(stamped, 0, "fixture: the half-outside ring covered no triangle");
+        }
+
+        [Test]
+        public void C7_ACarveSlot_IsNotStamped()
+        {
+            FPNavMesh mesh = RetainedAt(8, (12.0, 12.0));
+            var before = new int[mesh.Triangles.Length];
+            for (int t = 0; t < before.Length; t++)
+                before[t] = mesh.Triangles[t].areaMask;
+
+            Ring(2.0, 2.0, 6.0, 6.0, out long[] px, out long[] pz, out int[] start);
+            FPNavMeshRebaker.StampRetainedFootprints(
+                mesh, px, pz, start, 1, new[] { CarveByte });
+
+            for (int t = 0; t < before.Length; t++)
+                Assert.AreEqual(before[t], mesh.Triangles[t].areaMask,
+                    $"triangle {t} moved for a CARVE slot");
+        }
+
+        // ── C-8: the premise the traversal argument hangs on ─────────────────
+
+        [Test]
+        public void C8_TheBroadphaseCellFunction_IsMonotone()
+        {
+            // "The centroid is inside the ring's AABB" only implies "its cell is inside the ring's
+            // CELL RANGE" if the coordinate -> cell map is monotone. It is — FP64 division
+            // truncates toward zero and ToInt() floors, and both are non-decreasing — but nothing
+            // pinned it, and the whole traversal argument rests on it.
+            FPNavMesh mesh = NavAgentTestHelper.CreateOpenFieldNavMesh(8);
+            int prevCol = int.MinValue, prevRow = int.MinValue;
+            for (double v = -40.0; v <= 40.0; v += 0.37)
+            {
+                mesh.GetCellCoords(
+                    new FPVector2(FP64.FromDouble(v), FP64.FromDouble(v)), out int col, out int row);
+                Assert.GreaterOrEqual(col, prevCol, $"col went backwards at {v}");
+                Assert.GreaterOrEqual(row, prevRow, $"row went backwards at {v}");
+                prevCol = col;
+                prevRow = row;
+            }
+        }
     }
 }

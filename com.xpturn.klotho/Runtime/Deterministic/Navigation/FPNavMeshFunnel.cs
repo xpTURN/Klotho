@@ -20,19 +20,31 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private readonly FPVector3[] _portalRight;
         private readonly FPVector3[] _waypoints;
 
+        /// <remarks><b>Defaults, not this instance's values</b> — sized from
+        /// <see cref="FPNavTuning.MaxPortals"/> / <see cref="FPNavTuning.MaxWaypoints"/>.</remarks>
         public const int MAX_PORTALS = 128;
+        /// <inheritdoc cref="MAX_PORTALS"/>
         public const int MAX_WAYPOINTS = 64;
+
+        private readonly FPNavTuning _tuning;
+
+        /// <summary>The sizes this instance was built with (see <see cref="FPNavTuning"/>).</summary>
+        public FPNavTuning Tuning => _tuning;
 
         private IKLogger _logger;
 
-        public FPNavMeshFunnel(FPNavMesh navMesh, FPNavMeshQuery query, IKLogger logger)
+        public FPNavMeshFunnel(FPNavMesh navMesh, FPNavMeshQuery query, IKLogger logger,
+            FPNavTuning? tuning = null)
         {
             _navMesh = navMesh;
             _logger = logger;
             
-            _portalLeft = new FPVector3[MAX_PORTALS];
-            _portalRight = new FPVector3[MAX_PORTALS];
-            _waypoints = new FPVector3[MAX_WAYPOINTS];
+            _tuning = tuning ?? FPNavTuning.Default;
+            _tuning.Validate();
+
+            _portalLeft = new FPVector3[_tuning.MaxPortals];
+            _portalRight = new FPVector3[_tuning.MaxPortals];
+            _waypoints = new FPVector3[_tuning.MaxWaypoints];
         }
 
         /// <summary>
@@ -67,12 +79,21 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             if (corridorLength <= 0)
                 return;
 
-            // Single triangle - straight line from start to end
+            // Single triangle - straight line from start to end. Both writes are bounded by the
+            // buffer: MaxWaypoints is a tuning knob, and a 1-waypoint buffer would otherwise be
+            // overrun by the second one.
             if (corridorLength == 1)
             {
                 _waypoints[0] = start;
-                _waypoints[1] = end;
-                waypointCount = 2;
+                if (_waypoints.Length >= 2)
+                {
+                    _waypoints[1] = end;
+                    waypointCount = 2;
+                }
+                else
+                {
+                    waypointCount = 1;
+                }
                 return;
             }
 
@@ -99,8 +120,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             // Shared edges between corridor[i] -> corridor[i+1]
             // start(1) + shared edges(corridorLength-1) + end(1) = corridorLength+1 portals required
-            // If MAX_PORTALS is exceeded, the corridor tail is truncated and the end portal is appended after the last processed edge
-            for (int i = 0; i < corridorLength - 1 && portalCount < MAX_PORTALS - 1; i++)
+            // If the portal budget is exceeded, the corridor tail is truncated and the end portal is appended after the last processed edge
+            for (int i = 0; i < corridorLength - 1 && portalCount < _tuning.MaxPortals - 1; i++)
             {
                 int curTri = corridor[i];
                 int nextTri = corridor[i + 1];
@@ -114,7 +135,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             }
 
             // Last portal: end
-            if (portalCount < MAX_PORTALS)
+            if (portalCount < _tuning.MaxPortals)
             {
                 _portalLeft[portalCount] = end;
                 _portalRight[portalCount] = end;
@@ -155,10 +176,25 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
         private static readonly FP64 MIN_TARGET_DIST_SQR = FP64.FromDouble(0.01 * 0.01);
 
+        /// <summary>
+        /// Corners for the corridor, at most <paramref name="maxCorners"/> of them.
+        ///
+        /// <para><b>The buffer is the upper bound, not the request.</b> Callers do not agree on
+        /// <paramref name="maxCorners"/> — the tick path asks for 4, the editor overlays for 8,
+        /// tests for 16 — while the buffer is sized once from <c>FPNavTuning.MaxWaypoints</c>. So
+        /// the request is clamped to what the buffer can back rather than trusted: a tuning is
+        /// checked where it is built, but nothing checks it against a number a caller invents here.
+        /// A clamp that bites returns fewer corners than asked; it never writes past the end.</para>
+        /// </summary>
         public int FindCorners(int[] corridor, int corridorLength,
             FPVector3 currentPos, FPVector3 target, int maxCorners)
         {
             if (corridorLength <= 0)
+                return 0;
+
+            if (maxCorners > _waypoints.Length)
+                maxCorners = _waypoints.Length;
+            if (maxCorners <= 0)
                 return 0;
 
             if (corridorLength == 1)
@@ -281,7 +317,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // start waypoint
             _waypoints[wpCount++] = new FPVector3(start.x, start.y, start.z);
 
-            for (int i = 1; i < portalCount && wpCount < MAX_WAYPOINTS - 1; i++)
+            for (int i = 1; i < portalCount && wpCount < _tuning.MaxWaypoints - 1; i++)
             {
                 FPVector2 newLeft = _portalLeft[i].ToXZ();
                 FPVector2 newRight = _portalRight[i].ToXZ();
@@ -341,7 +377,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             }
 
             // end waypoint
-            if (wpCount < MAX_WAYPOINTS)
+            if (wpCount < _tuning.MaxWaypoints)
             {
                 _waypoints[wpCount++] = new FPVector3(end.x, end.y, end.z);
             }

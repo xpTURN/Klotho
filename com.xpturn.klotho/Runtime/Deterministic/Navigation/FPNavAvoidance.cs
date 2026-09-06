@@ -21,12 +21,20 @@ namespace xpTURN.Klotho.Deterministic.Navigation
     /// </summary>
     public class FPNavAvoidance
     {
+        /// <remarks><b>Defaults, not this instance's values</b> — sized from
+        /// <see cref="FPNavTuning.MaxOrcaLines"/> / <see cref="FPNavTuning.MaxNeighbors"/>.</remarks>
         public const int MAX_ORCA_LINES = 64;
+        /// <inheritdoc cref="MAX_ORCA_LINES"/>
         public const int MAX_NEIGHBORS = 16;
 
         // Obstacle line budget. Reserves MAX_NEIGHBORS slots for agent lines so obstacle
         // lines (filled first) can never starve agent-to-agent avoidance.
         public const int MAX_OBST_LINES = MAX_ORCA_LINES - MAX_NEIGHBORS;
+
+        private readonly FPNavTuning _tuning;
+
+        /// <summary>The sizes this instance was built with (see <see cref="FPNavTuning"/>).</summary>
+        public FPNavTuning Tuning => _tuning;
 
         // Load-time coordinate range guard: keeps FP64 (Q32.32) products off the saturation
         // range. Products of two values must stay below ~sqrt(2^31) ~= 46340.
@@ -66,12 +74,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private int _orcaLineCount;
 
         // Neighbor selection buffers (avoid per-frame allocation)
-        private readonly FP64[] _neighborDistSqr = new FP64[MAX_NEIGHBORS];
-        private readonly int[] _neighborIndices = new int[MAX_NEIGHBORS];
+        private readonly FP64[] _neighborDistSqr;
+        private readonly int[] _neighborIndices;
         private int _neighborCount;
 
         // Projected constraint buffer for LinearProgram3 (RVO2 projLines) — zero-GC
-        private readonly FPOrcaLine[] _projLines = new FPOrcaLine[MAX_ORCA_LINES];
+        private readonly FPOrcaLine[] _projLines;
         private int _infeasibleCount;
 
         // Static obstacle data (loaded once via LoadObstacles, tick-independent)
@@ -80,8 +88,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private int _numObstLines;
 
         // Obstacle neighbor selection buffers (sorted by point-segment distSq; nearest-first)
-        private readonly FP64[] _obstNeighborDistSqr = new FP64[MAX_OBST_LINES];
-        private readonly int[] _obstNeighborIndices = new int[MAX_OBST_LINES];
+        private readonly FP64[] _obstNeighborDistSqr;
+        private readonly int[] _obstNeighborIndices;
         private int _obstNeighborCount;
 
         // Hot-path event counter (no logging on the tick path — GC 0)
@@ -122,15 +130,24 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         public int DebugSelectedObstacleCount => _obstNeighborCount;
         public bool DebugLastObstaclePathWasGraph => _lastObstaclePathWasGraph;
 
-        public FPNavAvoidance()
+        public FPNavAvoidance(FPNavTuning? tuning = null)
         {
+            _tuning = tuning ?? FPNavTuning.Default;
+            _tuning.Validate();
+
+            _neighborDistSqr = new FP64[_tuning.MaxNeighbors];
+            _neighborIndices = new int[_tuning.MaxNeighbors];
+            _projLines = new FPOrcaLine[_tuning.MaxOrcaLines];
+            _obstNeighborDistSqr = new FP64[_tuning.MaxObstLines];
+            _obstNeighborIndices = new int[_tuning.MaxObstLines];
+
             NeighborDist = FP64.FromInt(5);
             TimeHorizon = FP64.FromInt(3);
             // Static walls do not move, so a short anticipation window suffices; a long one turns
             // every wall within TimeHorizonObst*speed+radius into a hard LP constraint and traps
             // path-following agents in corners/corridors (measured: 1.0 stalls, <=0.25 reaches).
             TimeHorizonObst = FP64.FromDouble(0.25);
-            _orcaLines = new FPOrcaLine[MAX_ORCA_LINES];
+            _orcaLines = new FPOrcaLine[_tuning.MaxOrcaLines];
             _orcaLineCount = 0;
         }
 
@@ -139,7 +156,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         private void InsertNeighbor(int index, FP64 distSqr)
         {
-            if (_neighborCount < MAX_NEIGHBORS)
+            if (_neighborCount < _neighborIndices.Length)
             {
                 // Buffer not full — insert in sorted position
                 int pos = _neighborCount;
@@ -273,7 +290,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         private void InsertObstacleNeighbor(int index, FP64 distSqr)
         {
-            if (_obstNeighborCount < MAX_OBST_LINES)
+            if (_obstNeighborCount < _obstNeighborIndices.Length)
             {
                 int pos = _obstNeighborCount;
                 while (pos > 0 && distSqr < _obstNeighborDistSqr[pos - 1])
@@ -729,7 +746,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
                 for (int n = 0; n < _obstNeighborCount; n++)
                 {
-                    if (_orcaLineCount >= MAX_OBST_LINES)
+                    if (_orcaLineCount >= _tuning.MaxObstLines)
                     {
                         _obstLineOverflowCount++;
                         break;
@@ -762,7 +779,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             }
 
             // Build ORCA lines from selected neighbors
-            for (int n = 0; n < _neighborCount && _orcaLineCount < MAX_ORCA_LINES; n++)
+            for (int n = 0; n < _neighborCount && _orcaLineCount < _tuning.MaxOrcaLines; n++)
             {
                 int i = _neighborIndices[n];
                 ref var other = ref frame.Get<NavAgentComponent>(entities[i]);

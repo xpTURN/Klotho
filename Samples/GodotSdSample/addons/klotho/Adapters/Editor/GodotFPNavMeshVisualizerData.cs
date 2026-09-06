@@ -81,10 +81,33 @@ namespace xpTURN.Klotho.Godot
 
         public int PlacementCount => _probe != null ? _probe.Count : 0;
 
+        /// <summary>
+        /// Null when this base mesh supports rebaking; the refusal message when it does not
+        /// (a stacked base — see <c>FPNavMeshPlacementProbe.TryPrepare</c>). Set at load, so
+        /// placement is gated before the first click rather than throwing inside it.
+        /// </summary>
+        public string PlacementUnsupportedReason { get; private set; }
+
+        public bool PlacementSupported => _probe != null && PlacementUnsupportedReason == null;
+
+        // Tool settings live HERE, not on the probe. A new base means a new probe (see
+        // LoadFromBytes) and the probe starts at its own defaults, so a value kept only there is
+        // silently reset by every load while the UI goes on showing the old choice. Worse in
+        // Unity, whose play-mode bridge leaves _probe null on purpose — there is not even
+        // something to copy back from. How the tool is being used is not a property of the mesh.
+        // The defaults MUST match the probe's own (see ApplyToolSettings).
+        private FPBuildingPlacementRules _placementRules =
+            new FPBuildingPlacementRules(allowBuildingTouch: true, FPBoundaryPlacementPolicy.Touch);
+        private bool _snapPlacementToLattice = true;
+
         public FPBuildingPlacementRules PlacementRules
         {
-            get => _probe != null ? _probe.Rules : default;
-            set { if (_probe != null) _probe.Rules = value; }
+            get => _placementRules;
+            set
+            {
+                _placementRules = value;
+                if (_probe != null) _probe.Rules = value;
+            }
         }
 
         public FPBuildingPlacement PlacementAt(int index) => _probe.PlacementAt(index);
@@ -93,8 +116,23 @@ namespace xpTURN.Klotho.Godot
         /// sliver. On by default — plain quantisation keeps a placement legal but not flush.</summary>
         public bool SnapPlacementToLattice
         {
-            get => _probe == null || _probe.SnapToTilingLattice;
-            set { if (_probe != null) _probe.SnapToTilingLattice = value; }
+            get => _snapPlacementToLattice;
+            set
+            {
+                _snapPlacementToLattice = value;
+                if (_probe != null) _probe.SnapToTilingLattice = value;
+            }
+        }
+
+        /// <summary>
+        /// Hands the tool settings to a freshly built probe. Called wherever <c>_probe</c> is
+        /// created — the probe's constructor defaults are the FALLBACK, never the live choice.
+        /// </summary>
+        private void ApplyToolSettings()
+        {
+            if (_probe == null) return;
+            _probe.Rules = _placementRules;
+            _probe.SnapToTilingLattice = _snapPlacementToLattice;
         }
 
         public bool TryPlaceBuilding(
@@ -102,7 +140,7 @@ namespace xpTURN.Klotho.Godot
             out FPBuildingRejectionInfo rejection)
         {
             rejection = default;
-            if (_probe == null) return false;
+            if (!PlacementSupported) return false;
 
             if (!_probe.TryPlace(shapeId, orientation,
                     FP64.FromFloat(point.X), FP64.FromFloat(point.Z), FP64.FromFloat(point.Y),
@@ -113,10 +151,16 @@ namespace xpTURN.Klotho.Godot
             return true;
         }
 
-        public bool TryRemoveBuilding(int index)
+        /// <summary>
+        /// Drops a placement. <paramref name="rejection"/> says why when this returns false and the
+        /// list is unchanged — a removal CAN be refused once <c>Rules</c> has moved, and a caller
+        /// that discards this reports nothing while the scene and the list disagree.
+        /// </summary>
+        public bool TryRemoveBuilding(int index, out FPBuildingRejectionInfo rejection)
         {
-            if (_probe == null || index < 0 || index >= _probe.Count) return false;
-            if (!_probe.TryRemoveAt(index, out FPNavMesh mesh, out _)) return false;
+            rejection = default;
+            if (!PlacementSupported || index < 0 || index >= _probe.Count) return false;
+            if (!_probe.TryRemoveAt(index, out FPNavMesh mesh, out rejection)) return false;
             InstallRebakedMesh(mesh);
             return true;
         }
@@ -124,7 +168,7 @@ namespace xpTURN.Klotho.Godot
         public bool TryRebakeBuildings(out FPBuildingRejectionInfo rejection)
         {
             rejection = default;
-            if (_probe == null) return false;
+            if (!PlacementSupported) return false;
             if (!_probe.TryRebake(out FPNavMesh mesh, out rejection)) return false;
             InstallRebakedMesh(mesh);
             return true;
@@ -186,6 +230,13 @@ namespace xpTURN.Klotho.Godot
                 ClearPath();
                 // A new base means a new probe: the snapshot it caches is a function of the base.
                 _probe = new FPNavMeshPlacementProbe(NavMesh, FPNavMeshPlacementProbe.ToolCatalog);
+                ApplyToolSettings();
+                // Build that snapshot NOW. A base the rebaker cannot take is a LOAD-time refusal,
+                // and asking here is what keeps it out of the first click — the viewer still shows
+                // the mesh, paths and agents; only placement goes dark, with the reason.
+                PlacementUnsupportedReason = _probe.TryPrepare(out string why) ? null : why;
+                if (PlacementUnsupportedReason != null)
+                    GD.PushWarning($"[GodotFPNavMeshVisualizer] building placement disabled: {why}");
                 return true;
             }
             catch (System.Exception e)
@@ -209,6 +260,7 @@ namespace xpTURN.Klotho.Godot
             ObstacleRings.Clear();
             ClearPath();
             _probe = null;
+            PlacementUnsupportedReason = null;
         }
 
         public void BuildRenderCache()

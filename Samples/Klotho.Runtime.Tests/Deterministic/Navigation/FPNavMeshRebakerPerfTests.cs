@@ -605,6 +605,111 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         #region P0 — large-map gate
 
         /// <summary>Square grid stage: (2*half+1)^2 vertices, unit cells, agent radius 0.5.</summary>
+        // ── P0 H: what the retain stamp costs ────────────────────────────────
+
+        /// <summary>
+        /// `StampRetainedFootprints` runs inside `Finish`, which is ONE time-sliced step and is
+        /// charged to no work-unit budget. There is no seam inside `Finish`, and the cost we care
+        /// about is microseconds inside a multi-millisecond rebake — a before/after diff of the
+        /// whole rebake cannot resolve it. So this calls the stamp directly on a real rebaked mesh,
+        /// with the real expanded rings.
+        ///
+        /// <para>The rings are exact rather than approximate: the catalog shape is a square at
+        /// orientation 0, so its expanded polygon IS an axis-aligned square of
+        /// <c>FPBuildingShapeExpansion.ExpandedX[0]</c> about the (snapped) centre.</para>
+        /// </summary>
+        [Test]
+        public void P0H_RetainStampCost()
+        {
+            TestContext.Out.WriteLine("=== P0 H: StampRetainedFootprints, direct, on a rebaked mesh ===");
+            TestContext.Out.WriteLine($"{"tris",9} {"retain",7} {"ms",9} {"us",9}");
+
+            foreach (int half in new[] { 40, 80, 160 })
+            {
+                FPNavMesh baseMesh = BuildGridStage(half);
+                var catalog = StampCatalog();
+                var snapshot = FPNavMeshRebaker.CreateSnapshot(
+                    baseMesh, null, prewarm: false, shapeCatalog: catalog);
+                long expanded = new FPBuildingShapeExpansion(catalog, baseMesh.BakeAgentRadius).ExpandedX[0];
+
+                foreach (int count in new[] { 8, 32 })
+                {
+                    FPBuildingPlacement[] placements = StampPlacements(count, half);
+                    FPNavMesh mesh = FPNavMeshRebaker.RebakePlacements(snapshot, placements, null);
+                    if (mesh == null)
+                    {
+                        TestContext.Out.WriteLine($"{baseMesh.Triangles.Length,9} {count,7} — placements refused");
+                        continue;
+                    }
+
+                    StampRings(placements, expanded,
+                        out long[] px, out long[] pz, out int[] start, out byte[] retain);
+
+                    var m = Measure(
+                        () => FPNavMeshRebaker.StampRetainedFootprints(
+                            mesh, px, pz, start, placements.Length, retain),
+                        warmup: 8, iterations: 9);
+
+                    TestContext.Out.WriteLine(
+                        $"{mesh.Triangles.Length,9} {count,7} {m.minMs,9:F4} {m.minMs * 1000,9:F1}");
+
+                    // The gate: the stamp must not be a slice-sized cost. The worst indivisible
+                    // step of a time-sliced rebake on the 205k stage is 2.13 ms; this must stay
+                    // far under it.
+                    Assert.Less(m.minMs, 2.0,
+                        $"the retain stamp costs {m.minMs:F3} ms on {mesh.Triangles.Length} triangles " +
+                        $"with {count} retained buildings — that is slice-sized, inside a step no budget covers");
+                }
+            }
+        }
+
+        private static FPBuildingShapeCatalog StampCatalog()
+        {
+            long h = FPGeoPredicates.SNAP_UNITS_PER_WORLD / 2;   // 0.5 world units, on the grid
+            FPBuildingShapeCatalog.ObbOffsets(h, h, 4, out long[] x, out long[] z, out int[] entryStart);
+            return new FPBuildingShapeCatalog(x, z, entryStart);
+        }
+
+        /// <summary>Retained placements on a lattice wide enough that none of them overlap.</summary>
+        private static FPBuildingPlacement[] StampPlacements(int count, int half)
+        {
+            int perSide = (int)System.Math.Ceiling(System.Math.Sqrt(count));
+            int span = (half - 2) * 2;
+            int step = System.Math.Max(4, span / System.Math.Max(1, perSide));
+            var result = new FPBuildingPlacement[count];
+            for (int i = 0; i < count; i++)
+            {
+                FP64 x = FP64.FromInt(-(half - 2) + (i % perSide) * step);
+                FP64 z = FP64.FromInt(-(half - 2) + (i / perSide) * step);
+                result[i] = new FPBuildingPlacement(0, x, z, FP64.Zero, retain: true);
+            }
+            return result;
+        }
+
+        /// <summary>The expanded ring of each placement, in the stamp's own snapped-integer form.</summary>
+        private static void StampRings(
+            FPBuildingPlacement[] placements, long expanded,
+            out long[] px, out long[] pz, out int[] start, out byte[] retain)
+        {
+            px = new long[placements.Length * 4];
+            pz = new long[placements.Length * 4];
+            start = new int[placements.Length + 1];
+            retain = new byte[placements.Length];
+            for (int b = 0; b < placements.Length; b++)
+            {
+                long cx = FPGeoPredicates.Snap(placements[b].CentreX);
+                long cz = FPGeoPredicates.Snap(placements[b].CentreZ);
+                int o = b * 4;
+                start[b] = o;
+                px[o + 0] = cx - expanded; pz[o + 0] = cz - expanded;
+                px[o + 1] = cx + expanded; pz[o + 1] = cz - expanded;
+                px[o + 2] = cx + expanded; pz[o + 2] = cz + expanded;
+                px[o + 3] = cx - expanded; pz[o + 3] = cz + expanded;
+                retain[b] = 1;   // FPNavMeshRebaker.RETAIN — private const, hence the literal
+            }
+            start[placements.Length] = placements.Length * 4;
+        }
+
         private static FPNavMesh BuildGridStage(int half)
         {
             int side = half * 2 + 1;

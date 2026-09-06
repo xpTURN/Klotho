@@ -20,7 +20,9 @@ A deterministic NavMesh navigation system based on FP64. All computation runs on
 | `FPNavAvoidance` | ORCA (Optimal Reciprocal Collision Avoidance): agent-agent **and** static-obstacle half-planes (wall/cliff), general non-convex + winding-aware |
 | `FPObstacleVertex` | Static-obstacle vertex (RVO2 `Obstacle` equivalent), flat-array ring representation (point / unitDir / isConvex / prev/next / polygonIndex) |
 | `FPNavMeshObstacleExtractor` | Extracts ORCA obstacle rings from the NavMesh boundary (`neighbor == -1` edges); load/build-time only |
-| `NavCorridorHelper` | Corridor-search and corridor-maintenance helper utilities |
+| `NavCorridorHelper` | Corridor-search and corridor-maintenance helper utilities (`SetCorridor` returns what it had to drop) |
+| `FPNavTuning` | The navigation caps as an instance value — buffer sizes and loop budgets, handed to the five types above as an optional constructor argument (see [Tuning the caps](#tuning-the-caps-fpnavtuning)) |
+| `FPNavPathFailure` | Names *why* an agent sits at `PathFailed` (`Diagnose`) and turns that into a label (`Describe`) — one runtime member both editor visualizers call |
 | `FPNavMeshSerializer` | Binary serialization / deserialization |
 | `FPNavMeshRebaker` | Runtime rebake: base mesh + building footprints → new `FPNavMesh` (see [Runtime Rebake](#runtime-rebake)) |
 | `FPNavMeshAreas` | The area indices and masks the runtime reserves: `BUILDING_AREA` / `BUILDING_MASK`, `DEFAULT_AGENT_MASK`, `ALL_AREAS` |
@@ -48,6 +50,8 @@ com.xpturn.klotho/Runtime/Deterministic/Navigation/
 ├── FPObstacleVertex.cs       # Static-obstacle vertex struct (flat ring)
 ├── FPNavMeshObstacleExtractor.cs # NavMesh boundary → ORCA obstacle rings
 ├── NavCorridorHelper.cs      # Corridor helper utilities
+├── FPNavPathFailure.cs       # Why a path failed: reason enum + Diagnose/Describe
+├── FPNavTuning.cs            # Per-instance caps (buffer sizes + loop budgets) and their validation
 ├── FPNavMeshRebaker.cs       # Runtime rebake orchestrator + snapshot/context/placement types
 ├── FPNavMeshRebakeBufferPool.cs  # Reusable rebake work buffers (per room)
 ├── FPNavMeshRebakeDriver.cs  # Derives the installed mesh from the frame; slicing + mesh cache
@@ -57,6 +61,7 @@ com.xpturn.klotho/Runtime/Deterministic/Navigation/
 ├── FPNavMeshPlacementProbe.cs # Editable placement list + rebake on demand (editor placement tools)
 ├── FPNavAgentInstaller.cs    # Swap/reseed call protocol, as two separate halves
 ├── FPConstrainedDelaunay.cs  # Deterministic constrained Delaunay triangulation
+├── FPConstraintCrossingException.cs # Crossing constraint edges, named (see Navigation.Rebake.md)
 ├── FPBuildingShapeCatalog.cs # Shape table + radius-expanded derivative
 ├── FPConvexOffset.cs         # Convex footprint ⊕ agent radius (integer miter)
 └── INavFingerprintSource.cs  # Cross-peer nav fingerprint hook
@@ -190,10 +195,11 @@ byte[] data = navMeshAsset.bytes;                                   // Unity (Te
 // Godot: byte[] data = Godot.FileAccess.GetFileAsBytes("res://Data/NavMesh.bytes");
 FPNavMesh navMesh = FPNavMeshSerializer.Deserialize(data);          // same binary format on both engines
 
-var query      = new FPNavMeshQuery(navMesh);
-var pathfinder = new FPNavMeshPathfinder(navMesh, query);
-var funnel     = new FPNavMeshFunnel(navMesh, query);
+var query      = new FPNavMeshQuery(navMesh, logger);                      // logger may be null
+var pathfinder = new FPNavMeshPathfinder(navMesh, query, logger);
+var funnel     = new FPNavMeshFunnel(navMesh, query, logger);
 var navSystem  = new FPNavAgentSystem(navMesh, query, pathfinder, funnel, logger);
+// Each of the five also takes an optional FPNavTuning last — see Tuning the caps.
 
 // Enable ORCA avoidance (optional)
 navSystem.SetAvoidance(new FPNavAvoidance());
@@ -232,6 +238,27 @@ what a `default(NavAgentComponent)` carries. Setting the plan mask permissively 
 restrictively is the interesting combination: the path is drawn straight through a retained building
 and the unit walks into it and stops, i.e. it plans as if it did not know the building was there.
 That stop is reported as `FPNavAgentStatus.Blocked` — see the movement contract below.
+
+**A destination ON a boundary between allowed and forbidden ground belongs to the allowed side.**
+Such a point is genuinely in both triangles — `PointInTriangle2D` is tolerant, and the surface is
+continuous across a shared edge, so the interpolated heights are bit-identical there — and it is the
+answer `ProjectToPassable` gives, since the projection returns the closest point on a triangle
+*edge*. `FindPath` therefore resolves its **endpoint** with a lookup that breaks height ties toward
+ground the mask allows; without it, whichever triangle carried the lower index won, and a snapped
+destination was refused about half the time with nothing in the log to say so.
+
+The tie-break is deliberately narrow: it swaps only between candidates on the **same surface**, i.e.
+whose interpolated height at that point is equal. Equal height *distance* is not enough — two floors
+are equidistant whenever the agent's y is the midpoint between them, and swapping there would move
+the destination a storey away rather than reinterpret it. So a destination on a forbidden upper floor
+is still refused: the walkable floor below is a different place. And where every same-surface
+candidate is allowed — all of ordinary ground, every interior edge on it included — "first allowed"
+is "first", so the answer is identical to the plain lookup. That bounds the change to meshes carrying
+forbidden ground, and to destinations on its boundary.
+
+The **start** keeps the plain lookup: its mask check is an exemption whose value is being reported
+(`DebugMaskedStartCount`), and resolving an ambiguous start toward allowed ground would silence it
+at exactly the positions it exists to report.
 
 There are four pairs and three of them mean something:
 
@@ -321,6 +348,45 @@ stamp is part of `ComputeFingerprint`.
 `areaMask == 0` on a triangle makes it unreachable to every query including `~0`, since no bit can
 intersect. The bake never produces one; `TrianglesMutable` can.
 
+#### Which lookups filter, and which deliberately do not
+
+`FindPath` and `MoveAlongSurface` filter. The "nearest walkable point" family comes in **two
+flavours**, and picking the wrong one is the mistake this split exists to prevent:
+
+| Unfiltered | Filtered | Ask the filtered one when |
+| ---- | ---- | ---- |
+| `FindTriangle(xz)` | `FindPassableTriangle(xz, mask)` | *may this point be used* |
+| `ClosestPointOnNavMesh` | `ClosestPassablePoint` | *where may I stand instead* |
+| `ProjectToNavMesh` | `ProjectToPassable` | *snap me somewhere usable* |
+| `FindTriangle(xz, agentY)` | `FindPassableTriangleForEndpoint(xz, y, mask)` | *may this point be used, on this floor* |
+
+The last row is the multi-floor pair, and the difference matters exactly where floors stack:
+`FindPassableTriangle` is y-blind, so above a walkable ground floor it answers "usable" for a click
+on forbidden ground upstairs. Ask the endpoint form whenever a height is part of the question.
+
+Separate from both is **`FindTriangleForEndpoint(xz, y, tieBreakMask)`** — the rule `FindPath` itself
+uses to resolve a destination, described under [the area filter](#the-area-filter). It is not a
+filter: it always answers with a triangle if the point is on the mesh, and only *breaks a tie*
+toward allowed ground. A tool that wants to report what the engine decided has to call this one, or
+it names a refusal the engine never made.
+
+**The unfiltered members are not deprecated.** They are the right answer wherever the question is
+*where is this point* rather than *may I go there* — `FindPath` finds its endpoints unfiltered so it
+can attribute an `isBlocked` or `areaMask` refusal to its own counters instead of reporting
+"off-mesh", the post-swap agent reseed keeps an agent inside forbidden ground on a valid triangle so
+the walk's escape rule has something to fire from, and an editor picking a triangle under the cursor
+wants whatever is there.
+
+That split is also how a caller expresses *"can't enter, can leave"* for a position, which is what
+the walk's escape rule does for movement: ask the **unfiltered** lookup where you are, and only when
+it answers nothing ask the **filtered** projection where to go. Filtering both steps projects the
+position out of a footprint while the caller's triangle index still names it — a pair the walk is
+not defined for. The Brawler sample's position re-snap is written that way.
+
+One consequence worth planning for: `ProjectToPassable` reports failure when the nearest passable
+point is beyond `maxDist` and impassable ground is nearer, where the unfiltered member returned an
+unusable point. Callers that treat failure as "stop" stop more often near retained buildings.
+
 ## Static Obstacles (ORCA)
 
 `FPNavAvoidance` adds RVO2 static-obstacle half-planes on top of agent-agent avoidance, so agents steer around walls/cliffs (not just each other). Obstacle lines are **hard constraints** — `LinearProgram3` never relaxes them (only agent lines are relaxed), so velocity never leaks through a wall.
@@ -372,6 +438,41 @@ state applies, so a game writes a placement table and an installer and nothing e
 **[Navigation.Rebake.md](Navigation.Rebake.md)** is the guide: footprint types, the placement grid,
 what gets rejected, the determinism envelope, installing from a command stream, and measured costs.
 
+## Cross-peer identity: the navigation fingerprint
+
+`FPNavAgentSystem.GetNavFingerprint()` is the value peers compare to find out whether they will
+navigate alike **before** the match starts, and it folds three things:
+
+| Term | Answers |
+| ---- | ---- |
+| the mesh's content hash | *same stage* |
+| `NAV_BEHAVIOUR_REVISION` | *same pathfinding* — a hand-bumped constant standing for what `FindPath` returns for unchanged inputs |
+| `FPNavTuning.Digest` | *same caps* — see [Tuning the caps](#tuning-the-caps-fpnavtuning) |
+
+Nothing new goes over the wire: the Ready exchange already compares an **environment fingerprint**
+that this value is folded into (in both P2P and server-driven modes), and the FullState resync's
+static-geometry check reads the same term. Two peers on builds that plan different corridors, or
+tuned differently, now differ **there** — before the match — rather than desyncing later with nothing
+pointing at navigation. `0` still means "no navigation registered", so a peer
+without a mesh is never reported as a mismatch, and the digest is normalised so that
+`FPNavTuning.Default` contributes nothing — the common path's fingerprint is what it always was.
+
+**A replay is checked against it.** `StartReplay` throws `InvalidDataException` for a recording whose
+`NavFingerprint` disagrees with this process — a different stage, or a build that plans different
+corridors — before playback starts and before `OnGameStart` fires, instead of loading the file and
+drifting with nothing to say where. Two situations are *not* refusals. A `0` on either side keeps its
+"not provided" meaning: a recording without the anchor is played, and a process that reports none
+logs a warning saying the check did not run (usually a navigation system that was never registered).
+And a recording that started mid-match (`InitialStateTick != 0`) is warned rather than refused,
+because its anchor describes the rebaked mesh at that instant rather than the base asset playback
+loads. This is attribution, not integrity: a forged file rewrites the anchor along with the payload.
+
+**Bumping the revision is a manual step, and the rule is narrow.** The constant is `internal` to the
+package, so this is an engine-side edit rather than a game-side one. Bump it for any edit that moves
+what `FindPath` returns for unchanged inputs — the endpoint or start lookup, the A\* order or budget,
+the funnel, the surface walk — and not for refactors or diagnostics. Nothing enforces the bump; the
+sites most likely to move it carry a comment pointing back at the constant.
+
 ## NavMesh Export & Visualization *(Editor)*
 
 Both engines ship an editor exporter and visualizer; they share the geometry pipeline (`FPNavMeshBuildPipeline`) and produce the same `.bytes` binary format.
@@ -386,6 +487,43 @@ that differ only in their walk mask can be watched splitting at a footprint edge
 to the tool, not to a game. The data layer behind it is the runtime's `FPNavMeshPlacementProbe`, so
 both editors drive one code path; the Godot side is documented in
 [NavMeshVisualizer.Godot.md](NavMeshVisualizer.Godot.md).
+
+**A destination click is snapped to ground the agent may plan through.** Clicking a *retained*
+building used to hand `SetDestination` the raw point: the footprint is on-mesh but carries
+`BUILDING_MASK`, so `FindPath` refused the endpoint by mask and the agent sat at `PathFailed` with a
+destination and no corridor — on screen, "it has somewhere to go and will not move". Both
+visualizers now ask two questions with the agent's resolved **plan** mask
+(`FPNavAgentSystem.ResolvePlanMask`, public for exactly this). First *is the click usable as
+clicked* — `FindPassableTriangleForEndpoint`, the height-aware form, so a click on forbidden ground
+above walkable ground is not waved through by the floor beneath it. If it is not, the click goes
+through `ProjectToPassable` and Y is resampled at the snapped XZ (keeping the click's own y would
+pair a moved XZ with an unrelated height, which on a multi-floor mesh lands on the wrong floor). When
+no passable ground is in range the destination is *not* set: the agent is stopped (so the status
+reads `Idle`, not `PathFailed`) and the reason is shown.
+
+The reach is set by **`Dest Snap Max`**, defaulting to the mesh's `GridCellSize`. That default is the
+distance the projection *always* covers — its fallback searches the click's cell plus the 8 around
+it, so anything within one cell is certain to be considered. Larger values still help, but whether
+they do depends on where in its cell the click landed, and past the 3×3 block's far corner
+(~2.83 cells) there is nothing left to find. Raising the knob therefore cannot rescue a click deep
+inside a footprint wider than the cell ring; the refusal message says so.
+
+**The agent row names why a path failed.** `PathFailed` covers five different situations, so
+`FPNavPathFailure.Diagnose` re-walks `FindPath`'s guard chain against the mesh as it stands and
+reports which one: the agent is off the mesh, it stands on blocked ground, the destination is off
+the mesh or blocked or outside the agent's plan mask, the failure is *stale* (the mesh changed and
+nothing blocks it any more — set the destination again), or there is genuinely no route.
+`FPNavPathFailure.Describe` turns that into the suffix the row prints. The pathfinder's diagnostic
+counters are not used for this: the tool shares one pathfinder with its own Start/End path preview
+so a delta cannot be attributed, the counters never reset, and the case worth explaining most — an
+agent a rebake left off-mesh — never calls `FindPath`, so no counter ever moves for it.
+
+Both editor tools call the same member. It is public runtime API rather than editor-local for the
+reason `FindTriangleForEndpoint` is: Unity's tool is one fixed assembly, but the Godot adapter ships
+as source inside `addons/klotho/Adapters/` and compiles into whatever assembly the consuming project
+happens to be, so there is no `InternalsVisibleTo` list to write. The `StaleFailure` vs
+`NoRouteOrBudget` split is the one thing the caller must supply — whether the failure was already
+standing when the current mesh was installed is bookkeeping only the tool has.
 
 Shared bake steps:
 - Vertex welding (WELD_EPSILON = 0.001)
@@ -459,8 +597,10 @@ Measured at 800 agents, steady state:
 | 800 (single call) | 1 | 16.28 | **64** |
 
 Smaller clusters win on both axes at once: the tick gets cheaper *and* more agents come out of the
-correction pass separated, because `MAX_AGENTS` is a per-call cap — 13 calls of 62 correct all 800,
-while one call of 800 corrects 64 and drops the other 736 silently. At 3200 agents the same split is
+correction pass separated, because the agent cap is a per-call cap — 13 calls of 62 correct all 800,
+while one call of 800 corrects 64 and drops the other 736 silently. (That cap is also settable per
+system now — see [Tuning the caps](#tuning-the-caps-fpnavtuning) — but raising it trades against the
+pass being O(iterations · n²), which is the cost the split avoids in the first place.) At 3200 agents the same split is
 5.1× cheaper (152.0 → 30.0 ms).
 
 **It is not lossless, and the cost is not in the table.** In `ComputeNewVelocity` the update set *is*
@@ -522,7 +662,8 @@ diagnostic fields outside the state hash, the wire and replay:
 | Counter | Owner | Reports |
 |---|---|---|
 | `DebugCollisionResolveTruncatedCount` | `FPNavAgentSystem` | Agents dropped from the correction pass past `MAX_AGENTS` |
-| `DebugCorridorTruncatedCount` | `FPNavMeshPathfinder` | Paths clamped to `MAX_CORRIDOR` (the far end is dropped, so the agent runs off the corridor and repaths) |
+| `DebugCorridorTruncatedCount` | `FPNavMeshPathfinder` | Paths clamped to the corridor cap (the far end is dropped, so the agent runs off the corridor and repaths) |
+| `DebugCorridorCopyTruncatedCount` | `FPNavAgentSystem` | Triangles dropped while copying a planned corridor into an agent. **0 is the only correct value** — the search and the storage share one cap, so a nonzero count means they were built from different ones |
 | `DebugIterationExhaustedCount` | `FPNavMeshPathfinder` | Searches that failed with work still queued — the budget ran out, as opposed to there being no route |
 | `DebugBlockedEndpointCount` | `FPNavMeshPathfinder` | Start or end triangle flagged `isBlocked` — the search never started |
 | `DebugAreaMaskRejectedCount` | `FPNavMeshPathfinder` | The requested `areaMask` shares no bit with the **end** triangle. `FindPath` only — the surface walk applies the same filter but treats a rejection as a wall rather than a failure, so it has nothing to count |
@@ -570,24 +711,95 @@ directly.
 
 ---
 
-## Constants
+## Tuning the caps (`FPNavTuning`)
 
-| Constant | Location | Value | Description |
-| ---- | ---- | -- | ---- |
-| `MAX_AGENTS` | `FPNavAgentSystem` | 64 | Max agents the position-correction pass separates per `Update` call |
-| `MAX_CORRIDOR` | `NavAgentComponent`, `FPNavMeshPathfinder` | 128 | Max length of A* / agent corridor |
-| `MAX_WAYPOINTS` | `FPNavMeshFunnel` | 64 | Max number of Funnel waypoints |
-| `MAX_ITERATIONS` | `FPNavMeshPathfinder` | 4096 | Max A* iterations |
-| `MAX_ORCA_LINES` | `FPNavAvoidance` | 64 | Max ORCA half-planes (obstacle + agent) |
-| `MAX_OBST_LINES` | `FPNavAvoidance` | 48 | Max obstacle half-planes (= `MAX_ORCA_LINES − MAX_NEIGHBORS`; reserves agent-line slots) |
-| `MAX_NEIGHBORS` | `FPNavAvoidance` | 16 | Max ORCA neighbor agents |
-| `BFS_FRONTIER_CAP` | `FPNavAgentSystem` | 256 | Frontier/visited bound of the graph-local obstacle query (overflow reported by `DebugBfsFrontierOverflowCount`) |
-| `DEFAULT_AREA_MASK` | `FPNavAgentSystem` | `FPNavMeshAreas.DEFAULT_AGENT_MASK` | The mask a path or walk gets when the agent names none — i.e. what a **zero** `PlanAreaMaskOverride`/`WalkAreaMaskOverride` resolves to |
-| `BUILDING_AREA` | `FPNavMeshAreas` | 1 | Area index the rebaker stamps onto retained building footprints; reserved — the build pipeline refuses a bake that uses it |
-| `BUILDING_MASK` | `FPNavMeshAreas` | `1 << 1` | A retained triangle's `areaMask`, exclusively |
-| `DEFAULT_AGENT_MASK` | `FPNavMeshAreas` | `~BUILDING_MASK` | Every area except the building's |
-| `ALL_AREAS` | `FPNavMeshAreas` | `~0` | Every area, retained footprints included — for a planner allowed to route through buildings |
+The sizes below are **defaults, not fixed limits**. Each navigation type takes an optional
+`FPNavTuning` and sizes its buffers and loop budgets from it; omit the argument and you get exactly
+what shipped.
+
+```csharp
+var tuning     = new FPNavTuning(maxAgents: 128, corridorCap: 32);   // name only what you change
+var query      = new FPNavMeshQuery(navMesh, logger, tuning);
+var pathfinder = new FPNavMeshPathfinder(navMesh, query, logger, tuning);
+var funnel     = new FPNavMeshFunnel(navMesh, query, logger, tuning);
+var navSystem  = new FPNavAgentSystem(navMesh, query, pathfinder, funnel, logger, tuning);
+navSystem.SetAvoidance(new FPNavAvoidance(tuning));
+```
+
+**Hand the same value to all five**, and `FPNavAgentSystem` checks that you did. The five types size
+buffers and bound loops from their own copy, so a stack whose parts disagree plans a corridor the
+rest of it will not walk — a search that returns more triangles than the storage keeps is the
+disagreement `DebugCorridorCopyTruncatedCount` exists to report. The system compares what it is
+handed at all three doors — the constructor, `SetAvoidance`, and the four-argument `SwapNavMesh` —
+and throws naming the collaborator and the first cap that differs. A null collaborator passes; that
+is a different question.
+
+That check is **local**: it catches a stack that disagrees with itself, not two peers that are each
+internally consistent but tuned differently. The tuning digest in
+[the navigation fingerprint](#cross-peer-identity-the-navigation-fingerprint) is what catches those.
+
+**These are build identity, not preferences.** Every one of them can move an agent, so lockstep peers
+must construct navigation with the same tuning, and a replay must be played back against the tuning
+it recorded. They are also **immutable after construction** — the buffers are sized once — and
+validated in each constructor, which throws rather than clamping: every cap must be positive,
+`MaxNeighbors` must leave room for obstacle lines, and `CorridorCap` must fit the compile-time
+storage ceiling (`FPNavTuning.CorridorCeiling`).
+
+Two things the validation deliberately does **not** enforce, because the shipped defaults sit on the
+far side of both:
+
+- **Portals against the corridor.** A corridor of length `L` wants `L + 1` portals; the defaults are
+  128 against 128, so the funnel already drops the last corridor edge on a full-length corridor. Raise
+  `MaxPortals` with `CorridorCap` if you want the whole chain.
+- **Waypoints against portals.** Same relationship, same shipped asymmetry (64 against 128). Both
+  truncate rather than break: `FindCorners` clamps the caller's requested corner count to the
+  waypoint buffer, so a small `MaxWaypoints` yields fewer corners instead of overrunning.
+
+**What a smaller `CorridorCap` buys, and what it does not.** The corridor is a clamp applied *after* a
+completed A\*, so the search cost is unchanged; what you get is a smaller copy per tick and — the
+other side of the trade — a replan roughly every `cap` triangles of the journey. It does **not** shrink
+the frame reservation: the corridor lives in `NavAgentComponent`'s `fixed` buffer, whose size is the
+compile-time `MAX_CORRIDOR`. To move *that* you edit the constant and rebuild every binary that talks
+to another; the component's wire size moves with it, and `ComponentStorageRegistry.LayoutFingerprint`
+is what reports a mismatched pair. For per-slot memory the shipped lever is
+`ISimulationConfig.ComponentMaxCountOverrides` instead — with the caveat that exceeding a component's
+slot count throws, so that number is the worst case a match has to survive, not a tuning dial.
+
+`new FPNavTuning()` and `default` are **all zeros** — a struct's implicit parameterless constructor
+wins overload resolution even when every parameter is optional — and `Validate` rejects that rather
+than letting a zero-sized buffer through. Start from `FPNavTuning.Default`, or name the values you
+want as above.
 
 ---
 
-*Last updated: 2026-09-04 (0.12.0) — `FPNavMeshPlacementProbe` and `FPNavMeshAreas` added to the component list and file layout, the NavMesh visualizers gained a building-placement tool on both editors, and ORCA now treats an agent standing exactly on an obstacle corner as an ordinary position. (2026-09-03 — an agent standing on ground its mask forbids can now leave it (the start is exempt in `FindPath`, and both the walk and the A\* expand a refused neighbour when the triangle they expand from is refused too; `DebugMaskedStartCount` reports it, and `Blocked` now requires that the agent actually asked to move), per-agent area masks (`PlanAreaMaskOverride`/`WalkAreaMaskOverride`, zero = no override, `SetAreaMask`, `FPNavAgentStatus.Blocked`) and, earlier the same day, the building area: `FPNavMeshAreas` (index 1 reserved and stamped onto retained footprints), `DEFAULT_AREA_MASK` now excludes it, and `DebugAreaMaskRejectedCount` can move through the agent path. (2026-09-02 — crowd scaling: a worked spatial partitioner (`FPNavAgentClusterSplitSampleTests`) with the three details that make it safe to copy; the four measured costs of a move order at 64/256/800/3200 agents, the cluster-split call pattern and its sweep, the determinism rules the partition has to meet, and the three diagnostic counters that make the caps visible (`MAX_AGENTS` and `BFS_FRONTIER_CAP` added to the constants table). (2026-08-18: the rebake driver is self-wiring: registering the system is the whole wiring, and `KlothoEngine` owns slice pacing plus the corrections at world init and after a full-state apply; `FPNavMeshPlacementValidator` gives the command path the driver’s own derivation, order and audits. (2026-08-17: delayed install: `FPNavMeshRebakeDriver` derives the installed mesh from frame state each tick (rollback-safe), time-sliced rebake across frames, two-mesh boundary cache, `FPNavAgentInstaller` swap/reseed protocol.) (2026-08-12: runtime NavMesh rebake (deterministic re-triangulation from building footprints, shape catalog, placement grid) — see [Navigation.Rebake.md](Navigation.Rebake.md).) (2026-07-23: graph-local obstacle query (BFS multi-floor/ramp, bake-slope climb cap), clearance tuning (`ObstacleRadiusInset` auto-applied from the recorded bake-settings block), position-correction pass, non-convex/dual-source extraction.) (2026-07-22: ORCA static obstacles — hard-constraint LP3, `FPNavMeshObstacleExtractor`, `LoadNavMeshObstacles()`, `MAX_OBST_LINES`.)*
+## Constants
+
+The first block is what the caps default to; the `FPNavTuning` column is the field that overrides
+each one per instance (blank = not settable).
+
+| Constant | Location | Value | `FPNavTuning` | Description |
+| ---- | ---- | -- | ---- | ---- |
+| `MAX_AGENTS` | `FPNavAgentSystem` | 64 | `MaxAgents` | Max agents the position-correction pass separates per `Update` call. The pass is O(iterations · n²) |
+| *(unnamed)* | `FPNavAgentSystem` | 4 | `CollisionResolveIterations` | Relaxation passes the position-correction loop makes per tick |
+| `MAX_CORRIDOR` | `NavAgentComponent`, `FPNavMeshPathfinder` | 128 | `CorridorCap` | Max length of A* / agent corridor. The constants are also the **compile-time storage ceiling** the cap is validated against — `NavAgentComponent`'s is the `fixed` buffer, so only it decides the reservation |
+| `MAX_PORTALS` | `FPNavMeshFunnel` | 128 | `MaxPortals` | Max funnel portals (a corridor of length `L` wants `L + 1`) |
+| `MAX_WAYPOINTS` | `FPNavMeshFunnel` | 64 | `MaxWaypoints` | Max number of Funnel waypoints |
+| `MAX_ITERATIONS` | `FPNavMeshPathfinder` | 4096 | `MaxIterations` | Max A* iterations |
+| `MAX_ORCA_LINES` | `FPNavAvoidance` | 64 | `MaxOrcaLines` | Max ORCA half-planes (obstacle + agent) |
+| `MAX_OBST_LINES` | `FPNavAvoidance` | 48 | *(derived)* | Max obstacle half-planes (= lines − neighbours; reserves agent-line slots) |
+| `MAX_NEIGHBORS` | `FPNavAvoidance` | 16 | `MaxNeighbors` | Max ORCA neighbor agents |
+| *(unnamed)* | `FPNavAgentSystem` | 256 | `BfsFrontierCap` | Frontier/visited bound of the graph-local obstacle query (overflow reported by `DebugBfsFrontierOverflowCount`). The candidate buffer is 3× this, and moves with it |
+| *(unnamed)* | `FPNavMeshQuery` | 48 | `MoveMaxQueue` | BFS bound of one `MoveAlongSurface` step |
+| `DEFAULT_AREA_MASK` | `FPNavAgentSystem` | `FPNavMeshAreas.DEFAULT_AGENT_MASK` | — | The mask a path or walk gets when the agent names none — i.e. what a **zero** `PlanAreaMaskOverride`/`WalkAreaMaskOverride` resolves to |
+| `BUILDING_AREA` | `FPNavMeshAreas` | 1 | — | Area index the rebaker stamps onto retained building footprints; reserved — the build pipeline refuses a bake that uses it |
+| `BUILDING_MASK` | `FPNavMeshAreas` | `1 << 1` | — | A retained triangle's `areaMask`, exclusively |
+| `DEFAULT_AGENT_MASK` | `FPNavMeshAreas` | `~BUILDING_MASK` | — | Every area except the building's |
+| `ALL_AREAS` | `FPNavMeshAreas` | `~0` | — | Every area, retained footprints included — for a planner allowed to route through buildings |
+
+> The cap constants remain public because tests and existing code read them, but they are now the
+> **defaults rather than the truth**: an instance handed a different tuning still compiles against
+> them. Read `Tuning` on the type you hold when you need the value it is actually running with.
+
+---
+
+*Last updated: 2026-09-06 (0.12.1) — the endpoint lookup `FindPath` uses is public and documented (`FindTriangleForEndpoint`, tie broken toward allowed ground on the same surface only), the filtered lookups gained the height-aware `FindPassableTriangleForEndpoint`, `FPNavPathFailure` names why an agent will not move, and the navigation fingerprint now folds a behaviour revision and the tuning digest — with a replay checked against it at `StartReplay`. (2026-09-05 — the navigation caps became per-instance values: `FPNavTuning` is an optional constructor argument on the query, pathfinder, funnel, avoidance and agent system (defaults unchanged, validated at construction, immutable afterwards), the constants stay as those defaults, and `NavCorridorHelper.SetCorridor` now reports what it dropped through `DebugCorridorCopyTruncatedCount` — where 0 is the only correct value. (2026-09-04 (0.12.0) — `FPNavMeshPlacementProbe` and `FPNavMeshAreas` added to the component list and file layout, the NavMesh visualizers gained a building-placement tool on both editors, and ORCA now treats an agent standing exactly on an obstacle corner as an ordinary position. (2026-09-03 — an agent standing on ground its mask forbids can now leave it (the start is exempt in `FindPath`, and both the walk and the A\ expand a refused neighbour when the triangle they expand from is refused too; `DebugMaskedStartCount` reports it, and `Blocked` now requires that the agent actually asked to move), per-agent area masks (`PlanAreaMaskOverride`/`WalkAreaMaskOverride`, zero = no override, `SetAreaMask`, `FPNavAgentStatus.Blocked`) and, earlier the same day, the building area: `FPNavMeshAreas` (index 1 reserved and stamped onto retained footprints), `DEFAULT_AREA_MASK` now excludes it, and `DebugAreaMaskRejectedCount` can move through the agent path. (2026-09-02 — crowd scaling: a worked spatial partitioner (`FPNavAgentClusterSplitSampleTests`) with the three details that make it safe to copy; the four measured costs of a move order at 64/256/800/3200 agents, the cluster-split call pattern and its sweep, the determinism rules the partition has to meet, and the three diagnostic counters that make the caps visible (`MAX_AGENTS` and `BFS_FRONTIER_CAP` added to the constants table). (2026-08-18: the rebake driver is self-wiring: registering the system is the whole wiring, and `KlothoEngine` owns slice pacing plus the corrections at world init and after a full-state apply; `FPNavMeshPlacementValidator` gives the command path the driver’s own derivation, order and audits. (2026-08-17: delayed install: `FPNavMeshRebakeDriver` derives the installed mesh from frame state each tick (rollback-safe), time-sliced rebake across frames, two-mesh boundary cache, `FPNavAgentInstaller` swap/reseed protocol.) (2026-08-12: runtime NavMesh rebake (deterministic re-triangulation from building footprints, shape catalog, placement grid) — see [Navigation.Rebake.md](Navigation.Rebake.md).) (2026-07-23: graph-local obstacle query (BFS multi-floor/ramp, bake-slope climb cap), clearance tuning (`ObstacleRadiusInset` auto-applied from the recorded bake-settings block), position-correction pass, non-convex/dual-source extraction.) (2026-07-22: ORCA static obstacles — hard-constraint LP3, `FPNavMeshObstacleExtractor`, `LoadNavMeshObstacles()`, `MAX_OBST_LINES`.)))*

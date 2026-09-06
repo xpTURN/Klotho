@@ -1,4 +1,5 @@
 using xpTURN.Klotho.Deterministic.Math;
+using xpTURN.Klotho.Deterministic.Navigation;
 using xpTURN.Klotho.ECS;
 using xpTURN.Klotho.ECS.FSM;
 
@@ -27,6 +28,7 @@ namespace Brawler
             var evadeSnapped = BotFSMHelper.SnapDestination(evadeRaw, transform.Position,
                                                             context.NavQuery,
                                                             _behavior.NavSnapMaxDist,
+                                                            FPNavMeshAreas.DEFAULT_AGENT_MASK,
                                                             out bool ok,
                                                             character.PlayerId, "Evade");
             bot.Destination    = evadeSnapped;

@@ -337,7 +337,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             var zs = new long[] { 0, 1000, 1000, 0, -500, 1500, -500, 1500 };
             var constraints = new[] { 0, 1, 2, 3 }; // (0->1) crosses (2->3) at (500,500) off-grid
 
-            Assert.Throws<InvalidOperationException>(
+            Assert.Throws<FPConstraintCrossingException>(
                 () => FPConstrainedDelaunay.Triangulate(xs, zs, constraints, eraseOuterAndHoles: false));
         }
 

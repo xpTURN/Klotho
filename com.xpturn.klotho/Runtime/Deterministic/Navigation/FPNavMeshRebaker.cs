@@ -216,6 +216,18 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// represent (senses fail to alternate along a shared wall stretch). Degenerate
         /// geometry; rejected rather than walked wrong.</summary>
         ClipRunsInterleave = 10,
+
+        /// <summary>
+        /// The base mesh cannot be rebaked at all, so no placement on it can be judged — the stage
+        /// is refused, not the building. <see cref="FPBuildingRejectionInfo.IndexA"/> is -1: there
+        /// is no building at fault.
+        ///
+        /// <para>Every other member here answers "why was THIS placement refused". This one is the
+        /// odd member on purpose: the alternative is returning <c>false</c> with
+        /// <see cref="None"/>, which makes <see cref="FPBuildingRejectionInfo.IsRejected"/> answer
+        /// "no" for a call that just failed, and prints "Refused: None" in a tool.</para>
+        /// </summary>
+        BaseMeshUnsupported = 11,
     }
 
     /// <summary>
@@ -739,8 +751,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// Builds the per-stage rebake snapshot: validates the base (grid-snapped,
         /// single-level), extracts boundary rings, assembles base constraints and freezes the
         /// CDT base state. Throws on unsupported bases (multi-level / off-grid) — snapshot
-        /// failure means the rebake feature itself is unavailable for this stage (surface it
-        /// at load time; contrast with the best-effort Prewarm). Call at match load or on a
+        /// failure means the rebake feature itself is unavailable for this stage — surface it
+        /// at load time, never as a best-effort warm-up. Call at match load or on a
         /// worker — never on the tick thread (costs a full base insertion, ~30ms at 22k tris).
         /// </summary>
         public static FPNavMeshRebakeSnapshot CreateSnapshot(
@@ -800,7 +812,22 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // Core, not the public factory: that one also builds a base coordinate map, and this
             // snapshot already travels with CoordToIndex below — paying for a second one would be
             // pure waste on the runtime rebake path.
-            var cdtSnapshot = FPConstrainedDelaunay.BuildSnapshotCore(xs, zs, constraints.ToArray(), logger);
+            // A crossing among the BASE rings is a property of the asset, not a placement and not
+            // a triangulator bug — so it is reclassified here as "this stage cannot be rebaked"
+            // rather than escaping as the triangulator's own InvalidOperationException. Only the
+            // crossing subtype is caught: the two internal-corruption throws on the same path
+            // (channel walk did not terminate, constraint direction not found) must stay visible.
+            FPConstrainedDelaunay.CdtSnapshot cdtSnapshot;
+            try
+            {
+                cdtSnapshot = FPConstrainedDelaunay.BuildSnapshotCore(xs, zs, constraints.ToArray(), logger);
+            }
+            catch (FPConstraintCrossingException e)
+            {
+                throw new NotSupportedException(
+                    "FPNavMeshRebaker: base mesh boundary rings cross in XZ (stacked floors?) — "
+                    + "the rebaker is single-level only: " + e.DescribeSegments(), e);
+            }
             logger?.KInformation($"[FPNavMeshRebaker] snapshot created: {baseCount} base vertices, " +
                 $"{ringEdges.Count} ring constraints");
             // Expanding the catalog here, not per placement, is what makes contact authorable
@@ -817,9 +844,122 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             var snapshot = new FPNavMeshRebakeSnapshot(
                 baseMesh, cdtSnapshot, xs, zs, ys, coordToIndex, ringEdges, expansion);
-            if (prewarm)
-                Prewarm(snapshot, logger);
+            ValidateReproducesBase(snapshot, xs, zs, logger, prewarm);
             return snapshot;
+        }
+
+        /// <summary>
+        /// Runs one zero-building rebake and requires it to reproduce the base walkable region
+        /// — their TOTAL walkable area must be exactly equal, in integer area. It is a single
+        /// scalar, so it is blind to area-preserving damage: a hole that moved, two equal regions
+        /// swapped, a reflected ring, a carve cancelled by an equal addition. Comparing ring depth
+        /// parity would name the culprit, and stays the follow-up if one of those ever shows up.
+        /// What the scalar DOES catch is the stacked base the ring-crossing refusal above cannot
+        /// see: a platform whose ring nests inside the floor's crosses
+        /// nothing, so the triangulation accepts it and the parity erase then reads the inner
+        /// ring as a hole — the platform disappears, the floor under it is carved away, and the
+        /// hole's rim keeps the platform's height, tilting the surviving floor. Every peer
+        /// computes the same wrong mesh, so no fingerprint comparison would ever report it.
+        ///
+        /// <para>The rebake doubles as the warm-up, so the default path pays only the two area
+        /// sums. Two things it must NOT do: live under <c>ENABLE_IL2CPP</c> (the warm-up is a
+        /// no-op there, and an AOT build is exactly where a silently wrong navmesh ships), or be
+        /// best-effort — a base that cannot survive a zero-building rebake cannot survive any
+        /// rebake, so that failure is the stage's, not a warm-up's.</para>
+        ///
+        /// <para>Areas are folded in <see cref="FPInt128"/> rather than <c>long</c>: a single
+        /// triangle's doubled area reaches ~1.8e16 at the domain edge, so a few hundred extreme
+        /// triangles would overflow. BigInteger stays what it is elsewhere in this package — a
+        /// test oracle, never runtime allocation.</para>
+        /// </summary>
+        private static void ValidateReproducesBase(
+            FPNavMeshRebakeSnapshot snapshot, long[] xs, long[] zs, IKLogger logger, bool prewarm)
+        {
+            FPNavMesh baseMesh = snapshot.BaseMesh;
+            FPInt128 baseArea = DoubledAreaXZ(baseMesh, xs, zs);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            FPNavMesh zero;
+            try
+            {
+                zero = Rebake(snapshot, null);
+            }
+            catch (Exception e)
+            {
+                // Neutral about WHOSE fault it is. The inner message rides along in the text
+                // (consumers keep only e.Message), but an NRE from the rebaker itself would
+                // otherwise be reported to an artist as "your mesh is bad".
+                throw new NotSupportedException(
+                    "FPNavMeshRebaker: the zero-building rebake of this base failed, so no rebake "
+                    + "is possible for this stage — either the base mesh does not survive one or "
+                    + "the rebaker itself failed on it: " + e.Message, e);
+            }
+            sw.Stop();
+
+            FPInt128 zeroArea = DoubledAreaXZ(zero, null, null);
+            if (!zeroArea.Equals(baseArea))
+            {
+                throw new NotSupportedException(
+                    "FPNavMeshRebaker: zero-building rebake did not reproduce the base walkable region "
+                    + $"({SquareMetres(baseArea)} -> {SquareMetres(zeroArea)} m^2) — the base mesh is "
+                    + "not single-level (a stacked floor or platform overlaps another in XZ)");
+            }
+
+            // Only the LOG is gated: the work above is a validation the stage cannot skip, while
+            // "was the rebake path warmed" is still the caller's question. Keeping the wording
+            // means the two prewarm log gates keep measuring what they always measured.
+            if (prewarm)
+                logger?.KInformation($"[FPNavMeshRebaker] prewarmed rebake path in {sw.Elapsed.TotalMilliseconds:F1} ms");
+        }
+
+        /// <summary>
+        /// Exact 2x total XZ area over snapped integer coordinates. <paramref name="snappedXs"/> /
+        /// <paramref name="snappedZs"/> are the caller's per-vertex snap of the same mesh when it
+        /// already has one (the snapshot build does); pass null to snap on the spot.
+        /// </summary>
+        private static FPInt128 DoubledAreaXZ(FPNavMesh mesh, long[] snappedXs, long[] snappedZs)
+        {
+            FPInt128 sum = FPInt128.Zero;
+            for (int t = 0; t < mesh.Triangles.Length; t++)
+            {
+                FPNavMeshTriangle tri = mesh.Triangles[t];
+                Corner(mesh, snappedXs, snappedZs, tri.v0, out long ax, out long az);
+                Corner(mesh, snappedXs, snappedZs, tri.v1, out long bx, out long bz);
+                Corner(mesh, snappedXs, snappedZs, tri.v2, out long cx, out long cz);
+                FPInt128 cross = FPInt128.Sub(
+                    FPInt128.Mul64(bx - ax, cz - az), FPInt128.Mul64(bz - az, cx - ax));
+                sum = FPInt128.Add(sum, cross.Sign() < 0 ? FPInt128.Negate(cross) : cross);
+            }
+            return sum;
+        }
+
+        private static void Corner(
+            FPNavMesh mesh, long[] snappedXs, long[] snappedZs, int v, out long x, out long z)
+        {
+            if (snappedXs != null)
+            {
+                x = snappedXs[v];
+                z = snappedZs[v];
+                return;
+            }
+            FPVector3 p = mesh.Vertices[v];
+            x = FPGeoPredicates.Snap(p.x);
+            z = FPGeoPredicates.Snap(p.z);
+        }
+
+        /// <summary>
+        /// A doubled snapped-grid area as square metres, for a message. Integer division only —
+        /// the value exists to be read by a person, and routing it through a double would put a
+        /// float in the one place this class is careful not to.
+        /// </summary>
+        private static string SquareMetres(FPInt128 doubledArea)
+        {
+            const long UNITS = FPGeoPredicates.SNAP_UNITS_PER_WORLD;
+            // (area2 / 2) / UNITS^2, kept to two decimals without leaving integers. The x100 goes
+            // back through 128-bit: the halved area alone can already fill a long.
+            long half = FPInt128.DivRem(doubledArea, 2, out _);
+            long hundredths = FPInt128.DivRem(FPInt128.Mul64(half, 100), UNITS * UNITS, out _);
+            return $"{hundredths / 100}.{System.Math.Abs(hundredths % 100):D2}";
         }
 
         /// <summary>
@@ -2451,35 +2591,6 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
-        /// JIT pre-warm for the rebake hot path: runs one
-        /// discarded 0-building rebake so the first real rebake does not pay tiered-JIT
-        /// tier-0 cost on CoreCLR/Mono. Wired inside <see cref="CreateSnapshot"/> (prewarm
-        /// parameter, default on) — cache construction is unconditional on every platform,
-        /// only this warming step is a no-op under IL2CPP (AOT — already steady-state).
-        /// Best-effort — never throws; the discarded result allocates once at load time.
-        /// </summary>
-        internal static void Prewarm(FPNavMeshRebakeSnapshot snapshot, IKLogger logger = null)
-        {
-#if ENABLE_IL2CPP
-            // AOT — nothing to warm.
-#else
-            if (snapshot == null)
-                return;
-            try
-            {
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                Rebake(snapshot, null);
-                sw.Stop();
-                logger?.KInformation($"[FPNavMeshRebaker] prewarmed rebake path in {sw.Elapsed.TotalMilliseconds:F1} ms");
-            }
-            catch (Exception e)
-            {
-                logger?.KWarning($"[FPNavMeshRebaker] prewarm skipped: {e.Message}");
-            }
-#endif
-        }
-
-        /// <summary>
         /// FNV-1a fingerprint over the full navigation-relevant state (vertices, triangles,
         /// area/cost/isBlocked, bake metadata). Cross-peer check material: the navmesh is
         /// outside the state hash, so peers compare this on FullState resync — mirrors
@@ -2878,6 +2989,25 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// and before the fingerprint, which mixes <c>areaMask</c> — so the stamp is a determinism
         /// input like the ring itself, and the patch path (which rebuilds <c>areaMask</c> from the
         /// bake areas) ends up stamped exactly as the full path does. GC-free.</para>
+        ///
+        /// <para><b>Traversal: the broadphase grid, not the whole mesh.</b> Only the cells the
+        /// footprint's AABB touches are walked. This is <i>not</i> an approximation — the same set
+        /// of triangles ends up stamped, bit for bit — and it rests on three properties:</para>
+        /// <list type="number">
+        /// <item>Every mesh vertex is on the predicate snap grid (<c>CreateSnapshot</c> refuses a
+        /// base that is not, and rebake output is built by <c>Unsnap</c>), so <c>Snap</c> is
+        /// lossless and the vertex SUM below is exactly three times the true centroid.</item>
+        /// <item>The coordinate-to-cell map is monotone (FP64 division truncates toward zero,
+        /// <c>ToInt</c> floors, both non-decreasing) and the grid registers a triangle in every
+        /// cell its AABB touches — so a centroid inside the ring's AABB has its cell inside the
+        /// range walked here, and the triangle is registered in that cell.</item>
+        /// <item>The mesh handed in is complete: <c>Finish</c> guards this call with
+        /// <c>mesh != null</c> (the empty-walkable rejection calls it with null), and both the full
+        /// and the patch path finish their grid before the mesh reaches it.</item>
+        /// </list>
+        /// <para>A triangle registered in several cells is visited several times; the write is a
+        /// constant, so that is cost, not error. Cost bound if a footprint covered the whole grid:
+        /// the CSR entry count, which is 1.7x the triangle count on the largest shipped asset.</para>
         /// </summary>
         internal static void StampRetainedFootprints(
             FPNavMesh mesh, long[] polyX, long[] polyZ, int[] polyStart, int buildingCount,
@@ -2887,6 +3017,11 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 return;
             var tris = mesh.TrianglesMutable;
             var vs = mesh.Vertices;
+            // Hoisted: the property re-materialises a span on every access, and the innermost loop
+            // below would pay that per triangle.
+            ReadOnlySpan<int> cellTriangles = mesh.GridTriangles;
+            int gridWidth = mesh.GridWidth, gridHeight = mesh.GridHeight;
+
             for (int b = 0; b < buildingCount; b++)
             {
                 if (!IsRetain(polyRetain, b))
@@ -2903,19 +3038,51 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     if (polyZ[i] > maxZ) maxZ = polyZ[i];
                 }
 
-                for (int t = 0; t < tris.Length; t++)
+                // Same conversion the grid REGISTERED with (FPNavMeshBuildPipeline.TriangleCellRange),
+                // which is what makes the two agree about which cell a coordinate is in.
+                mesh.GetCellCoords(
+                    new FPVector2(FPGeoPredicates.Unsnap(minX), FPGeoPredicates.Unsnap(minZ)),
+                    out int colMin, out int rowMin);
+                mesh.GetCellCoords(
+                    new FPVector2(FPGeoPredicates.Unsnap(maxX), FPGeoPredicates.Unsnap(maxZ)),
+                    out int colMax, out int rowMax);
+
+                // Wholly outside. MEASURED REDUNDANT — delete it and every test still passes,
+                // because the clamps below plus the inclusive loop bounds already produce an empty
+                // range in all four directions (a footprint past the far edge keeps a high colMin
+                // while colMax clamps down below it). It stays because that safety is an emergent
+                // property of two separate things agreeing, and a reader changing either one has
+                // no local reason to check the other. The registration side (TriangleCellRange)
+                // needs no such test at all: a triangle is always inside the mesh bounds, and only
+                // a caller reaching this method directly can hand it a ring that is not.
+                if (colMax < 0 || rowMax < 0 || colMin >= gridWidth || rowMin >= gridHeight)
+                    continue;
+                if (colMin < 0) colMin = 0;
+                if (rowMin < 0) rowMin = 0;
+                if (colMax >= gridWidth) colMax = gridWidth - 1;
+                if (rowMax >= gridHeight) rowMax = gridHeight - 1;
+
+                for (int row = rowMin; row <= rowMax; row++)
                 {
-                    long sx = FPGeoPredicates.Snap(vs[tris[t].v0].x)
-                        + FPGeoPredicates.Snap(vs[tris[t].v1].x)
-                        + FPGeoPredicates.Snap(vs[tris[t].v2].x);
-                    long sz = FPGeoPredicates.Snap(vs[tris[t].v0].z)
-                        + FPGeoPredicates.Snap(vs[tris[t].v1].z)
-                        + FPGeoPredicates.Snap(vs[tris[t].v2].z);
-                    if (sx <= 3 * minX || sx >= 3 * maxX || sz <= 3 * minZ || sz >= 3 * maxZ)
-                        continue;
-                    if (!InsideConvexRingTimes3(polyX, polyZ, start, end, sx, sz))
-                        continue;
-                    tris[t].areaMask = FPNavMeshAreas.BUILDING_MASK;
+                    for (int col = colMin; col <= colMax; col++)
+                    {
+                        mesh.GetCellTriangles(col, row, out int cellStart, out int cellCount);
+                        for (int k = 0; k < cellCount; k++)
+                        {
+                            int t = cellTriangles[cellStart + k];
+                            long sx = FPGeoPredicates.Snap(vs[tris[t].v0].x)
+                                + FPGeoPredicates.Snap(vs[tris[t].v1].x)
+                                + FPGeoPredicates.Snap(vs[tris[t].v2].x);
+                            long sz = FPGeoPredicates.Snap(vs[tris[t].v0].z)
+                                + FPGeoPredicates.Snap(vs[tris[t].v1].z)
+                                + FPGeoPredicates.Snap(vs[tris[t].v2].z);
+                            if (sx <= 3 * minX || sx >= 3 * maxX || sz <= 3 * minZ || sz >= 3 * maxZ)
+                                continue;
+                            if (!InsideConvexRingTimes3(polyX, polyZ, start, end, sx, sz))
+                                continue;
+                            tris[t].areaMask = FPNavMeshAreas.BUILDING_MASK;
+                        }
+                    }
                 }
             }
         }

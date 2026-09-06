@@ -131,7 +131,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </param>
         /// <param name="logger">Optional diagnostic logger (IKLogger).</param>
         /// <exception cref="ArgumentException">Out-of-domain coordinates or malformed input.</exception>
-        /// <exception cref="InvalidOperationException">A constraint crosses another constraint (T1 NotAllowed).</exception>
+        /// <exception cref="FPConstraintCrossingException">A constraint crosses another constraint (T1 NotAllowed). It derives from <see cref="InvalidOperationException"/>, so an existing catch still applies.</exception>
         public static int[] Triangulate(
             long[] xs, long[] zs, int[] constraintPairs,
             bool eraseOuterAndHoles = true, IKLogger logger = null)
@@ -176,7 +176,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <param name="constraintPairs">Base constraint edges as index pairs. May be null/empty.</param>
         /// <param name="logger">Optional diagnostic logger.</param>
         /// <exception cref="ArgumentException">Out-of-domain coordinates or malformed input.</exception>
-        /// <exception cref="InvalidOperationException">A constraint crosses another constraint.</exception>
+        /// <exception cref="FPConstraintCrossingException">A constraint crosses another constraint.</exception>
         public static CdtSnapshot BuildSnapshot(
             long[] xs, long[] zs, int[] constraintPairs, IKLogger logger = null)
         {
@@ -1328,8 +1328,9 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                     // The wall bit, not the parity: an edge two rings share is still a wall, and
                     // driving a third constraint through it is still a crossing, which is refused.
                     if (IsConstrained(in _tris[cur], e))
-                        throw new InvalidOperationException(
-                            "FPConstrainedDelaunay: constraint crosses an existing constraint (T1 NotAllowed)");
+                        throw new FPConstraintCrossingException(
+                            _xs[a], _zs[a], _xs[b], _zs[b],
+                            _xs[l], _zs[l], _xs[r], _zs[r]);
 
                     int next = Nk(in _tris[cur], e);
                     System.Diagnostics.Debug.Assert(next >= 0, "CarveChannel: crossed a hull edge");

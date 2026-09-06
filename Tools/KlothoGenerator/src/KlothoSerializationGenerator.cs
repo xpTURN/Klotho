@@ -29,14 +29,19 @@ namespace xpTURN.Klotho.Generator
 
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
+            // ONE emit-target node for all four pipelines. Building it per pipeline gave four
+            // Select nodes over the same CompilationProvider, each re-running ResolveProjectRoot
+            // on every compilation — which is the cost the node exists to avoid.
+            var emitTarget = CreateEmitTarget(context);
+
             // === [KlothoComponent] pipeline ===
-            InitializeComponentPipeline(context);
+            InitializeComponentPipeline(context, emitTarget);
 
             // === [KlothoDataAsset] pipeline ===
-            InitializeDataAssetPipeline(context);
+            InitializeDataAssetPipeline(context, emitTarget);
 
             // === [KlothoSerializableStruct] pipeline ===
-            InitializeSerializableStructPipeline(context);
+            InitializeSerializableStructPipeline(context, emitTarget);
 
 
             // 1. Collect [KlothoSerializable] partial classes
@@ -95,12 +100,12 @@ namespace xpTURN.Klotho.Generator
             // 3. Generate per-type serialization code
             var validTargets = targets.Where(static r => r.TypeInfo != null);
 
-            // Combine with compilation to resolve project root from syntax tree paths
-            var validWithCompilation = validTargets.Combine(context.CompilationProvider);
+            // Combine with the emit target (two strings), not the compilation — see CreateEmitTarget.
+            var validWithEmitTarget = validTargets.Combine(emitTarget);
 
-            context.RegisterSourceOutput(validWithCompilation, static (spc, pair) =>
+            context.RegisterSourceOutput(validWithEmitTarget, static (spc, pair) =>
             {
-                var (result, compilation) = pair;
+                var (result, emitTarget) = pair;
                 var info = result.TypeInfo;
                 string code = info.Category switch
                 {
@@ -117,7 +122,7 @@ namespace xpTURN.Klotho.Generator
                     var fileName = info.FullTypeName.Replace('.', '_').Replace('<', '_').Replace('>', '_');
                     spc.AddSource($"{fileName}.g.cs", code);
 
-                    EmitToFile(compilation, fileName + ".g.cs", code);
+                    EmitToFile(emitTarget.Root, emitTarget.Assembly, fileName + ".g.cs", code);
                 }
             });
 
@@ -136,19 +141,24 @@ namespace xpTURN.Klotho.Generator
                 var hasCommandFactory = HasSourceDefinedType(compilation, "xpTURN.Klotho.Core.CommandFactory");
                 var hasMessageSerializer = HasSourceDefinedType(compilation, "xpTURN.Klotho.Network.MessageSerializer");
 
+                // This pipeline genuinely needs the compilation (HasSourceDefinedType above), so the
+                // root is resolved here rather than through CreateEmitTarget.
+                var projectRoot = ResolveProjectRoot(compilation);
+                var assemblyName = compilation.AssemblyName ?? "Unknown";
+
                 var factoryCode = FactoryEmitter.Emit(types, hasEntityFactory, hasCommandFactory, hasMessageSerializer);
                 if (factoryCode != null)
                 {
                     spc.AddSource("KlothoFactoryRegistration.g.cs", factoryCode);
 
-                    EmitToFile(compilation, "KlothoFactoryRegistration.g.cs", factoryCode);
+                    EmitToFile(projectRoot, assemblyName, "KlothoFactoryRegistration.g.cs", factoryCode);
                 }
 
                 var warmupCode = WarmupEmitter.Emit(types);
                 if (warmupCode != null)
                 {
                     spc.AddSource("KlothoWarmupRegistration.g.cs", warmupCode);
-                    EmitToFile(compilation, "KlothoWarmupRegistration.g.cs", warmupCode);
+                    EmitToFile(projectRoot, assemblyName, "KlothoWarmupRegistration.g.cs", warmupCode);
                 }
             });
         }
@@ -198,24 +208,59 @@ namespace xpTURN.Klotho.Generator
             return Location.None;
         }
 
-        private static void EmitToFile(Compilation compilation, string fileName, string code)
+        /// <summary>
+        /// Writes one generated file to <c>&lt;projectRoot&gt;/Tools/Generated/&lt;assembly&gt;/</c> for
+        /// debugging. Opt-in: the output root is never created here, so a project that has not asked for
+        /// the dump gets no files, and deleting the folder is how it is turned off again. When the root
+        /// does exist, a file whose content already matches is left untouched (no rewritten timestamp).
+        /// </summary>
+        private static void EmitToFile(string projectRoot, string assemblyName, string fileName, string code)
         {
+            if (projectRoot == null) return;
+
             try
             {
-                var projectRoot = ResolveProjectRoot(compilation);
-                if (projectRoot == null) return;
-
-                var dir = Path.Combine(projectRoot, "Tools");
-                dir = Path.Combine(dir, "Generated", compilation.AssemblyName ?? "Unknown");
+                var root = Path.Combine(projectRoot, "Tools");
+                root = Path.Combine(root, "Generated");
 #pragma warning disable RS1035 // File IO is intentional for debugging generated code
+                // Opt-in gate — the caller creates this directory to ask for the dump.
+                if (!Directory.Exists(root)) return;
+
+                var dir = Path.Combine(root, assemblyName ?? "Unknown");
                 Directory.CreateDirectory(dir);
-                File.WriteAllText(Path.Combine(dir, fileName), code);
+
+                var path = Path.Combine(dir, fileName);
+                if (File.Exists(path))
+                {
+                    string existing = null;
+                    // A read that fails must fall through to the write — treating it as "unchanged"
+                    // would freeze a stale dump.
+                    try { existing = File.ReadAllText(path); }
+                    catch { existing = null; }
+
+                    if (existing != null && string.Equals(existing, code, StringComparison.Ordinal))
+                        return;
+                }
+
+                File.WriteAllText(path, code);
 #pragma warning restore RS1035
             }
             catch
             {
                 // Silently ignore — file output is best-effort for debugging
             }
+        }
+
+        /// <summary>
+        /// Project root + assembly name as a value tuple, so the per-type pipelines can combine against
+        /// this instead of the <see cref="Compilation"/> itself: a compilation is a new instance on every
+        /// edit and would defeat caching for every type, while these two strings compare by value.
+        /// </summary>
+        private static IncrementalValueProvider<(string Root, string Assembly)> CreateEmitTarget(
+            IncrementalGeneratorInitializationContext context)
+        {
+            return context.CompilationProvider.Select(static (compilation, _) =>
+                (ResolveProjectRoot(compilation), compilation.AssemblyName ?? "Unknown"));
         }
 
         private static string ResolveProjectRoot(Compilation compilation)
@@ -253,7 +298,9 @@ namespace xpTURN.Klotho.Generator
             return SymbolEqualityComparer.Default.Equals(symbol.ContainingAssembly, compilation.Assembly);
         }
 
-        private void InitializeComponentPipeline(IncrementalGeneratorInitializationContext context)
+        private void InitializeComponentPipeline(
+            IncrementalGeneratorInitializationContext context,
+            IncrementalValueProvider<(string Root, string Assembly)> emitTarget)
         {
             // 1. Collect [KlothoComponent] structs
             var componentTargets = context.SyntaxProvider.ForAttributeWithMetadataName(
@@ -271,18 +318,18 @@ namespace xpTURN.Klotho.Generator
 
             // 3. Per-component code generation (Serialize/Deserialize/GetSerializedSize/GetHash)
             var validComponents = componentTargets.Where(static r => r.TypeInfo != null);
-            var validComponentsWithCompilation = validComponents.Combine(context.CompilationProvider);
+            var validComponentsWithEmitTarget = validComponents.Combine(emitTarget);
 
-            context.RegisterSourceOutput(validComponentsWithCompilation, static (spc, pair) =>
+            context.RegisterSourceOutput(validComponentsWithEmitTarget, static (spc, pair) =>
             {
-                var (result, compilation) = pair;
+                var (result, emitTarget) = pair;
                 var info = result.TypeInfo;
                 var code = ComponentEmitter.Emit(info);
 
                 var fileName = info.FullTypeName.Replace('.', '_').Replace('<', '_').Replace('>', '_');
                 spc.AddSource($"{fileName}.g.cs", code);
 
-                EmitToFile(compilation, fileName + ".g.cs", code);
+                EmitToFile(emitTarget.Root, emitTarget.Assembly, fileName + ".g.cs", code);
             });
 
             // 4. Aggregate: duplicate ID check only (Frame registration is now per-component via ModuleInitializer)
@@ -326,7 +373,9 @@ namespace xpTURN.Klotho.Generator
 
         // === [KlothoDataAsset] pipeline ===
 
-        private void InitializeDataAssetPipeline(IncrementalGeneratorInitializationContext context)
+        private void InitializeDataAssetPipeline(
+            IncrementalGeneratorInitializationContext context,
+            IncrementalValueProvider<(string Root, string Assembly)> emitTarget)
         {
             // 1. Collect [KlothoDataAsset] classes
             var dataAssetTargets = context.SyntaxProvider.ForAttributeWithMetadataName(
@@ -344,18 +393,18 @@ namespace xpTURN.Klotho.Generator
 
             // 3. Per-type code generation (Serialize/Deserialize/GetSerializedSize + Registrar)
             var validDataAssets = dataAssetTargets.Where(static r => r.TypeInfo != null);
-            var daWithCompilation = validDataAssets.Combine(context.CompilationProvider);
+            var daWithEmitTarget = validDataAssets.Combine(emitTarget);
 
-            context.RegisterSourceOutput(daWithCompilation, static (spc, pair) =>
+            context.RegisterSourceOutput(daWithEmitTarget, static (spc, pair) =>
             {
-                var (result, compilation) = pair;
+                var (result, emitTarget) = pair;
                 var info = result.TypeInfo;
                 var code = DataAssetEmitter.Emit(info);
 
                 var fileName = info.FullTypeName.Replace('.', '_').Replace('<', '_').Replace('>', '_');
                 spc.AddSource($"{fileName}.g.cs", code);
 
-                EmitToFile(compilation, fileName + ".g.cs", code);
+                EmitToFile(emitTarget.Root, emitTarget.Assembly, fileName + ".g.cs", code);
             });
 
             // 4. Aggregate: duplicate TypeId check
@@ -391,7 +440,9 @@ namespace xpTURN.Klotho.Generator
 
         // === [KlothoSerializableStruct] pipeline ===
 
-        private void InitializeSerializableStructPipeline(IncrementalGeneratorInitializationContext context)
+        private void InitializeSerializableStructPipeline(
+            IncrementalGeneratorInitializationContext context,
+            IncrementalValueProvider<(string Root, string Assembly)> emitTarget)
         {
             // 1. Collect [KlothoSerializableStruct] structs
             var targets = context.SyntaxProvider.ForAttributeWithMetadataName(
@@ -409,18 +460,18 @@ namespace xpTURN.Klotho.Generator
 
             // 3. Per-struct codec generation (Serialize/Deserialize/GetSerializedSize/GetHash; no TYPE_ID/registrar)
             var valid = targets.Where(static r => r.TypeInfo != null);
-            var validWithCompilation = valid.Combine(context.CompilationProvider);
+            var validWithEmitTarget = valid.Combine(emitTarget);
 
-            context.RegisterSourceOutput(validWithCompilation, static (spc, pair) =>
+            context.RegisterSourceOutput(validWithEmitTarget, static (spc, pair) =>
             {
-                var (result, compilation) = pair;
+                var (result, emitTarget) = pair;
                 var info = result.TypeInfo;
                 var code = SerializableStructEmitter.Emit(info);
 
                 var fileName = info.FullTypeName.Replace('.', '_').Replace('<', '_').Replace('>', '_');
                 spc.AddSource($"{fileName}.g.cs", code);
 
-                EmitToFile(compilation, fileName + ".g.cs", code);
+                EmitToFile(emitTarget.Root, emitTarget.Assembly, fileName + ".g.cs", code);
             });
         }
 

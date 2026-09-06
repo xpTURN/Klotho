@@ -5,6 +5,7 @@
 #if TOOLS
 using global::Godot;
 
+using xpTURN.Klotho.Deterministic.Math;
 using xpTURN.Klotho.Deterministic.Navigation;
 
 namespace xpTURN.Klotho.Godot
@@ -297,8 +298,9 @@ namespace xpTURN.Klotho.Godot
 
         internal void RemoveBuilding(int index)
         {
-            _data.TryRemoveBuilding(index);
-            PlaceStatus = null;
+            PlaceStatus = _data.TryRemoveBuilding(index, out var removeRejection)
+                ? null
+                : $"Remove refused: {removeRejection.Reason} — the building is still placed";
             RequestStaticRedraw();
             RequestDynamicRedraw();
             _dock.Refresh();
@@ -333,7 +335,9 @@ namespace xpTURN.Klotho.Godot
             PlaceStatus = _data.TryPlaceBuilding(point, shapeId, orientation, PlaceRetain,
                     out FPBuildingRejectionInfo rejection)
                 ? null
-                : $"Refused: {rejection.Reason}";
+                // A gated stage never reaches the click, but a stale mode could: name the stage
+                // refusal rather than a rejection reason that was never filled in.
+                : _data.PlacementUnsupportedReason ?? $"Refused: {rejection.Reason}";
 
             if (wasRunning)
                 _agentSim.Start();
@@ -370,16 +374,21 @@ namespace xpTURN.Klotho.Godot
         internal void SpawnAgentByPosition(Vector3 start, Vector3 dest)
         {
             int startTri = _data.FindTriangleAtPosition(start);
-            int destTri = _data.FindTriangleAtPosition(dest);
             if (startTri < 0) { GD.PushWarning("[GodotFPNavMeshVisualizer] Start is off the NavMesh."); return; }
-            if (destTri < 0) { GD.PushWarning("[GodotFPNavMeshVisualizer] Dest is off the NavMesh."); return; }
 
+            // The destination is NOT pre-checked here any more. The check that used to stand at
+            // this spot asked FindTriangleAtPosition, which is unfiltered: it waved a click on a
+            // retained building through (and SetAgentDestination would then refuse it, two guards
+            // disagreeing at one site) while refusing an off-mesh click outright — so the click
+            // never reached the snap that exists to move it onto usable ground. SetAgentDestination
+            // now answers both cases, and says why when it cannot.
             _agentSim.ClearAllAgents();
             int idx = _agentSim.AddAgent(start);
             if (idx >= 0)
             {
-                _agentSim.SetAgentDestination(idx, dest);
                 _interaction.SelectedAgentIndex = idx;
+                if (!_agentSim.SetAgentDestination(idx, dest.ToFPVector3()))
+                    GD.PushWarning($"[GodotFPNavMeshVisualizer] {_agentSim.LastDestinationRefusal}");
             }
             RequestDynamicRedraw();
             _dock.Refresh();
@@ -424,7 +433,8 @@ namespace xpTURN.Klotho.Godot
 
         private void OnAgentDestinationSet(int agentIdx, Vector3 dest)
         {
-            _agentSim.SetAgentDestination(agentIdx, dest);
+            if (!_agentSim.SetAgentDestination(agentIdx, dest.ToFPVector3()))
+                GD.PushWarning($"[GodotFPNavMeshVisualizer] {_agentSim.LastDestinationRefusal}");
             RequestDynamicRedraw();
             _dock.Refresh();
         }

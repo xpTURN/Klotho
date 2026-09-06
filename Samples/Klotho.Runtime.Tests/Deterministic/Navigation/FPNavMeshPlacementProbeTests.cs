@@ -16,6 +16,115 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
     [TestFixture]
     public class FPNavMeshPlacementProbeTests
     {
+        #region State survives a refusal — the list is always a set that bakes
+
+        /// <summary>
+        /// A removal that the rebake refuses must leave the list as it was.
+        ///
+        /// <para>The old note said a removal "cannot be refused — the remaining set is a subset of
+        /// one that was already accepted". That holds only while <c>Rules</c> is fixed, and
+        /// <c>Rules</c> is a public setter both editors expose. Here A overhangs the boundary: it
+        /// is accepted under <c>ClipOverlap</c> and refused under <c>Reject</c>. Accept the pair,
+        /// tighten the policy, then remove B — the surviving subset {A} is judged again under the
+        /// NEW rules and loses.</para>
+        ///
+        /// <para>Without the undo the probe would hold {} while the scene still shows A, and the
+        /// next rebake that succeeded would ship a mesh missing a building nobody removed.</para>
+        /// </summary>
+        [Test]
+        public void TryRemoveAt_WhenTheRebakeRefuses_LeavesTheListUntouched()
+        {
+            const double OverhangX = 1.5, OverhangZ = 8;   // clipped by Reject, accepted by ClipOverlap
+
+            var probe = Probe();
+            probe.Rules = new FPBuildingPlacementRules(
+                allowBuildingTouch: false, boundaryPolicy: FPBoundaryPlacementPolicy.ClipOverlap);
+
+            Assert.IsTrue(Place(probe, OverhangX, OverhangZ, retain: false, out _, out _),
+                "fixture: the overhanging building is accepted under ClipOverlap");
+            Assert.IsTrue(Place(probe, Bx, Bz, retain: false, out _, out _),
+                "fixture: the interior building is accepted too");
+            Assert.AreEqual(2, probe.Count);
+
+            probe.Rules = new FPBuildingPlacementRules(
+                allowBuildingTouch: false, boundaryPolicy: FPBoundaryPlacementPolicy.Reject);
+
+            Assert.IsFalse(probe.TryRemoveAt(1, out FPNavMesh mesh, out FPBuildingRejectionInfo rejection),
+                "fixture: the surviving subset must lose under the tightened policy, or this gate "
+                + "is testing nothing");
+            Assert.AreEqual(FPBuildingRejection.TouchesWalkableBoundary, rejection.Reason);
+            Assert.IsNull(mesh);
+
+            Assert.AreEqual(2, probe.Count,
+                "a refused removal must put the placement back — otherwise the list no longer holds "
+                + "a building the scene still shows");
+        }
+
+        /// <summary>
+        /// An unsupported base is refused as a VALUE from every entry point, not thrown, and the
+        /// reason names the stage rather than a building. Returning <c>false</c> with
+        /// <c>None</c> would make <c>IsRejected</c> answer "no" for a call that just failed.
+        /// </summary>
+        [Test]
+        public void UnsupportedBase_IsRefusedAsAValue_NamingTheStage()
+        {
+            var probe = new FPNavMeshPlacementProbe(
+                NavAgentTestHelper.CreateStackedFloorsNavMesh(Cells, floorGap: 5.0),
+                NavAgentTestHelper.SquareBuildingCatalog);
+
+            Assert.IsFalse(probe.TryPrepare(out string why));
+            Assert.IsNotNull(why, "the refusal must carry a message");
+
+            Assert.IsFalse(
+                probe.TryPlace(0, 0, FP64.FromDouble(Mx), FP64.FromDouble(Mz), FP64.Zero, false,
+                    out _, out FPBuildingRejectionInfo rejection),
+                "a placement on an unsupported base is refused, not thrown");
+            Assert.AreEqual(FPBuildingRejection.BaseMeshUnsupported, rejection.Reason);
+            Assert.IsTrue(rejection.IsRejected,
+                "a call that returned false must not report itself as unrejected");
+            Assert.AreEqual(-1, rejection.IndexA, "no building is at fault — the stage is");
+        }
+
+        /// <summary>
+        /// The refusal is remembered. Building the snapshot is the expensive part of this class, and
+        /// a base that failed once fails identically every time — re-running it per click was the
+        /// cost that made an unsupported stage unusable rather than merely gated.
+        /// </summary>
+        [Test]
+        public void UnsupportedBase_IsOnlyAttemptedOnce()
+        {
+            var probe = new FPNavMeshPlacementProbe(
+                NavAgentTestHelper.CreateStackedFloorsNavMesh(Cells, floorGap: 5.0),
+                NavAgentTestHelper.SquareBuildingCatalog);
+
+            Assert.IsFalse(probe.TryPrepare(out string first));
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < 50; i++)
+                Assert.IsFalse(probe.TryPrepare(out string again),
+                    "a remembered refusal stays a refusal");
+            watch.Stop();
+
+            Assert.Less(watch.ElapsedMilliseconds, 50,
+                "50 repeats of a cached answer must not cost 50 snapshot builds — the first attempt "
+                + $"alone is measured in tens of ms (reason: {first})");
+        }
+
+        [Test]
+        public void TryRemoveAt_OutOfRange_Throws()
+        {
+            var probe = Probe();
+            Assert.IsTrue(Place(probe, Ax, Az, retain: false, out _, out _));
+
+            Assert.Throws<System.ArgumentOutOfRangeException>(
+                () => probe.TryRemoveAt(1, out _, out _), "index == Count");
+            Assert.Throws<System.ArgumentOutOfRangeException>(
+                () => probe.TryRemoveAt(-1, out _, out _), "negative index");
+            Assert.AreEqual(1, probe.Count, "a refused call must not have changed the list");
+        }
+
+        #endregion
+
         #region Fixture
 
         private const int Cells = 8;    // 8 x 8 cells of 2 units

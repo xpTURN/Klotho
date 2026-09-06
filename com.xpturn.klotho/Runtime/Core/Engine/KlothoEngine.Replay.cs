@@ -131,6 +131,12 @@ namespace xpTURN.Klotho.Core
             ReplayTick0Reconstructed = reconstruct;
             ReplayTick0Hash = _simulation.GetStateHash();
 
+            // The only window this check has: the world is built (so the local nav source is wired
+            // and answers a real fingerprint), and nothing has been told the game started yet.
+            // Later is too late -- Play() and OnGameStart are a few lines down, and refusing after
+            // them leaves a half-started world behind.
+            RefuseReplayOnNavMismatch(replayData.Metadata);
+
             // Save initial snapshot
             SaveSnapshot(0);
 
@@ -149,6 +155,64 @@ namespace xpTURN.Klotho.Core
             LogReplayReproductionContext(replayData.Metadata);
 
             _logger?.KInformation($"[KlothoEngine][Replay] started: {replayData.Metadata.TotalTicks} ticks, {replayData.Metadata.DurationMs}ms");
+        }
+
+        /// <summary>
+        /// Refuses a replay recorded against DIFFERENT navigation - a different stage, or a build
+        /// whose pathfinding plans other corridors (see
+        /// <see cref="Deterministic.Navigation.FPNavAgentSystem.NAV_BEHAVIOUR_REVISION"/>). Without
+        /// this the file loads and diverges mid-playback, and the format carries no per-tick hash
+        /// to say where.
+        ///
+        /// <para><b>0 on either side is not a mismatch</b>, matching the sentinel every other
+        /// fingerprint path uses. A local 0 is warned about rather than passed silently: on this
+        /// path it usually means the check could not run (no nav source registered), which is
+        /// otherwise indistinguishable from the gate not existing.</para>
+        ///
+        /// <para><b>Recordings that did not build their own tick 0 are warned, not refused.</b> The
+        /// anchor is the mesh AT THE SNAPSHOT INSTANT, and an SD client that received its initial
+        /// FullState mid-match anchored a REBAKED mesh; playback loads the base asset, so comparing
+        /// them would reject a perfectly good file. <c>InitialStateTick != 0</c> marks exactly that
+        /// case.</para>
+        ///
+        /// <para><b>This is attribution, not integrity.</b> The anchors are non-cryptographic folds
+        /// and nothing is signed, so a forged file rewrites them along with the payload. What the
+        /// refusal buys is dismissing an HONEST mismatch early instead of debugging a desync.</para>
+        /// </summary>
+        private void RefuseReplayOnNavMismatch(IReplayMetadata meta)
+        {
+            long recorded = meta.NavFingerprint;
+            if (recorded == 0)
+                return;
+
+            long local = GetFingerprintBreakdown().Nav;
+            if (local == 0)
+            {
+                _logger?.KWarning(
+                    $"[KlothoEngine][Replay] this recording carries a navigation fingerprint " +
+                    $"(0x{recorded:X16}) but this process reports none, so it was NOT checked. " +
+                    $"Register the navigation system before starting playback to get the check.");
+                return;
+            }
+
+            if (local == recorded)
+                return;
+
+            if (meta.InitialStateTick != 0)
+            {
+                _logger?.KWarning(
+                    $"[KlothoEngine][Replay] navigation fingerprint differs " +
+                    $"(recorded=0x{recorded:X16} local=0x{local:X16}) but this recording started " +
+                    $"mid-match (tick={meta.InitialStateTick}), so its anchor describes a rebaked " +
+                    $"mesh rather than the base asset. Not refused - the comparison does not apply.");
+                return;
+            }
+
+            throw new InvalidDataException(
+                $"[Replay] navigation fingerprint mismatch: recorded=0x{recorded:X16} " +
+                $"local=0x{local:X16}. Either this replay was recorded on a different stage, or on " +
+                $"a build whose navigation plans different corridors (NAV_BEHAVIOUR_REVISION). " +
+                $"Re-record it, or play it back with the build and content it was recorded against.");
         }
 
         /// <summary>

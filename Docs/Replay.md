@@ -44,10 +44,18 @@ The engine owns a `ReplaySystem` instance, reachable as `KlothoEngine.ReplaySyst
 
 `IReplaySystem` unifies two roles:
 
-- **`IReplayRecorder`** — `StartRecording(playerCount, simConfig, randomSeed)` · `RecordTick(tick, commands)` · `StopRecording(totalTicks) → IReplayData`, plus `OnRecordingStarted` / `OnRecordingStopped`.
+- **`IReplayRecorder`** — `StartRecording(playerCount, simConfig, randomSeed)` · `RecordTick(tick, commands)` · `StopRecording(totalTicks, ReplayEndReason reason = Normal) → IReplayData`, plus `OnRecordingStarted` / `OnRecordingStopped`.
 - **`IReplayPlayer`** — `Load` · `Play` / `Pause` / `Resume` / `Stop` · `SeekToTick` / `SeekToProgress` · `GetCurrentTickCommands` · `Update(deltaTime)` · `Speed` · `Progress` / `Accumulator`, plus `OnTickPlayed` / `OnPlaybackFinished` / `OnSeekCompleted`.
 
-`IReplaySystem` adds file I/O (`SaveToFile` / `LoadFromFile`), `CurrentReplayData`, `SetGameCustomData`, and `SetInitialStateSnapshot`. (The concrete `ReplaySystem` also exposes `StepForward()` / `StepBackward()` / `CancelRecording()`, which are not on the interface.)
+`IReplaySystem` adds file I/O (`SaveToFile` / `LoadFromFile`), the `IsRecording` / `IsPlaying` flags,
+`CurrentReplayData`, and the setters the engine fills before a recording is closed:
+`SetGameCustomData`, `SetInitialStateSnapshot(snapshot, hash, tick)`, `SetInitialRoster`,
+`SetInitialEntitlements` and `SetReproductionAnchors`. (The concrete `ReplaySystem` also exposes
+`StepForward()` / `StepBackward()` / `CancelRecording()`, which are not on the interface.)
+
+> **`CurrentReplayData` is null for the whole match.** It is assigned when a recording **stops** and
+> when a file loads — never while ticks are being recorded. So it is not a "is this session
+> recording?" signal; `IsRecording` is. This is also why saving has an ordering rule ([§4](#4-recording-engine-driven)).
 
 **`ReplayState`** — `Idle → Recording → Idle`; `Idle → Playing ⇄ Paused → Finished → Idle`.
 
@@ -160,7 +168,7 @@ stored or uploaded, and the format deliberately leaves it to that layer.
 Recording is wired into `KlothoEngine` — you don't call `RecordTick` yourself. When a session starts with recording **enabled**, the engine:
 
 1. calls `StartRecording(activePlayerCount, simConfig, randomSeed)` at boot,
-2. calls `SetInitialStateSnapshot(snapshot, hash)` with the tick-0 full state (**required** — playback throws `InvalidDataException` if it's missing),
+2. calls `SetInitialStateSnapshot(snapshot, hash, tick)` with the tick-0 full state (**required** — playback throws `InvalidDataException` if it's missing) and records the reproduction anchors, the tick-0 roster and its per-player entitlements alongside it ([§7-1](#7-determinism-rules-must-read)),
 3. records each tick's commands **at the moment that tick is confirmed (verified)** — P2P, Server-Driven, and late-join paths alike. Because recording is tied to *confirmation* rather than to execution, a tick whose inputs were corrected by a late-arriving command or a rollback is recorded with its **corrected** inputs, and only ticks that actually confirmed end up in the file (see *Recording length* below).
 
 Your game's job is just to attach optional metadata and save the file:
@@ -171,11 +179,22 @@ var engine = session.Engine;                 // or however you reach KlothoEngin
 // (optional) attach game-defined metadata — call after recording has started
 engine.ReplaySystem.SetGameCustomData(myHeaderBytes);
 
-// when the match ends, write the replay
+// when the match ends: STOP first, then save — the file is assembled by StopRecording
+engine.Stop();                                    // closes the recording (KlothoSession.Stop does this)
 engine.SaveReplayToFile(path, dumpJson: false);   // delegates to ReplaySystem.SaveToFile
 ```
 
-`SaveReplayToFile` serializes `CurrentReplayData` (metadata + initial snapshot + command stream) and writes it. `GetCurrentReplayData()` returns the in-memory `IReplayData` if you want to keep or upload it without a file.
+**Save after the recording is closed, not before.** `StopRecording` is what assembles the
+`IReplayData`, and `KlothoEngine.Stop()` is what calls it (clamping the length to the last verified
+tick). Call `SaveReplayToFile` while ticks are still being recorded and there is nothing to write:
+it logs `[ReplaySystem] No replay data to save` and returns without creating a file. The same rule
+explains `GetCurrentReplayData()`, which returns the in-memory `IReplayData` for keeping or uploading
+without a file — and returns `null` until the recording stops.
+
+The wiring that gets this right for you is `ReplaySavePath` on the session setup: `KlothoSession.Stop()`
+stops the engine and *then* writes the file, in that order, and skips it in replay mode.
+
+`SaveReplayToFile` serializes `CurrentReplayData` (metadata + initial snapshot + command stream) and writes it.
 
 > Recording adds negligible overhead — it copies the command list that the engine already has each tick. The one cost is the initial full-state snapshot, taken once at tick 0.
 
@@ -204,6 +223,20 @@ KlothoSession session = sessionFlow.StartReplayFromFile(path);   // throws Repla
 `StartReplayFromFile` reconstructs everything from the file's metadata (`ToSimulationConfig()`), so you don't re-specify config. Session creation is observed through `IKlothoSessionObserver.OnSessionCreated(session, SessionEntryKind kind)` — branch on `kind` for a replay-specific view (see [QuickStart](QuickStart.Unity.md)).
 
 Under the hood `KlothoEngine.StartReplay(replayData)` seeds the RNG from `metadata.RandomSeed`, `Initialize()`s the simulation, `RestoreFromFullState(InitialStateSnapshot)`, then plays — each `OnTickPlayed` runs `_simulation.Tick(recordedCommands)` and dispatches that tick's events as **Verified** (a replay is entirely on the verified timeline; there is no prediction).
+
+**Where tick 0 comes from is a choice.** Both `StartReplayFromFile` and `StartReplay` take an
+optional `KlothoEngine.ReplayInitialState`:
+
+| Value | What happens | Use it for |
+| ---- | ---- | ---- |
+| `RestoreSnapshot` *(default)* | The recorded snapshot bytes are restored. | Viewers — you want the world the file describes. |
+| `Reconstruct` | Tick 0 is **rebuilt** from the recorded roster, seed and config through the live path (`OnInitializeWorld` runs), and the snapshot bytes are never read. Falls back to `RestoreSnapshot` when the file carries no roster. | Verifiers — see [§10](#10-verifying-a-replay-server-side). |
+
+Playback then reports what it did: `ReplayTick0Reconstructed` says which of the two happened, and
+`ReplayTick0Hash` is the hash of the tick-0 state it ended up with — compare it against
+`metadata.InitialStateHash`. `CurrentStateHash` folds the state the simulation holds *right now* the
+same way, which is the cheap end-of-playback check: the same file run twice must print the same
+value. Nothing in the file records an end hash, so it is a differential signal, not a claim check.
 
 Drive playback through the engine wrappers (`IsReplayMode` is `true` throughout):
 
@@ -236,9 +269,11 @@ A replay only reproduces correctly if playback is deterministically identical to
 
     So that a mismatch can be *attributed* rather than merely observed, the file records what it ran against: four fingerprints (component-registry layout, static colliders, navmesh, and the game's own slot), the initial snapshot's hash and the tick it was taken at, the two process-global layout inputs (`PrunedComponentTypeIds`, the per-component maxCount overrides), and the ordered roster the tick-0 world was built from (`InitialRoster` — the participants in the order their entities were created, which makes it state-hash input; late joiners never appear in it). The roster is empty when the recording peer did not build tick 0 — a server-driven client receives its initial state from the server — and that emptiness is the signal, so there is no separate flag. The fingerprints are taken at the same instant as the snapshot — the navigation term moves with runtime rebakes, so any other moment would describe a different world. `0` in a fingerprint means "no such source registered", which is normal for a game that has none. None of this is signed: it distinguishes an honest client's version mismatch from a real divergence, it does not stop a forger.
 
+    **The navigation term is also a gate.** `StartReplay` refuses a file whose recorded `NavFingerprint` disagrees with this process's — that covers both *recorded on another stage* and *recorded on a build whose pathfinding plans different corridors* (`FPNavAgentSystem.NAV_BEHAVIOUR_REVISION` is folded into the term alongside the mesh). Three cases are deliberately not refusals: `0` on either side keeps its "not provided" meaning (a local `0` is warned about, because on the playback path it usually means the check could not run); and a recording whose `InitialStateTick != 0` is warned, not refused, because its anchor describes the mesh at a mid-match instant rather than the base asset. The refusal lands before playback starts and before `OnGameStart` fires. It is still attribution, not integrity — a forged file rewrites the anchor along with the payload.
+
     The two layout inputs are **recorded, not restored**. The component layout is frozen process-wide before any replay loads, so a verifier must be *started* with them; `ToSimulationConfig()` deliberately leaves them out rather than pretending to apply them.
 2. **The engine re-derives state from inputs** — never trust positions/HP from "the replay"; they don't exist in the file. They come out of re-simulating. So any non-determinism that would desync a live match also corrupts a replay (see [DeterministicMath.md §11](DeterministicMath.md) and [ECS.md §10](ECS.md)).
-3. **The initial snapshot is mandatory** — recording without `SetInitialStateSnapshot` produces a file that can't play back. (The engine injects it automatically; only relevant if you build a custom recorder.)
+3. **The initial snapshot is mandatory** — recording without `SetInitialStateSnapshot` produces a file that can't play back: `StartReplay` throws `InvalidDataException` on the restore path. (The engine injects it automatically; only relevant if you build a custom recorder.) The one path that does not read those bytes is `ReplayInitialState.Reconstruct` with a recorded roster ([§5](#5-playback)), which rebuilds tick 0 and uses the recorded *hash* alone — a verifier's mode, not a viewer's.
 4. **Gate live-only behavior on `IsReplayMode`** — view/audio/input code that should not run during playback must check `engine.IsReplayMode`, exactly as it would for spectator mode.
 5. **Config & seed come from metadata** — playback restores `SimulationConfig` (including the match's `StageId` and opaque `MatchConfigData`) and the RNG seed from the file, so a multi-stage match replays on the stage it was recorded on; don't override them. (Replay files are **not** backward compatible and the loader does not try: `metadata.Version` must equal the build's `CURRENT_VERSION` exactly, so a file from any other version is rejected outright instead of being misparsed with the current layout. Re-record it.)
 
@@ -248,15 +283,26 @@ A replay only reproduces correctly if playback is deterministically identical to
 
 `LoadFromFile` / `StartReplayFromFile` throw **`ReplayLoadException`** for every load failure — file-not-found, read I/O error, malformed or version-incompatible payload, or invalid metadata (`SimulationConfig.Validate` failures are wrapped into the same type). The reason travels in `Message`, not only in `InnerException`, so showing `e.Message` (as below) is enough to tell a player "this replay is from another build — re-record it" apart from "the file is gone". A null/empty path throws `ArgumentException`. Loading is atomic: on failure the previously loaded `CurrentReplayData` is left untouched.
 
+**A second type reaches the same call.** `StartReplayFromFile` loads the file and then *starts*
+playback, and the two refusals `StartReplay` makes itself are **`InvalidDataException`**, not
+`ReplayLoadException`: a missing initial snapshot, and a navigation fingerprint that disagrees with
+this process ([§7-1](#7-determinism-rules-must-read)). Both land before any tick runs and before
+`OnGameStart` fires — playback never half-starts, and the flow simply never returns a session — but a
+`catch (ReplayLoadException)` alone will not see them. Catch both wherever a player picks the file:
+
 ```csharp
 try
 {
     var session = sessionFlow.StartReplayFromFile(path);
 }
-catch (ReplayLoadException e)
+catch (ReplayLoadException e)          // the file cannot be read as a replay
 {
     logger.KError($"Replay failed to load: {e.Message}");
     // show an error in UI; previous state is unchanged
+}
+catch (InvalidDataException e)         // it loaded, but this build cannot reproduce it
+{
+    logger.KError($"Replay cannot be played back here: {e.Message}");
 }
 ```
 
@@ -269,8 +315,10 @@ catch (ReplayLoadException e)
 void OnMatchEnded(KlothoEngine engine, string replayPath)
 {
     engine.ReplaySystem.SetGameCustomData(BuildHeader());   // optional: map id, roster, etc.
+    engine.Stop();                               // closes the recording — nothing to save before this
     engine.SaveReplayToFile(replayPath);         // inputs + initial snapshot
 }
+// Or skip both lines: set ReplaySavePath on the session setup and KlothoSession.Stop() does it in order.
 
 // ── Later, play the replay back ──
 KlothoSession ReplayMatch(KlothoSessionFlow flow, string replayPath)
@@ -296,12 +344,21 @@ sample ships this as a mode of its dedicated server:
 
 ```
 dotnet run --project Samples/Brawler/Server -- --verify path/to/replay.rply
+dotnet run --project Samples/Brawler/Server -- --verify a.rply b.rply c.rply --log=information
 ```
 
 **Exit codes are the verdict.** `0` verified, `10` claim mismatch (a cheat suspicion — and a *successful*
 run), `20` unverifiable, `30` unreadable file. Values `1`–`9` stay what they are everywhere else in that
-binary: the process failed. That gap is deliberate — a crashed verifier must never be mistaken for a
-detected cheat. One machine-readable line accompanies the code and names *why*.
+binary: the process failed (bad arguments is `2`). That gap is deliberate — a crashed verifier must never
+be mistaken for a detected cheat. One machine-readable line accompanies the code and names *why*.
+
+**A run takes a queue.** Several paths in one process amortise the ~0.6 s of start-up, which is a large
+share of a short match's verification. Every file prints its own line, and the process exits with the
+**worst** verdict seen (`0 < 10 < 20 < 30`), so a batch cannot bury one bad file among good ones — but
+the codes are ordered and the reasons are not, so a caller that only reads the exit code loses the *why*.
+`--log=<level>` sets engine log verbosity. Every argument that does not start with `--` is a path; an
+unrecognised flag is reported as ignored rather than changing the verdict, because a stray flag must
+not turn into a different exit code.
 
 ### What it can prove, and what it cannot
 
@@ -461,5 +518,7 @@ verifier can *start* correctly, and assigning them afterwards would change nothi
 restore. A file recorded against a different layout is refused up front, since nothing derived from it
 would mean anything.
 
-One consequence: a process verifies replays of **one** layout. Feeding it a file with different layout
-inputs fails loudly rather than silently mis-verifying — batch verification should group by layout.
+One consequence: a process verifies replays of **one** layout — the freeze happens on the first file and
+the rest of the queue inherits it. A later file with different layout inputs comes back
+`unverifiable` naming `layoutFrozenDifferently` rather than being silently mis-verified, so batching
+must group by build and content revision. That grouping is forced, not advisory.

@@ -236,10 +236,34 @@ The `KLOTHO_DET*` codes come from a separate **`DeterminismAnalyzer`** (a Roslyn
 The generator ships **prebuilt** as `com.xpturn.klotho/Plugins/Analyzers/KlothoGenerator.dll` (so consumers don't compile it). When you change generator source under `Tools/KlothoGenerator/`, rebuild and redeploy the DLL:
 
 ```bash
-Tools/gen.sh        # dotnet build -c Release, then copies the DLL into Plugins/Analyzers/
+Tools/gen.sh                 # dotnet build -c Release, then copies the DLL into Plugins/Analyzers/
+Tools/pack-godot-addon.sh    # Godot consumers: copies that same DLL into addons/klotho/Analyzers/
 ```
 
-For debugging the **output**, the generator also writes each `.g.cs` to `Tools/Generated/<AssemblyName>/` (best-effort; skipped under PackageCache paths). Read those files to see exactly what was emitted for a given type — useful when a hash mismatch or a serialization size bug is suspected.
+Godot projects get the generator through the addon rather than the Unity package, and the addon's
+`Klotho.props` references it as `<Analyzer Include="…/Analyzers/KlothoGenerator.dll" />`. The two
+copies are one build — pack after `gen.sh`, or the addon keeps generating with the older DLL.
+
+For debugging the **output**, the generator can also write each `.g.cs` to `Tools/Generated/<AssemblyName>/` in your project root. This dump is **opt-in and off by default**: it is written only when `Tools/Generated/` already exists, and the generator never creates that directory. So:
+
+```bash
+mkdir -p Tools/Generated   # turn the dump on for this project
+rm -rf Tools/Generated     # turn it off again
+```
+
+**Turning it on under a running IDE gives a partial dump.** The generator rewrites a type only when
+that type's inputs changed, so types the IDE has already cached are not re-emitted and the folder
+fills in one edit at a time. That looks like the feature is broken. Restart the IDE, or run a clean
+`dotnet build`, for the complete dump. (Turning it *off* needs neither — removing the directory
+stops the writes immediately.)
+
+That caching is the same property that keeps an IDE responsive: per-type generation is keyed on the
+type's own inputs plus two strings (project root and assembly name), **not** on the `Compilation`
+object, which is a new instance after every keystroke. Editing one file therefore re-emits the types
+you touched rather than every tagged type in the assembly. Unity does not benefit — it recompiles a
+whole assembly at a time regardless — and the generated code is identical either way.
+
+When it is on, a file whose content has not changed is left alone (no rewritten timestamp), so the dump does not churn in version control. The dump is a debug aid, never a build input — nothing references those files, and deleting them changes no build. It is skipped entirely for sources under PackageCache, and for any project whose paths carry no `Assets/` or `Packages/` segment (a plain .NET or Godot project, for instance). Without it, `dotnet build -p:EmitCompilerGeneratedFiles=true` gives you the same generated sources under `obj/`.
 
 > The generator is a `netstandard2.0` Roslyn `IIncrementalGenerator`. Generator source uses `Microsoft.CodeAnalysis`; it is build-time only and never shipped to the runtime. The same DLL also hosts the `DeterminismAnalyzer` (`DiagnosticAnalyzer`) that emits the `KLOTHO_DET*` warnings ([§8](#8-diagnostics-reference)).
 

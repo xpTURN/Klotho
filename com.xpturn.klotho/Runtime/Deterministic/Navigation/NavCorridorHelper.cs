@@ -2,12 +2,23 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 {
     public static unsafe class NavCorridorHelper
     {
-        public static void SetCorridor(int* dst, ref int dstLen, int maxLen, int[] src, int srcLen)
+        /// <summary>
+        /// Copies at most <paramref name="maxLen"/> triangles into the component's corridor and
+        /// returns <b>how many were dropped</b> — the count the caller has to treat as a wiring bug.
+        ///
+        /// <para>Under one effective cap this cannot happen: the search returns at most the cap and
+        /// <paramref name="maxLen"/> is that same cap. A nonzero return therefore means the search
+        /// and the storage were built from different caps, and the corridor the agent walks is not
+        /// the corridor that was planned. It used to be silent, which made the truncation counter on
+        /// the pathfinder agree with the constant that had NOT been changed.</para>
+        /// </summary>
+        public static int SetCorridor(int* dst, ref int dstLen, int maxLen, int[] src, int srcLen)
         {
             int copyLen = srcLen < maxLen ? srcLen : maxLen;
             for (int i = 0; i < copyLen; i++)
                 dst[i] = src[i];
             dstLen = copyLen;
+            return srcLen - copyLen;
         }
 
         public static void MergeCorridorStart(

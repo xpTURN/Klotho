@@ -34,9 +34,15 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <summary>Query bound to <see cref="CurrentMesh"/>. See that property for the contract.</summary>
         public FPNavMeshQuery CurrentQuery => _query;
 
-        private const int VISITED_BUFFER_SIZE = 48;
-        private readonly int[] _visitedBuffer = new int[VISITED_BUFFER_SIZE];
-        private readonly int[] _corridorBuffer = new int[NavAgentComponent.MAX_CORRIDOR];
+        // Sized from the SAME knob the query walks with: MoveAlongSurfaceWithVisited clamps its
+        // handover to this buffer, so a smaller one silently truncates the visited path with no
+        // counter to say so. The two used to be a hardcoded 48 against a default 48 — equal by
+        // coincidence, and wrong the moment anyone raised moveMaxQueue.
+        private readonly int[] _visitedBuffer;
+
+        /// <summary>Width of the visited handover, for the gate that pins it to the query's walk.</summary>
+        internal int DebugVisitedBufferLength => _visitedBuffer.Length;
+        private readonly int[] _corridorBuffer;
 
         // --- Graph-local obstacle query (BFS here, reusing the navmesh topology directly) ---
         // Forward triangle->segment CSR built alongside LoadObstacles (segment index aligns with
@@ -51,15 +57,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // BFS buffers (GC-0, generation-stamped — same pattern as FPNavMeshQuery.MoveAlongSurface).
         // Frontier is a monotone-tail queue, so the cap equals the visited bound. Sized for horizon
         // coverage (NOT copied from MOVE_MAX_QUEUE, which is a single-tick move size).
-        private const int BFS_FRONTIER_CAP = 256;
         private int[] _bfsStamp;      // length triCount, generation stamp
         private int _bfsGeneration;
-        private readonly int[] _bfsFrontier = new int[BFS_FRONTIER_CAP];
+        private readonly int[] _bfsFrontier;
         // ×3 = (max 3 boundary edges per triangle) × the frontier/visited cap: candCount is bounded by
-        // 3·BFS_FRONTIER_CAP == this length, so candidate collection can never truncate and needs no
-        // overflow counter (unlike the frontier). Keep this coupling — shrinking it turns the
+        // 3·FPNavTuning.BfsFrontierCap == this length, so candidate collection can never truncate and
+        // needs no overflow counter (unlike the frontier). Keep this coupling — shrinking it turns the
         // `candCount < _candidateSegs.Length` guard below into a silent, undiagnosed coverage cliff.
-        private readonly int[] _candidateSegs = new int[BFS_FRONTIER_CAP * 3];
+        private readonly int[] _candidateSegs;
         private int _bfsFrontierOverflowCount;
 
         /// <summary>Diagnostic: times the BFS frontier cap truncated a query (coverage cliff).</summary>
@@ -86,15 +91,35 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// moved by ProcessMovement but not collision-resolved (guarded, no overflow). Callers should
         /// keep nav agent count within this bound.
         /// </summary>
+        /// <remarks><b>This is the default, not this instance's value.</b> The pass is sized from
+        /// <see cref="FPNavTuning.MaxAgents"/>; read <see cref="Tuning"/> to know what a given
+        /// system actually runs with.</remarks>
         public const int MAX_AGENTS = 64;
 
         // Position-correction pass (DetourCrowd-style). Zero-GC pre-allocated buffers.
-        private const int COLLISION_RESOLVE_ITERATIONS = 4;
         private static readonly FP64 COLLISION_RESOLVE_FACTOR = FP64.FromDouble(0.7);
         private static readonly FP64 COINCIDENT_PEN = FP64.FromDouble(0.01);
         private static readonly FP64 POS_EPSILON = FP64.FromRaw(100);
-        private readonly FPVector2[] _disp = new FPVector2[MAX_AGENTS];
-        private readonly int[] _dispWeight = new int[MAX_AGENTS];
+        private readonly FPVector2[] _disp;
+        private readonly int[] _dispWeight;
+
+        private readonly FPNavTuning _tuning;
+
+        /// <summary>
+        /// The sizes this instance was built with. <b>Read this, not the constants</b> — they are
+        /// the defaults, and an instance handed a different tuning still compiles against them.
+        /// </summary>
+        public FPNavTuning Tuning => _tuning;
+
+        private int _corridorCopyTruncatedCount;
+
+        /// <summary>
+        /// Diagnostic: triangles dropped while copying a planned corridor into an agent
+        /// (<see cref="NavCorridorHelper.SetCorridor"/>). <b>0 is the only correct value</b> — under
+        /// one effective cap the copy cannot truncate, so a nonzero count means the search and the
+        /// component storage were built from different caps.
+        /// </summary>
+        public int DebugCorridorCopyTruncatedCount => _corridorCopyTruncatedCount;
 
         /// <summary>
         /// Distance threshold for waypoint arrival detection.
@@ -154,19 +179,28 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// plan as if a building were not there and then discover it by walking into it. That is
         /// the asymmetry per-agent masks exist for: plan permissively, walk restrictively, and the
         /// unit learns by contact instead of by knowing.</para>
+        ///
+        /// <para><b>Public because a caller that snaps a destination has to agree with this</b>: it
+        /// must ask <see cref="FPNavMeshQuery.ProjectToPassable"/> with the mask this system will
+        /// plan with, or the snap lands somewhere <c>FindPath</c> then refuses. Duplicating the
+        /// <c>!= 0 ?</c> fold at such a caller is the failure worth preventing — an override of
+        /// zero folded wrong means EVERY triangle is impassable, whose symptom (the agent does not
+        /// move) is identical to the defect the snap exists to fix.</para>
         /// </summary>
-        private static int ResolvePlanMask(in NavAgentComponent nav)
+        public static int ResolvePlanMask(in NavAgentComponent nav)
             => nav.PlanAreaMaskOverride != 0 ? nav.PlanAreaMaskOverride : DEFAULT_AREA_MASK;
 
         /// <summary>
         /// The mask for WALKING: what this agent may actually enter. A triangle this refuses is a
-        /// wall to the walk, exactly like an unwalkable one.
+        /// wall to the walk, exactly like an unwalkable one. Public for the same reason as
+        /// <see cref="ResolvePlanMask"/>.
         /// </summary>
-        private static int ResolveWalkMask(in NavAgentComponent nav)
+        public static int ResolveWalkMask(in NavAgentComponent nav)
             => nav.WalkAreaMaskOverride != 0 ? nav.WalkAreaMaskOverride : DEFAULT_AREA_MASK;
 
         public FPNavAgentSystem(FPNavMesh navMesh, FPNavMeshQuery query,
-            FPNavMeshPathfinder pathfinder, FPNavMeshFunnel funnel, IKLogger logger)
+            FPNavMeshPathfinder pathfinder, FPNavMeshFunnel funnel, IKLogger logger,
+            FPNavTuning? tuning = null)
         {
             _navMesh = navMesh;
             _query = query;
@@ -174,8 +208,76 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _funnel = funnel;
             _logger = logger;
 
+            _tuning = tuning ?? FPNavTuning.Default;
+            _tuning.Validate();
+
+            RequireSameTuning(query?.Tuning, nameof(query));
+            RequireSameTuning(pathfinder?.Tuning, nameof(pathfinder));
+            RequireSameTuning(funnel?.Tuning, nameof(funnel));
+
+            _visitedBuffer = new int[_tuning.MoveMaxQueue];
+            _disp = new FPVector2[_tuning.MaxAgents];
+            _dispWeight = new int[_tuning.MaxAgents];
+            _bfsFrontier = new int[_tuning.BfsFrontierCap];
+            _candidateSegs = new int[_tuning.BfsFrontierCap * 3];
+            _corridorBuffer = new int[_tuning.CorridorCap];
+
             WaypointThreshold = FP64.FromDouble(0.3);
             _avoidance = null;
+        }
+
+        /// <summary>
+        /// Every part of a navigation stack must run the SAME tuning: the caps size buffers and
+        /// bound loops in five separate objects, and a stack that disagrees plans a corridor one
+        /// half of it will not walk. The type doc says so — <i>lockstep peers must construct their
+        /// navigation with the same tuning</i> — and this is what makes it true rather than
+        /// advisory.
+        ///
+        /// <para>Null passes: an absent collaborator is a different question, answered where it is
+        /// used. The tunings are compared by value, so <c>FPNavTuning.Default</c> on both sides
+        /// agrees — which is the case for every caller that names no tuning at all.</para>
+        ///
+        /// <para><b>This is a local check only.</b> It cannot see the other peer; two peers each
+        /// internally consistent but tuned differently still shake hands here. That is what the
+        /// tuning digest in <see cref="GetNavFingerprint"/> is for.</para>
+        /// </summary>
+        private void RequireSameTuning(FPNavTuning? theirs, string which)
+        {
+            if (theirs == null || theirs.Value == _tuning)
+                return;
+
+            FPNavTuning t = theirs.Value;
+            throw new ArgumentException(
+                $"FPNavAgentSystem: {which} was built with a different FPNavTuning. The whole stack " +
+                $"must share one — differing caps mean the planner and the walker disagree about " +
+                $"how far they may look. First difference: {FirstDifference(_tuning, t)}. " +
+                $"Hand the same tuning to the query, pathfinder, funnel, avoidance and this system, " +
+                $"or omit it everywhere to take FPNavTuning.Default.");
+        }
+
+        private static string FirstDifference(FPNavTuning mine, FPNavTuning theirs)
+        {
+            if (mine.MaxAgents != theirs.MaxAgents)
+                return $"MaxAgents {mine.MaxAgents} vs {theirs.MaxAgents}";
+            if (mine.CollisionResolveIterations != theirs.CollisionResolveIterations)
+                return $"CollisionResolveIterations {mine.CollisionResolveIterations} vs {theirs.CollisionResolveIterations}";
+            if (mine.BfsFrontierCap != theirs.BfsFrontierCap)
+                return $"BfsFrontierCap {mine.BfsFrontierCap} vs {theirs.BfsFrontierCap}";
+            if (mine.MaxIterations != theirs.MaxIterations)
+                return $"MaxIterations {mine.MaxIterations} vs {theirs.MaxIterations}";
+            if (mine.MaxPortals != theirs.MaxPortals)
+                return $"MaxPortals {mine.MaxPortals} vs {theirs.MaxPortals}";
+            if (mine.MaxWaypoints != theirs.MaxWaypoints)
+                return $"MaxWaypoints {mine.MaxWaypoints} vs {theirs.MaxWaypoints}";
+            if (mine.MaxNeighbors != theirs.MaxNeighbors)
+                return $"MaxNeighbors {mine.MaxNeighbors} vs {theirs.MaxNeighbors}";
+            if (mine.MaxOrcaLines != theirs.MaxOrcaLines)
+                return $"MaxOrcaLines {mine.MaxOrcaLines} vs {theirs.MaxOrcaLines}";
+            if (mine.MoveMaxQueue != theirs.MoveMaxQueue)
+                return $"MoveMaxQueue {mine.MoveMaxQueue} vs {theirs.MoveMaxQueue}";
+            if (mine.CorridorCap != theirs.CorridorCap)
+                return $"CorridorCap {mine.CorridorCap} vs {theirs.CorridorCap}";
+            return "none (equal)";
         }
 
         /// <summary>
@@ -183,6 +285,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         public void SetAvoidance(FPNavAvoidance avoidance)
         {
+            RequireSameTuning(avoidance?.Tuning, nameof(avoidance));
             _avoidance = avoidance;
         }
 
@@ -292,6 +395,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         {
             if (newMesh == null || query == null || pathfinder == null || funnel == null)
                 throw new System.ArgumentException("FPNavAgentSystem.SwapNavMesh: all arguments must be non-null");
+
+            // The other door into the trio. Without this the constructor check is bypassable: build
+            // a consistent stack, then swap in one that is not.
+            RequireSameTuning(query.Tuning, nameof(query));
+            RequireSameTuning(pathfinder.Tuning, nameof(pathfinder));
+            RequireSameTuning(funnel.Tuning, nameof(funnel));
 
             _query = query;
             _pathfinder = pathfinder;
@@ -416,14 +525,64 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
+        /// Bumped BY HAND whenever a change to navigation makes the SAME mesh produce a DIFFERENT
+        /// corridor. Not a mesh format version and not a version of this file — it answers one
+        /// question: <i>would a peer on the previous build plan the same path?</i>
+        ///
+        /// <para><b>When to bump.</b> Any edit that moves what <c>FindPath</c> returns for
+        /// unchanged inputs: the endpoint or start lookup, the A* order or budget, the funnel, the
+        /// surface walk. NOT for refactors, comments, diagnostics, or anything the frame hash
+        /// cannot see. Bumping too eagerly costs a false refusal; not bumping costs a silent
+        /// divergence, so when in doubt, bump.</para>
+        ///
+        /// <para><b>Nothing enforces this.</b> The two places most likely to move it carry a
+        /// pointer comment back here (<c>FPNavMeshPathfinder</c>'s endpoint lookup and
+        /// <c>FPNavMeshQuery.FindTriangleForEndpoint</c>'s tie-break), and that is the whole
+        /// defence.</para>
+        ///
+        /// <list type="bullet">
+        /// <item><description>1 — everything up to and including 0.12.0.</description></item>
+        /// <item><description>2 — <c>FindPath</c>'s endpoint moved to
+        /// <c>FindTriangleForEndpoint</c>, and that tie-break was narrowed to one surface.</description></item>
+        /// </list>
+        /// </summary>
+        internal const long NAV_BEHAVIOUR_REVISION = 2;
+
+        /// <summary>
+        /// Mixer for <see cref="NAV_BEHAVIOUR_REVISION"/>: a small ordinal XORed straight in would
+        /// only stir the bottom bits of a mesh fingerprint. Odd, so multiplication is invertible
+        /// and distinct revisions stay distinct.
+        /// </summary>
+        private const long NAV_REVISION_MIXER = unchecked((long)0x9E3779B97F4A7C15UL);
+
+        /// <summary>
         /// Cross-peer navigation fingerprint: folded into the FullState resync
         /// static-geometry check. Never 0 while a mesh is present.
+        ///
+        /// <para>Folds <see cref="NAV_BEHAVIOUR_REVISION"/> as well as the mesh, so the value
+        /// answers "same content AND same pathfinding" rather than "same content". Two peers on
+        /// builds that plan differently now differ here, and the Ready exchange compares it before
+        /// the match starts.</para>
+        ///
+        /// <para><b>And the tuning.</b> <see cref="FPNavTuning.Digest"/> joins the fold, so the value
+        /// answers "same content AND same pathfinding AND same caps". The digest is 0 for
+        /// <c>FPNavTuning.Default</c> by construction, so the common path is bit-identical to what
+        /// this returned before tuning entered — an existing replay is not refused by a feature that
+        /// changed no behaviour.</para>
+        ///
+        /// <para><b>0 stays "no mesh".</b> The revision is folded INSIDE the null check on purpose:
+        /// <c>KlothoEngine.FingerprintsDiffer</c> reads 0 as "not provided" and must keep doing so,
+        /// or a peer with no navigation at all would be reported as a mismatch against one that has
+        /// it. The <c>0 -&gt; 1</c> normalisation stays for the same reason — the fold could
+        /// otherwise land on 0 by coincidence and be misread as "not provided".</para>
         /// </summary>
         public long GetNavFingerprint()
         {
             if (_navMesh == null)
                 return 0;
             long fp = unchecked((long)FPNavMeshRebaker.ComputeFingerprint(_navMesh));
+            fp = unchecked(fp ^ (NAV_BEHAVIOUR_REVISION * NAV_REVISION_MIXER));
+            fp = unchecked(fp ^ _tuning.Digest);
             return fp == 0 ? 1L : fp;
         }
 
@@ -693,8 +852,8 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             {
                 fixed (int* dst = nav.Corridor)
                 {
-                    NavCorridorHelper.SetCorridor(dst, ref nav.CorridorLength,
-                        NavAgentComponent.MAX_CORRIDOR, corridor, corridorLength);
+                    _corridorCopyTruncatedCount += NavCorridorHelper.SetCorridor(
+                        dst, ref nav.CorridorLength, _tuning.CorridorCap, corridor, corridorLength);
                 }
                 nav.PathTarget = nav.Destination;
                 nav.PathId = nav.PathRequestId;
@@ -721,13 +880,19 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 return;
             }
 
+            // Clamped to the buffer, not to CorridorLength: a FullState apply can deliver a
+            // component written by a peer built with a larger cap, and the length travels with it.
+            // That disagreement is reported by the fingerprint, not fixed here — this only keeps it
+            // from becoming an out-of-range crash on the receiving side.
+            int corridorLen = nav.CorridorLength < _corridorBuffer.Length
+                ? nav.CorridorLength : _corridorBuffer.Length;
             fixed (int* src = nav.Corridor)
             {
-                for (int k = 0; k < nav.CorridorLength; k++)
+                for (int k = 0; k < corridorLen; k++)
                     _corridorBuffer[k] = src[k];
             }
 
-            int cornerCount = _funnel.FindCorners(_corridorBuffer, nav.CorridorLength,
+            int cornerCount = _funnel.FindCorners(_corridorBuffer, corridorLen,
                 nav.Position, nav.PathTarget, 4);
             FPVector3[] corners = _funnel.Corners;
 
@@ -966,11 +1131,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </remarks>
         private void ResolveCollisions(ref Frame frame, EntityRef[] entities, int entityCount)
         {
-            int n = entityCount < MAX_AGENTS ? entityCount : MAX_AGENTS;
-            if (entityCount > MAX_AGENTS)
-                _collisionResolveTruncatedCount += entityCount - MAX_AGENTS;
+            int maxAgents = _tuning.MaxAgents;
+            int n = entityCount < maxAgents ? entityCount : maxAgents;
+            if (entityCount > maxAgents)
+                _collisionResolveTruncatedCount += entityCount - maxAgents;
 
-            for (int iter = 0; iter < COLLISION_RESOLVE_ITERATIONS; iter++)
+            for (int iter = 0; iter < _tuning.CollisionResolveIterations; iter++)
             {
                 // Sub-pass 1: accumulate displacement from current positions (barrier → order-independent)
                 for (int a = 0; a < n; a++)

@@ -53,6 +53,20 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         private const ulong FieldEight = 0xD51537F49E67AC1A;
         private const ulong FieldThirtyTwo = 0x7EEE87E9EAC3F89B;
 
+        // ── retain goldens (captured 2026-09-05, before the grid-driven stamp) ─
+        //
+        // The four above cannot cover the retain stamp AT ALL: FPBuildingRect carries no retain
+        // flag, so every one of them rebakes with polyRetain == null and the stamp returns on its
+        // first line. FieldThirtyTwo in particular LOOKS like the configuration that matters —
+        // the Field asset with 32 buildings — and pins nothing about it.
+        //
+        // These do, and they are the only automatic net for a stamp that MISSES a triangle: a miss
+        // changes areaMask, ComputeFingerprint folds areaMask, but every peer runs the same binary
+        // and so misses identically — the cross-peer check passes and only a pinned value objects.
+        private const ulong FieldRetainOne = 0x2DDE511EFA5E7F20;
+        private const ulong FieldRetainEight = 0x1A094D1532D89CE3;
+        private const ulong FieldRetainThirtyTwo = 0xD8A6FE1163A97E93;
+
         // ── owned fixtures — see rule 1 above ────────────────────────────────
 
         private const double BakeRadius = 0.5;
@@ -165,6 +179,60 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
         private static ulong Fingerprint(FPNavMesh baseMesh, FPBuildingRect[] buildings) =>
             FPNavMeshRebaker.ComputeFingerprint(FPNavMeshRebaker.Rebake(baseMesh, buildings, null));
 
+        // ── the retain fixture — owned here, see rule 1 ──────────────────────
+
+        /// <summary>
+        /// One square shape, half 0.25 world units — exact on the snap grid, and SMALLER than the
+        /// 0.3 the rect goldens use, so the frozen centres that validated there still validate
+        /// here once the expansion is added.
+        /// </summary>
+        private static FPBuildingShapeCatalog RetainCatalog()
+        {
+            long h = FPGeoPredicates.SNAP_UNITS_PER_WORLD / 4;
+            FPBuildingShapeCatalog.ObbOffsets(h, h, 4, out long[] x, out long[] z, out int[] entryStart);
+            return new FPBuildingShapeCatalog(x, z, entryStart);
+        }
+
+        /// <summary>
+        /// The frozen centres as PLACEMENTS. They have to be quantised first — unlike
+        /// <see cref="FPBuildingRect"/>, a placement centre off the predicate grid is refused
+        /// outright ("catalog offsets are integers about the centre"), and the scan that froze
+        /// these produced plain decimals like -5.2. Quantising is a deterministic function of the
+        /// literals, so rule 2 still holds: the input is the array above, not a re-run scan.
+        /// </summary>
+        private static FPBuildingPlacement[] TakeRetained((double x, double z)[] centres, int count)
+        {
+            var placements = new FPBuildingPlacement[count];
+            for (int i = 0; i < count; i++)
+                placements[i] = new FPBuildingPlacement(
+                    0,
+                    FPGeoPredicates.Quantize(FP64.FromDouble(centres[i].x)),
+                    FPGeoPredicates.Quantize(FP64.FromDouble(centres[i].z)),
+                    FP64.Zero,
+                    retain: true);
+            Array.Sort(placements, RetainOrder.Instance);
+            return placements;
+        }
+
+        private sealed class RetainOrder : IComparer<FPBuildingPlacement>
+        {
+            public static readonly RetainOrder Instance = new RetainOrder();
+            public int Compare(FPBuildingPlacement a, FPBuildingPlacement b)
+            {
+                int c = a.CentreX.RawValue.CompareTo(b.CentreX.RawValue);
+                return c != 0 ? c : a.CentreZ.RawValue.CompareTo(b.CentreZ.RawValue);
+            }
+        }
+
+        private static ulong RetainFp(int n)
+        {
+            FPNavMesh field = FPNavMeshSerializer.Deserialize(FieldPath());
+            var snapshot = FPNavMeshRebaker.CreateSnapshot(
+                field, null, prewarm: false, shapeCatalog: RetainCatalog());
+            return FPNavMeshRebaker.ComputeFingerprint(
+                FPNavMeshRebaker.RebakePlacements(snapshot, TakeRetained(FieldCenters, n), null));
+        }
+
         // ── the goldens ──────────────────────────────────────────────────────
 
         [Test]
@@ -203,6 +271,17 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             Assert.AreEqual(FieldThirtyTwo, Fp(32), "32 buildings");
         }
 
+        [Test]
+        public void FieldAssetRetain_MatchesGolden()
+        {
+            if (!File.Exists(FieldPath()))
+                Assert.Ignore("Field.NavMeshData.bytes not present");
+
+            Assert.AreEqual(FieldRetainOne, RetainFp(1), "1 retained building");
+            Assert.AreEqual(FieldRetainEight, RetainFp(8), "8 retained buildings");
+            Assert.AreEqual(FieldRetainThirtyTwo, RetainFp(32), "32 retained buildings");
+        }
+
         /// <summary>
         /// Re-capture helper. Run explicitly, paste the output over the constants above, and say
         /// in the commit WHY the baseline moved — a golden that changes without a stated reason is
@@ -232,6 +311,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             P("FieldOne", Fp(1));
             P("FieldEight", Fp(8));
             P("FieldThirtyTwo", Fp(32));
+
+            P("FieldRetainOne", RetainFp(1));
+            P("FieldRetainEight", RetainFp(8));
+            P("FieldRetainThirtyTwo", RetainFp(32));
         }
     }
 }

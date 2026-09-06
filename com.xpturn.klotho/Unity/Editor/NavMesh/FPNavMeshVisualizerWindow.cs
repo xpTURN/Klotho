@@ -499,6 +499,17 @@ namespace xpTURN.Klotho.Editor
 
             EditorGUI.indentLevel++;
 
+            // A stacked base cannot be rebaked at all, and that is known at load. Say so and stop —
+            // offering the controls would only lead to a refusal on every click.
+            if (!_data.PlacementSupported)
+            {
+                EditorGUILayout.HelpBox(
+                    "Placement is unavailable for this mesh:\n" + _data.PlacementUnsupportedReason,
+                    MessageType.Warning);
+                EditorGUI.indentLevel--;
+                return;
+            }
+
             EditorGUILayout.HelpBox(
                 "These shapes belong to the TOOL, not to any game: a 2x1 box and a hexagon. "
                 + "Acceptance here says nothing about a game whose shape catalog differs.",
@@ -576,8 +587,9 @@ namespace xpTURN.Klotho.Editor
             }
             if (removeAt >= 0)
             {
-                _data.TryRemoveBuilding(removeAt);
-                _placeStatus = null;
+                _placeStatus = _data.TryRemoveBuilding(removeAt, out var removeRejection)
+                    ? null
+                    : $"Remove refused: {removeRejection.Reason} — the building is still placed";
                 SceneView.RepaintAll();
             }
 
@@ -622,7 +634,9 @@ namespace xpTURN.Klotho.Editor
             }
             else
             {
-                _placeStatus = $"Refused: {rejection.Reason}";
+                // A gated stage never reaches the click, but a stale mode could: name the stage
+                // refusal rather than a rejection reason that was never filled in.
+                _placeStatus = _data.PlacementUnsupportedReason ?? $"Refused: {rejection.Reason}";
             }
 
             if (wasRunning)
@@ -776,7 +790,20 @@ namespace xpTURN.Klotho.Editor
             DrawLabeledFloat("Obst Inset", ref obstInset);
             if (!Mathf.Approximately(obstInset, _agentSim.ObstacleRadiusInset))
                 _agentSim.SetObstacleRadiusInset(obstInset);
+            // How far a destination click may be moved onto ground the agent's plan mask allows.
+            // The default is the mesh's GridCellSize, which is what the projection ALWAYS reaches;
+            // the slider goes to 3 cells because the search covers one cell ring and past its far
+            // corner (~2.83 cells) there is nothing left to find.
+            float snapMax = _agentSim.DestinationSnapMaxDist;
+            DrawLabeledFloat("Dest Snap Max", ref snapMax);
+            _agentSim.DestinationSnapMaxDist = Mathf.Clamp(snapMax, 0f, 3f * CellSizeOrOne());
             EditorGUI.indentLevel = prevIndent;
+
+            // Why the last destination click was refused. Shown as a lasting state rather than
+            // logged: a refusal is "it will not move" for as long as it stands, and the Godot
+            // simulator has no status log to mirror a one-shot message into.
+            if (!string.IsNullOrEmpty(_agentSim.LastDestinationRefusal))
+                EditorGUILayout.HelpBox(_agentSim.LastDestinationRefusal, MessageType.Warning);
 
             // Interaction mode
             EditorGUILayout.BeginHorizontal();
@@ -795,16 +822,26 @@ namespace xpTURN.Klotho.Editor
 
                     string status = rd.status.ToString();
                     string pos = FormatVector3(rd.position);
+                    // Off-mesh FIRST. It used to come last, which made it unreachable: the
+                    // reseed after a rebake clears HasPath for every agent BEFORE it looks the
+                    // triangle up, so an agent the swap left off-mesh always has hasPath == false
+                    // and was reported as [No Path] — the symptom, hiding the cause. That case is
+                    // the one no pathfinder counter can explain either (the reseed never calls
+                    // FindPath), so this row was the only place it could have been said.
                     string extra = "";
-                    if (!rd.hasDestination) extra = " [No Dest]";
+                    if (rd.currentTriangleIndex < 0) extra = " [Off Mesh]";
+                    else if (!rd.hasDestination) extra = " [No Dest]";
                     else if (!rd.hasPath) extra = " [No Path]";
-                    else if (rd.currentTriangleIndex < 0) extra = " [Off Mesh]";
                     // The masks are shown because a mixed scene is otherwise unreadable — two
                     // agents at the same spot with the same status look identical, and which of
                     // them may enter the building is the whole question.
                     string masks = $" [{MaskLabel(rd.planAreaMask)}/{MaskLabel(rd.walkAreaMask)}]";
+                    // WHY it failed, judged against the mesh as it is now. Separate from the
+                    // destination refusal above: that one says "the click was refused", this one
+                    // says "the destination it has cannot be reached".
+                    string why = FPNavPathFailure.Describe(rd.failureReason);
                     string sel = _interaction.SelectedAgentIndex == i ? "▸" : " ";
-                    EditorGUILayout.LabelField($"{sel}#{i}: {status}{extra}{masks} {pos}");
+                    EditorGUILayout.LabelField($"{sel}#{i}: {status}{extra}{masks}{why} {pos}");
 
                     if (GUILayout.Button("Select", GUILayout.Width(40)))
                     {
@@ -842,23 +879,26 @@ namespace xpTURN.Klotho.Editor
                     TryParseVector3(_spawnDestText, out Vector3 destPos))
                 {
                     int startTri = _data.FindTriangleAtPosition(startPos);
-                    int destTri = _data.FindTriangleAtPosition(destPos);
                     if (startTri < 0)
                     {
                         Debug.LogWarning("[FPNavMeshVisualizer] Start position is not on the NavMesh. Pathfinding will fail.");
                     }
-                    else if (destTri < 0)
-                    {
-                        Debug.LogWarning("[FPNavMeshVisualizer] Dest position is not on the NavMesh. Pathfinding will fail.");
-                    }
                     else
                     {
+                        // The destination is NOT pre-checked here any more. The check that used to
+                        // stand at this spot asked FindTriangleAtPosition, which is unfiltered: it
+                        // waved a click on a retained building through (and SetAgentDestination
+                        // would then refuse it, two guards disagreeing at one site) while refusing
+                        // an off-mesh click outright — so the click never reached the snap that
+                        // exists to move it onto usable ground. SetAgentDestination now answers
+                        // both cases, and says why when it cannot.
                         _agentSim.ClearAllAgents();
                         int idx = _agentSim.AddAgent(startPos);
                         if (idx >= 0)
                         {
-                            _agentSim.SetAgentDestination(idx, destPos);
                             _interaction.SelectedAgentIndex = idx;
+                            if (!_agentSim.SetAgentDestination(idx, destPos.ToFPVector3()))
+                                Debug.LogWarning($"[FPNavMeshVisualizer] {_agentSim.LastDestinationRefusal}");
                         }
                         SceneView.RepaintAll();
                     }
@@ -1009,7 +1049,8 @@ namespace xpTURN.Klotho.Editor
 
         private void OnAgentDestinationSet(int agentIdx, Vector3 dest)
         {
-            _agentSim.SetAgentDestination(agentIdx, dest);
+            if (!_agentSim.SetAgentDestination(agentIdx, dest.ToFPVector3()))
+                Debug.LogWarning($"[FPNavMeshVisualizer] {_agentSim.LastDestinationRefusal}");
             SceneView.RepaintAll();
             Repaint();
         }
@@ -1017,6 +1058,13 @@ namespace xpTURN.Klotho.Editor
         #endregion
 
         #region Utilities
+
+        // The wording lives here, not in the simulator: the simulator hands over an enum so the
+        // pattern tests can compare exactly and the phrasing can be tuned without breaking them.
+        // The snap slider's ceiling is expressed in cells, so it needs the loaded mesh's cell
+        // size; 1 keeps the clamp harmless before a mesh is loaded.
+        private float CellSizeOrOne()
+            => _data != null && _data.IsLoaded ? _data.NavMesh.GridCellSize.ToFloat() : 1f;
 
         private static void DrawLabeledFloat(string label, ref float value)
         {

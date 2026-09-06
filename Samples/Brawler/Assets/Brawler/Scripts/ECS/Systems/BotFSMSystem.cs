@@ -425,7 +425,18 @@ namespace Brawler
                         frame.Add(entity, default(NavAgentComponent));
                         ref var nav = ref frame.Get<NavAgentComponent>(entity);
                         ref readonly var transform = ref frame.GetReadOnly<TransformComponent>(entity);
-                        FPVector2 snapXZ = _query.ClosestPointOnNavMesh(transform.Position.ToXZ(), out int snapTri);
+                        // Ask the UNFILTERED lookup where the bot is, and only when that says
+                        // nothing ask the filtered projection where it may go. Standing on a
+                        // retained footprint the first question answers, so the bot is seated
+                        // where it stands and the walk's escape clause carries it out — filtering
+                        // both steps would project the position out while the triangle index still
+                        // named the footprint, and the next move step feeds that pair to the walk.
+                        FPVector2 posXZ = transform.Position.ToXZ();
+                        int snapTri = _query.FindTriangle(posXZ);
+                        FPVector2 snapXZ = snapTri >= 0
+                            ? posXZ
+                            : _query.ClosestPassablePoint(
+                                posXZ, FPNavMeshAreas.DEFAULT_AGENT_MASK, out snapTri);
                         FPVector3 snapPos = snapTri >= 0
                             ? new FPVector3(snapXZ.x, transform.Position.y, snapXZ.y)
                             : transform.Position;
@@ -437,9 +448,14 @@ namespace Brawler
                     {
                         ref var nav = ref frame.Get<NavAgentComponent>(entity);
 
-                        // Position sync
+                        // Position sync — same two-question shape as the spawn snap above.
                         ref readonly var transform = ref frame.GetReadOnly<TransformComponent>(entity);
-                        FPVector2 snapXZ = _query.ClosestPointOnNavMesh(transform.Position.ToXZ(), out int snapTri);
+                        FPVector2 posXZ = transform.Position.ToXZ();
+                        int snapTri = _query.FindTriangle(posXZ);
+                        FPVector2 snapXZ = snapTri >= 0
+                            ? posXZ
+                            : _query.ClosestPassablePoint(
+                                posXZ, FPNavMeshAreas.DEFAULT_AGENT_MASK, out snapTri);
                         nav.Position = snapTri >= 0
                             ? new FPVector3(snapXZ.x, transform.Position.y, snapXZ.y)
                             : transform.Position;

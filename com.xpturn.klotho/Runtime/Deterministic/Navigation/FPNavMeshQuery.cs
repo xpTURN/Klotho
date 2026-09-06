@@ -23,25 +23,31 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         private int _raycastGeneration;
 
         // Pre-allocations for MoveAlongSurface
-        private const int MOVE_MAX_QUEUE = 48;
+        private readonly FPNavTuning _tuning;
+
+        /// <summary>The sizes this instance was built with (see <see cref="FPNavTuning"/>).</summary>
+        public FPNavTuning Tuning => _tuning;
         private readonly int[] _moveQueue;
         private int[] _moveVisitedGen;
         private int _moveGeneration;
         private int[] _moveParent;
         private readonly int[] _moveVisitedPath;
 
-        public FPNavMeshQuery(FPNavMesh navMesh, IKLogger logger)
+        public FPNavMeshQuery(FPNavMesh navMesh, IKLogger logger, FPNavTuning? tuning = null)
         {
             _navMesh = navMesh;
             _logger = logger;
 
+            _tuning = tuning ?? FPNavTuning.Default;
+            _tuning.Validate();
+
             int triCount = navMesh.Triangles.Length;
             _triVisited = new int[triCount];
             _raycastVisited = new int[triCount];
-            _moveQueue = new int[MOVE_MAX_QUEUE];
+            _moveQueue = new int[_tuning.MoveMaxQueue];
             _moveVisitedGen = new int[triCount];
             _moveParent = new int[triCount];
-            _moveVisitedPath = new int[MOVE_MAX_QUEUE];
+            _moveVisitedPath = new int[_tuning.MoveMaxQueue];
         }
 
         /// <summary>
@@ -146,6 +152,100 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 {
                     bestDist = dist;
                     bestTriIdx = triIdx;
+                }
+            }
+
+            return bestTriIdx;
+        }
+
+        /// <summary>
+        /// <see cref="FindTriangle(FPVector2, FP64)"/> with one difference: when several candidates
+        /// tie on height distance, a triangle <paramref name="tieBreakMask"/> allows wins.
+        ///
+        /// <para><b>Why a tie needs breaking at all.</b> A point on a shared edge is inside BOTH
+        /// triangles — <see cref="PointInTriangle2D"/> is tolerant, and the surface is continuous
+        /// across the edge, so the interpolated heights are bit-identical. The plain lookup updates
+        /// only on a STRICTLY smaller distance, so the first candidate in cell order wins, which is
+        /// the lower triangle index. That is an arbitrary answer to a question that has a right one:
+        /// where a caller has just been handed such a point BECAUSE it is walkable — the filtered
+        /// projection returns the closest point on a triangle edge, so a snapped destination is
+        /// always on one — resolving it to the impassable neighbour refuses a destination the
+        /// projection certified.</para>
+        ///
+        /// <para><b>Why it breaks the tie rather than filtering.</b> Filtering would answer the
+        /// wrong question on stacked floors: a destination on a forbidden upper floor has no
+        /// walkable interpretation AT THAT HEIGHT, and the walkable floor below is a different
+        /// place, not a reinterpretation. So the tie is broken only between candidates on the SAME
+        /// SURFACE: equal height distance is NOT enough, because two floors are equidistant whenever
+        /// the agent's y is the midpoint between them, and swapping there would relocate the
+        /// destination a storey away. Where every same-surface candidate is passable — an ordinary
+        /// interior edge, which is the common case — "first passable" degenerates to "first", so
+        /// this is bit-identical to the plain lookup there.</para>
+        ///
+        /// <para>Order inside the tie is cell-list order, i.e. ascending triangle index. That is a
+        /// determinism input: the result reaches the frame hash through the corridor.</para>
+        ///
+        /// <para><b>Public, not internal, and the reason is a consumer nobody can name.</b> This
+        /// started out internal because <c>FindPath</c> was its only caller. The editor
+        /// visualizers then needed it too — to say WHY an agent sits at <c>PathFailed</c>, a tool
+        /// has to resolve the endpoint the way the engine did, or it reports a mask refusal for a
+        /// destination the engine accepted. Unity's tool is one fixed assembly and could have been
+        /// named in <c>InternalsVisibleTo</c>; the Godot adapter cannot, because it ships as source
+        /// and is compiled into whatever assembly the consuming Godot project happens to be. That
+        /// set includes projects outside this repository, so there is no list to write.</para>
+        /// </summary>
+        public int FindTriangleForEndpoint(FPVector2 xz, FP64 agentY, int tieBreakMask)
+        {
+            if (!_navMesh.BoundsXZ.Contains(xz))
+                return -1;
+
+            _navMesh.GetCellCoords(xz, out int col, out int row);
+            if (!_navMesh.IsCellValid(col, row))
+                return -1;
+
+            _navMesh.GetCellTriangles(col, row, out int start, out int count);
+
+            int bestTriIdx = -1;
+            FP64 bestDist = FP64.MaxValue;
+            FP64 bestSurfaceY = FP64.Zero;
+            bool bestPassable = false;
+
+            for (int i = 0; i < count; i++)
+            {
+                int triIdx = _navMesh.GridTriangles[start + i];
+                ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
+
+                FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
+                FPVector2 b = _navMesh.Vertices[tri.v1].ToXZ();
+                FPVector2 c = _navMesh.Vertices[tri.v2].ToXZ();
+
+                if (!PointInTriangle2D(xz, a, b, c))
+                    continue;
+
+                FP64 surfaceY = SampleHeight(xz, triIdx);
+                FP64 dist = FP64.Abs(surfaceY - agentY);
+                bool passable = IsPassable(triIdx, tieBreakMask);
+
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    bestSurfaceY = surfaceY;
+                    bestTriIdx = triIdx;
+                    bestPassable = passable;
+                }
+                // Changing this rule changes the corridor for unchanged inputs — bump
+                // FPNavAgentSystem.NAV_BEHAVIOUR_REVISION with it.
+                else if (bestTriIdx >= 0 && surfaceY == bestSurfaceY && passable && !bestPassable)
+                {
+                    // The SAME surface, and this one is usable where the standing answer is not.
+                    // Taking it is the whole point of this member; leaving the distance alone keeps
+                    // a later, strictly-nearer candidate winning as it would have.
+                    //
+                    // Surface equality, not distance equality: dist is |surfaceY - agentY| and says
+                    // nothing about surfaceY, so two FLOORS tie at the midpoint between them. Equal
+                    // surfaceY implies equal dist, so this is the strictly narrower test.
+                    bestTriIdx = triIdx;
+                    bestPassable = true;
                 }
             }
 
@@ -335,7 +435,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                             // Passable -> expand the queue (search range bounded by MAX_QUEUE)
                             _moveVisitedGen[neighbor] = _moveGeneration;
                             _moveParent[neighbor] = curTri;
-                            if (queueTail < MOVE_MAX_QUEUE)
+                            if (queueTail < _moveQueue.Length)
                                 _moveQueue[queueTail++] = neighbor;
                             continue;
                         }
@@ -369,7 +469,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             // Trace back parent chain from bestTri → visited path (startTri→bestTri order)
             int pathLen = 0;
             int node = bestTri;
-            while (node != -1 && pathLen < MOVE_MAX_QUEUE
+            while (node != -1 && pathLen < _moveVisitedPath.Length
                    && _moveVisitedGen[node] == _moveGeneration)
             {
                 _moveVisitedPath[pathLen++] = node;
@@ -392,13 +492,123 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
+        /// Whether <paramref name="triIdx"/> is passable to a query carrying
+        /// <paramref name="areaMask"/> — the same predicate the surface walk uses, minus its
+        /// parent-dependent escape clause (a point query has no parent; see
+        /// <see cref="FindPassableTriangle"/>).
+        /// </summary>
+        private bool IsPassable(int triIdx, int areaMask)
+        {
+            ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
+            return !tri.isBlocked && (areaMask & tri.areaMask) != 0;
+        }
+
+        /// <summary>
+        /// <see cref="FindTriangleForEndpoint"/> filtered the way an ENDPOINT must be: the answer
+        /// only comes back when the triangle the engine would pick for this point is one the mask
+        /// actually allows. <c>-1</c> otherwise.
+        ///
+        /// <para><b>Why not <see cref="FindPassableTriangle"/></b> — that one is y-blind, and a
+        /// caller deciding whether a destination is usable as clicked must ask the same question
+        /// the engine will ask when it routes there. On a multi-floor mesh the two disagree: click
+        /// forbidden ground upstairs with walkable ground beneath it and the y-blind lookup answers
+        /// the floor BELOW, so the caller accepts a point the pathfinder then refuses by mask.
+        /// The third argument of <see cref="FindTriangleForEndpoint"/> is a TIE-BREAK, not a
+        /// filter, so its result still has to be tested — which is what this does.</para>
+        /// </summary>
+        public int FindPassableTriangleForEndpoint(FPVector2 xz, FP64 y, int areaMask)
+        {
+            int triIdx = FindTriangleForEndpoint(xz, y, areaMask);
+            return triIdx >= 0 && IsPassable(triIdx, areaMask) ? triIdx : -1;
+        }
+
+        /// <summary>
+        /// <see cref="FindTriangle(FPVector2)"/> restricted to triangles this query may occupy:
+        /// not <c>isBlocked</c>, and sharing a bit with <paramref name="areaMask"/>. Returns
+        /// <c>-1</c> when the point is off-mesh OR lands only on ground the mask forbids — the
+        /// caller that wants "the nearest usable place instead" asks
+        /// <see cref="ProjectToPassable"/>, which is what that method is for.
+        ///
+        /// <para><b>Why this is a separate member rather than a parameter on
+        /// <see cref="FindTriangle(FPVector2)"/></b>: the unfiltered lookup is the RIGHT answer for
+        /// three engine callers — <c>FindPath</c> (which finds the endpoints first and then
+        /// attributes an `isBlocked` or `areaMask` refusal to its own counters, and would report
+        /// both as "off-mesh" if they came back -1), the post-swap agent reseed (an agent standing
+        /// on forbidden ground must keep a valid triangle or the walk's escape clause cannot fire),
+        /// and <see cref="ClosestPointOnNavMesh"/>'s own first step. A required mask would make the
+        /// correct call at those three sites look like an oversight.</para>
+        ///
+        /// <para>An <c>int</c> overload was not possible either: <c>FP64</c> has an implicit
+        /// conversion from <c>int</c>, so <c>FindTriangle(xz, 1)</c> would be ambiguous against the
+        /// multi-floor overload. Hence the distinct name.</para>
+        /// </summary>
+        public int FindPassableTriangle(FPVector2 xz, int areaMask)
+        {
+            if (!_navMesh.BoundsXZ.Contains(xz))
+                return -1;
+
+            _navMesh.GetCellCoords(xz, out int col, out int row);
+            if (!_navMesh.IsCellValid(col, row))
+                return -1;
+
+            _navMesh.GetCellTriangles(col, row, out int start, out int count);
+
+            for (int i = 0; i < count; i++)
+            {
+                int triIdx = _navMesh.GridTriangles[start + i];
+
+                // The filter belongs INSIDE the loop. Applying it after the loop would turn
+                // "the first containing triangle that is passable" into "the first containing
+                // triangle, rejected if impassable" — a different answer wherever triangles
+                // overlap in XZ, and the multi-floor overload makes that case real.
+                if (!IsPassable(triIdx, areaMask))
+                    continue;
+
+                ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[triIdx];
+
+                FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
+                FPVector2 b = _navMesh.Vertices[tri.v1].ToXZ();
+                FPVector2 c = _navMesh.Vertices[tri.v2].ToXZ();
+
+                if (PointInTriangle2D(xz, a, b, c))
+                    return triIdx;
+            }
+
+            return -1;
+        }
+
+        /// <summary>
         /// Nearest point on the NavMesh + triangle index.
         /// Returns the point as-is if FindTriangle succeeds.
         /// Falls back to searching edges/vertices in surrounding cells on failure.
         /// </summary>
+        /// <remarks>
+        /// Unfiltered: this member does not consult <c>isBlocked</c> or <c>areaMask</c>, and it
+        /// does not delegate to <see cref="ClosestPassablePoint"/> with <c>~0</c> either — a
+        /// triangle whose <c>areaMask</c> is zero shares no bit with any mask, so delegating would
+        /// silently stop finding it. <see cref="ClosestPassablePoint"/> is the filtered member.
+        /// </remarks>
         public FPVector2 ClosestPointOnNavMesh(FPVector2 xz, out int triIdx)
+            => ClosestPointCore(xz, filter: false, areaMask: 0, out triIdx);
+
+        /// <summary>
+        /// <see cref="ClosestPointOnNavMesh"/> restricted to ground this query may occupy — the
+        /// nearest point that is neither <c>isBlocked</c> nor outside <paramref name="areaMask"/>.
+        /// This is the member that turns "push me out of here" from a no-op into an answer.
+        ///
+        /// <para>Note that it filters BOTH steps: a point standing on forbidden ground reports
+        /// off-mesh and falls through to the surrounding-cell search, which then also skips
+        /// forbidden triangles. A caller that wants "where am I standing, even if I may not be
+        /// there" pairs the unfiltered <see cref="FindTriangle(FPVector2)"/> with this one — see
+        /// the remarks on <see cref="FindPassableTriangle"/> for why that asymmetry lives in the
+        /// caller rather than here.</para>
+        /// </summary>
+        public FPVector2 ClosestPassablePoint(FPVector2 xz, int areaMask, out int triIdx)
+            => ClosestPointCore(xz, filter: true, areaMask, out triIdx);
+
+        private FPVector2 ClosestPointCore(FPVector2 xz, bool filter, int areaMask, out int triIdx)
         {
-            triIdx = FindTriangle(xz);
+            triIdx = filter ? FindPassableTriangle(xz, areaMask) : FindTriangle(xz);
             if (triIdx >= 0)
                 return xz;
 
@@ -436,6 +646,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                             continue;
                         _triVisited[tIdx] = _queryGeneration;
 
+                        // The fallback scan is where a snap actually lands ON something. Filtering
+                        // only the lookup above and leaving this loop open would keep pulling a
+                        // caller onto ground the mask forbids — this is the half that matters.
+                        if (filter && !IsPassable(tIdx, areaMask))
+                            continue;
+
                         ref readonly FPNavMeshTriangle tri = ref _navMesh.Triangles[tIdx];
 
                         FPVector2 a = _navMesh.Vertices[tri.v0].ToXZ();
@@ -467,8 +683,26 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// Returns (-1, original coordinate) on failure.
         /// </summary>
         public FPVector2 ProjectToNavMesh(FPVector2 xz, FP64 maxDist, out int triIdx)
+            => ProjectCore(xz, maxDist, filter: false, areaMask: 0, out triIdx);
+
+        /// <summary>
+        /// <see cref="ProjectToNavMesh"/> restricted to ground this query may occupy. This is the
+        /// member a destination snap wants: "if the point I was given is unusable, give me the
+        /// nearest usable one instead".
+        ///
+        /// <para><b>New failure mode, and it is the intended one</b>: when the nearest PASSABLE
+        /// point lies beyond <paramref name="maxDist"/> while an impassable one lies inside, this
+        /// reports failure (<c>triIdx = -1</c>) where the unfiltered member returned a point the
+        /// caller could not use. A caller that treats failure as "stop" will stop more often near
+        /// buildings — that is the filter working, and <c>maxDist</c> is the knob.</para>
+        /// </summary>
+        public FPVector2 ProjectToPassable(FPVector2 xz, FP64 maxDist, int areaMask, out int triIdx)
+            => ProjectCore(xz, maxDist, filter: true, areaMask, out triIdx);
+
+        private FPVector2 ProjectCore(
+            FPVector2 xz, FP64 maxDist, bool filter, int areaMask, out int triIdx)
         {
-            FPVector2 closest = ClosestPointOnNavMesh(xz, out triIdx);
+            FPVector2 closest = ClosestPointCore(xz, filter, areaMask, out triIdx);
 
             if (triIdx < 0)
                 return xz;

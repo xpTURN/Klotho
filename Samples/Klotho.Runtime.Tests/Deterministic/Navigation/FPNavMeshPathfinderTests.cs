@@ -466,12 +466,23 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             var query = new FPNavMeshQuery(mesh, _logger);
             var pf = new FPNavMeshPathfinder(mesh, query, _logger);
 
-            // areaMask=2 → cannot start at T0(areaMask=1)
+            // areaMask=2 → only T3 is usable, so a destination on T0..T2 has no route.
+            //
+            // The END is what refuses here, not the start: the start is exempt on purpose (a unit
+            // with a building dropped on it must still be given a route out) and only bumps
+            // DebugMaskedStartCount. The old endpoint (5,0,1) sat exactly ON the T2/T3 shared edge
+            // (z = x - 4), so it was inside BOTH — and the assertion below held only because the
+            // lookup happened to name the forbidden one first. (7,0,1) is strictly inside T2.
             bool found = pf.FindPath(
-                new FPVector3(1, 0, 1), new FPVector3(5, 0, 1), 2,
+                new FPVector3(1, 0, 1), new FPVector3(7, 0, 1), 2,
                 out _, out _);
 
             Assert.IsFalse(found);
+            Assert.AreEqual(1, pf.DebugAreaMaskRejectedCount,
+                "and the refusal is the END's, attributed to the area mask");
+            Assert.AreEqual(0, pf.DebugMaskedStartCount,
+                "the masked start is never reached: the end's refusal returns first. That ordering "
+                + "is deliberate — the start counter exists for paths that actually get planned.");
         }
 
         #endregion

@@ -135,12 +135,20 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 _indices.Add(v00); _indices.Add(v11); _indices.Add(v01);
             }
 
-            public FPNavMesh Build()
+            public FPNavMesh Build() => Build(CELL * 4.0);
+
+            /// <summary>
+            /// <paramref name="gridCellSize"/> is the BROADPHASE cell, not the lattice cell: it
+            /// sizes the grid the point queries search, so it is the knob a test needs when the
+            /// thing under measurement is how far a projection can reach (its fallback searches
+            /// one cell ring, so the reach scales with this and nothing else).
+            /// </summary>
+            public FPNavMesh Build(double gridCellSize)
             {
                 var vertices = _vertices.ToArray();
                 var indices = _indices.ToArray();
                 return FPNavMeshBuildPipeline.Build(
-                    vertices, indices, _areas.ToArray(), CELL * 4.0,
+                    vertices, indices, _areas.ToArray(), gridCellSize,
                     null, bakeAgentRadius: 0.5);
             }
         }
@@ -158,6 +166,80 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
                 for (int gx = 0; gx < cells; gx++)
                     builder.AddCell(gx, gz);
             return builder.Build();
+        }
+
+        /// <summary>
+        /// Two square floors at the SAME xz, stacked <paramref name="floorGap"/> apart in y and
+        /// sharing no vertex — the only shape in which the multi-floor lookup's Y disambiguation
+        /// does any work. Every other fixture here is a continuous surface, and on one of those the
+        /// triangles containing a point are all at the same height, so a Y-blind lookup is
+        /// indistinguishable from a Y-aware one.
+        ///
+        /// <para>The upper floor carries <paramref name="upperArea"/> so a query whose mask omits
+        /// that area must refuse a destination up there rather than quietly reroute to the walkable
+        /// floor below. The default is 3, not <see cref="FPNavMeshAreas.BUILDING_AREA"/>: the build
+        /// pipeline REFUSES area 1 as authored input (it is reserved for what the rebaker stamps on
+        /// a retained footprint), so a fixture that wants forbidden ground straight out of the bake
+        /// has to pick another index and a mask to match.</para>
+        /// </summary>
+        public static FPNavMesh CreateStackedFloorsNavMesh(
+            int cells, double floorGap, int upperArea = 3)
+        {
+            var vertices = new List<FPVector3>();
+            var indices = new List<int>();
+            var areas = new List<int>();
+
+            for (int level = 0; level < 2; level++)
+            {
+                double y = level == 0 ? 0.0 : floorGap;
+                int area = level == 0 ? 0 : upperArea;
+                var index = new Dictionary<(int, int), int>();
+
+                int Vertex(int gx, int gz)
+                {
+                    if (index.TryGetValue((gx, gz), out int existing))
+                        return existing;
+                    int id = vertices.Count;
+                    vertices.Add(new FPVector3(
+                        FP64.FromDouble(gx * CELL), FP64.FromDouble(y), FP64.FromDouble(gz * CELL)));
+                    index[(gx, gz)] = id;
+                    return id;
+                }
+
+                for (int gz = 0; gz < cells; gz++)
+                {
+                    for (int gx = 0; gx < cells; gx++)
+                    {
+                        areas.Add(area);
+                        areas.Add(area);
+                        int v00 = Vertex(gx, gz);
+                        int v10 = Vertex(gx + 1, gz);
+                        int v11 = Vertex(gx + 1, gz + 1);
+                        int v01 = Vertex(gx, gz + 1);
+                        indices.Add(v00); indices.Add(v10); indices.Add(v11);
+                        indices.Add(v00); indices.Add(v11); indices.Add(v01);
+                    }
+                }
+            }
+
+            return FPNavMeshBuildPipeline.Build(
+                vertices.ToArray(), indices.ToArray(), areas.ToArray(), CELL * 4.0,
+                null, bakeAgentRadius: 0.5);
+        }
+
+        /// <summary>
+        /// <see cref="CreateOpenFieldNavMesh(int)"/> with an explicit broadphase cell size, for
+        /// tests about how far a point query can see. The default field's grid cell (8 world units)
+        /// is wider than any footprint this helper can place, so on it the projection's one-ring
+        /// reach never binds and the limit cannot be observed.
+        /// </summary>
+        public static FPNavMesh CreateOpenFieldNavMesh(int cells, double gridCellSize)
+        {
+            var builder = new QuadMeshBuilder();
+            for (int gz = 0; gz < cells; gz++)
+                for (int gx = 0; gx < cells; gx++)
+                    builder.AddCell(gx, gz);
+            return builder.Build(gridCellSize);
         }
 
         /// <summary>

@@ -118,6 +118,7 @@ namespace Brawler
                         {
                             FPVector3 snapped = SnapDestination(targetPos, selfT.Position, query,
                                                                 behavior.NavSnapMaxDist,
+                                                                FPNavMeshAreas.DEFAULT_AGENT_MASK,
                                                                 out bool ok, character.PlayerId, "Chase");
                             bot.Destination    = snapped;
                             bot.HasDestination = ok;
@@ -143,9 +144,22 @@ namespace Brawler
         /// Snap the destination onto the NavMesh.
         /// Corresponds to BotNavigationSystem.SnapDestination() L585-618.
         /// </summary>
+        /// <param name="areaMask">
+        /// The areas this destination may sit on. Passed through to the PASSABLE query members, so
+        /// a point on ground the agent's own <c>FindPath</c> would refuse is projected away instead
+        /// of accepted — before this the lookup was unfiltered and a retained building footprint
+        /// (which is on-mesh, stamped <c>BUILDING_MASK</c>) came back as a usable destination.
+        ///
+        /// <para>Brawler passes <c>FPNavMeshAreas.DEFAULT_AGENT_MASK</c> at every call site rather
+        /// than reading it off the agent, and that is deliberate: nothing here sets the per-agent
+        /// override fields, so the resolved value would be this constant anyway — and this method
+        /// runs in Pass 1, which is what CAUSES <c>NavAgentComponent</c> to be added in Pass 2, so
+        /// at the first destination for a bot the component does not exist yet.</para>
+        /// </param>
         public static FPVector3 SnapDestination(FPVector3 desired, FPVector3 fallbackPos,
                                                 FPNavMeshQuery query,
                                                 FP64 navSnapMaxDist,
+                                                int areaMask,
                                                 out bool snapOk,
                                                 int playerId = -1, string context = null,
                                                 IKLogger logger = null)
@@ -158,14 +172,15 @@ namespace Brawler
 
             FPVector2 desiredXZ = new FPVector2(desired.x, desired.z);
 
-            int onMeshTri = query.FindTriangle(desiredXZ);
+            int onMeshTri = query.FindPassableTriangle(desiredXZ, areaMask);
             if (onMeshTri >= 0)
             {
                 snapOk = true;
                 return desired;
             }
 
-            FPVector2 snapped = query.ProjectToNavMesh(desiredXZ, navSnapMaxDist, out int triIdx);
+            FPVector2 snapped = query.ProjectToPassable(
+                desiredXZ, navSnapMaxDist, areaMask, out int triIdx);
             if (triIdx >= 0)
             {
                 FP64 height = query.SampleHeight(snapped, triIdx);

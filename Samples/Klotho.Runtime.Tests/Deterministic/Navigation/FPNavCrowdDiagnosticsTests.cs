@@ -219,12 +219,32 @@ namespace xpTURN.Klotho.Deterministic.Navigation.Tests
             FPVector3 start = NavAgentTestHelper.CellCenter(0, 0);
             FPVector3 goal = NavAgentTestHelper.CellCenter(7, 7);
 
-            // Close the goal triangle the way a game closes a gate: nothing in the engine sets this
-            // flag, and the rebaker carves geometry instead, so TrianglesMutable is the only
-            // producer there is.
+            // Close the goal the way a game closes a gate: nothing in the engine sets this flag,
+            // and the rebaker carves geometry instead, so TrianglesMutable is the only producer
+            // there is.
+            //
+            // EVERY triangle containing the goal has to be closed, not just the one the lookup
+            // happens to name. A cell centre sits exactly on the quad's split diagonal, so two
+            // triangles contain it; closing one leaves the point standing on open ground, and the
+            // endpoint lookup is entitled to say so. This test used to close one and pass because
+            // the lookup returned that one — an accident of triangle numbering.
             int goalTri = query.FindTriangle(goal.ToXZ(), goal.y);
             Assert.GreaterOrEqual(goalTri, 0, "goal is on-mesh before it is blocked");
-            mesh.TrianglesMutable[goalTri].isBlocked = true;
+
+            int closed = 0;
+            for (int i = 0; i < mesh.Triangles.Length; i++)
+            {
+                ref readonly var tri = ref mesh.Triangles[i];
+                if (!FPNavMeshQuery.PointInTriangle2D(
+                        goal.ToXZ(),
+                        mesh.Vertices[tri.v0].ToXZ(),
+                        mesh.Vertices[tri.v1].ToXZ(),
+                        mesh.Vertices[tri.v2].ToXZ()))
+                    continue;
+                mesh.TrianglesMutable[i].isBlocked = true;
+                closed++;
+            }
+            Assert.GreaterOrEqual(closed, 1, "the gate must actually close something");
 
             bool found = pathfinder.FindPath(
                 start, goal, FPNavAgentSystem.DEFAULT_AREA_MASK, out _, out _);

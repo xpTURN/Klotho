@@ -115,6 +115,13 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <summary>Built on first use and reused — see the class remarks for why one is enough.</summary>
         private FPNavMeshRebakeSnapshot _snapshot;
 
+        /// <summary>
+        /// Why the snapshot could not be built, cached so the attempt is made once. Null while
+        /// the base is still untried or was accepted; mutually exclusive with a non-null
+        /// <see cref="_snapshot"/>.
+        /// </summary>
+        private string _prepareFailure;
+
         /// <summary>Reused so a rebake per keystroke does not allocate a fresh array each time.</summary>
         private FPBuildingPlacement[] _scratch = Array.Empty<FPBuildingPlacement>();
 
@@ -181,6 +188,10 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// <para><paramref name="cx"/> and <paramref name="cz"/> are quantised onto the predicate
         /// grid (see the class remarks); <paramref name="y"/> is not, since it never enters a
         /// predicate.</para>
+        ///
+        /// <para>A base that cannot be rebaked at all is one of those refusals
+        /// (<see cref="FPBuildingRejection.BaseMeshUnsupported"/>), not an exception — see
+        /// <see cref="TryPrepare"/>, which is where that answer is formed and remembered.</para>
         /// </summary>
         public bool TryPlace(
             int shapeId, int orientation, FP64 cx, FP64 cz, FP64 y, bool retain,
@@ -189,12 +200,73 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             ResolveCentre(shapeId, orientation, cx, cz, out FP64 px, out FP64 pz);
             var placement = new FPBuildingPlacement(shapeId, orientation, px, pz, y, retain);
 
-            _placements.Add(placement);
-            if (TryRebake(out mesh, out rejection))
-                return true;
+            mesh = null;
+            rejection = default;
 
-            _placements.RemoveAt(_placements.Count - 1);
-            return false;
+            _placements.Add(placement);
+            bool accepted = false;
+            try
+            {
+                accepted = TryRebake(out mesh, out rejection);
+                return accepted;
+            }
+            finally
+            {
+                // try/finally, not "undo after a false": a rebake that THROWS — an unsupported
+                // stage, or a malformed request — used to skip the undo and leave a placement
+                // nobody accepted in the list, breaking the contract above one crash at a time.
+                if (!accepted)
+                    _placements.RemoveAt(_placements.Count - 1);
+            }
+        }
+
+        /// <summary>
+        /// Builds the snapshot now and reports an unsupported stage as a VALUE, so a tool can
+        /// disable placement and say why instead of meeting an exception on the user's first
+        /// click. Idempotent, and the snapshot it builds is the one the rebakes then use.
+        ///
+        /// <para>Call it right after loading a mesh. Without it the snapshot is built lazily on
+        /// the first placement, which is exactly the "you built the context lazily on the first
+        /// placement" case the rebake docs tell callers to avoid — and a stacked base mesh then
+        /// reports a load-time problem from inside a click handler.</para>
+        ///
+        /// <para>Only the stage refusal comes back as <c>false</c>. A malformed catalog or an
+        /// off-grid base is the caller's own bug and still throws.</para>
+        ///
+        /// <para><b>The refusal is remembered.</b> Building the snapshot is the expensive part of
+        /// this class — a base-vertex scan, the CDT insertion, and a zero-building validation
+        /// rebake — and a base that failed once fails the same way every time. Caching only the
+        /// success would re-pay all of it on every later call, which for an unsupported stage is
+        /// every click.</para>
+        /// </summary>
+        /// <param name="reason">The refusal message when this returns false; null otherwise.</param>
+        public bool TryPrepare(out string reason)
+        {
+            if (_snapshot != null)
+            {
+                reason = null;
+                return true;
+            }
+
+            if (_prepareFailure != null)
+            {
+                reason = _prepareFailure;
+                return false;
+            }
+
+            try
+            {
+                _snapshot = FPNavMeshRebaker.CreateSnapshot(
+                    _baseMesh, _logger, prewarm: false, shapeCatalog: _catalog);
+                reason = null;
+                return true;
+            }
+            catch (NotSupportedException e)
+            {
+                _prepareFailure = e.Message;
+                reason = _prepareFailure;
+                return false;
+            }
         }
 
         /// <summary>
@@ -219,14 +291,32 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         }
 
         /// <summary>
-        /// Drops one placement and rebakes. Cannot be refused — the remaining set is a subset of
-        /// one that was already accepted — but the reason travels anyway so a caller has one shape
-        /// of call to handle.
+        /// Drops one placement and rebakes.
+        ///
+        /// <para><b>The removal is undone when the rebake refuses</b>, the same way
+        /// <see cref="TryPlace"/> undoes its append. An earlier note here said a removal "cannot be
+        /// refused — the remaining set is a subset of one that was already accepted", and that
+        /// stops holding the moment <see cref="Rules"/> changes, which is a public setter both
+        /// editors expose. Switch the boundary policy, then remove: the subset is judged under the
+        /// NEW rules and can lose. Without the undo the list would no longer hold a building the
+        /// scene still shows, and the next rebake that succeeds would ship a mesh missing it.</para>
         /// </summary>
         public bool TryRemoveAt(int index, out FPNavMesh mesh, out FPBuildingRejectionInfo rejection)
         {
+            if (index < 0 || index >= _placements.Count)
+                throw new ArgumentOutOfRangeException(
+                    nameof(index),
+                    $"FPNavMeshPlacementProbe.TryRemoveAt: index {index} is outside the placement " +
+                    $"list (count {_placements.Count}).");
+
+            FPBuildingPlacement removed = _placements[index];
             _placements.RemoveAt(index);
-            return TryRebake(out mesh, out rejection);
+
+            if (TryRebake(out mesh, out rejection))
+                return true;
+
+            _placements.Insert(index, removed);
+            return false;
         }
 
         /// <summary>
@@ -252,10 +342,14 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 return true;
             }
 
-            if (_snapshot == null)
+            // Through TryPrepare, not around it: that is where the refusal is turned into a
+            // value and remembered. Calling CreateSnapshot directly here would let a stacked base
+            // throw out of the one API whose whole contract is reporting a refusal as a value.
+            if (!TryPrepare(out _))
             {
-                _snapshot = FPNavMeshRebaker.CreateSnapshot(
-                    _baseMesh, _logger, prewarm: false, shapeCatalog: _catalog);
+                mesh = null;
+                rejection = new FPBuildingRejectionInfo(FPBuildingRejection.BaseMeshUnsupported);
+                return false;
             }
 
             if (_scratch.Length < _placements.Count)

@@ -27,7 +27,12 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         // Corridor result buffer
         private readonly int[] _corridor;
 
+        /// <remarks><b>Defaults, not this instance's values</b> — the search is sized from
+        /// <see cref="FPNavTuning.CorridorCap"/> and <see cref="FPNavTuning.MaxIterations"/>.
+        /// <c>MAX_CORRIDOR</c> is also the compile-time ceiling for the search buffer, which the
+        /// cap is validated against.</remarks>
         public const int MAX_CORRIDOR = 128;
+        /// <inheritdoc cref="MAX_CORRIDOR"/>
         public const int MAX_ITERATIONS = 4096;
 
         // Diagnostic counters. Deliberately never reset: they are totals, and a caller that wants
@@ -93,11 +98,20 @@ namespace xpTURN.Klotho.Deterministic.Navigation
         /// </summary>
         public int DebugMaskedStartCount => _maskedStartCount;
 
-        public FPNavMeshPathfinder(FPNavMesh navMesh, FPNavMeshQuery query, IKLogger logger)
+        private readonly FPNavTuning _tuning;
+
+        /// <summary>The sizes this instance was built with (see <see cref="FPNavTuning"/>).</summary>
+        public FPNavTuning Tuning => _tuning;
+
+        public FPNavMeshPathfinder(FPNavMesh navMesh, FPNavMeshQuery query, IKLogger logger,
+            FPNavTuning? tuning = null)
         {
             _navMesh = navMesh;
             _query = query;
             _logger = logger;
+
+            _tuning = tuning ?? FPNavTuning.Default;
+            _tuning.Validate();
 
             int triCount = navMesh.Triangles.Length;
             _openSet = new FPNavMeshBinaryHeap(triCount);
@@ -107,7 +121,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             _nodeGeneration = new int[triCount];
             _entryPoints = new FPVector2[triCount];
             _generation = 0;
-            _corridor = new int[MAX_CORRIDOR];
+            _corridor = new int[_tuning.CorridorCap];
         }
 
         /// <summary>
@@ -162,9 +176,23 @@ namespace xpTURN.Klotho.Deterministic.Navigation
             corridor = _corridor;
             corridorLength = 0;
 
-            // Triangle lookup that considers Y height
+            // Triangle lookup that considers Y height. The END breaks height ties toward ground
+            // this query may use: a snapped destination sits on a triangle EDGE, which belongs to
+            // both neighbours at the same interpolated height, and the plain lookup would hand back
+            // whichever has the lower index — refusing, half the time, a destination the projection
+            // had just certified as walkable. The tie is broken only between candidates on the SAME
+            // SURFACE, so the multi-floor answer is untouched (two floors are equidistant at the
+            // midpoint between them, and that is not a tie this rule takes), and where every
+            // same-surface candidate is passable it degenerates to the plain lookup's answer.
+            //
+            // The START keeps the plain lookup on purpose: its mask check is an exemption whose
+            // whole value is being reported (DebugMaskedStartCount), and resolving an ambiguous
+            // start toward walkable ground would silence that at exactly the boundary positions it
+            // exists to report.
+            // Moving either lookup changes the corridor for unchanged inputs — bump
+            // FPNavAgentSystem.NAV_BEHAVIOUR_REVISION with it, or old and new builds diverge silently.
             int startTri = _query.FindTriangle(start.ToXZ(), start.y);
-            int endTri = _query.FindTriangle(end.ToXZ(), end.y);
+            int endTri = _query.FindTriangleForEndpoint(end.ToXZ(), end.y, areaMask);
 
             if (startTri < 0 || endTri < 0)
             {
@@ -223,7 +251,7 @@ namespace xpTURN.Klotho.Deterministic.Navigation
 
             int iterations = 0;
 
-            while (_openSet.Count > 0 && iterations < MAX_ITERATIONS)
+            while (_openSet.Count > 0 && iterations < _tuning.MaxIterations)
             {
                 iterations++;
                 int current = _openSet.Pop();
@@ -353,14 +381,15 @@ namespace xpTURN.Klotho.Deterministic.Navigation
                 node = _cameFrom[node];
             }
 
-            int skip = totalLength > MAX_CORRIDOR ? totalLength - MAX_CORRIDOR : 0;
+            int corridorCap = _tuning.CorridorCap;
+            int skip = totalLength > corridorCap ? totalLength - corridorCap : 0;
             if (skip > 0)
                 _corridorTruncatedCount++;
 
             int count = 0;
             int index = 0;
             node = endTri;
-            while (node >= 0 && count < MAX_CORRIDOR)
+            while (node >= 0 && count < corridorCap)
             {
                 if (index >= skip)
                 {
