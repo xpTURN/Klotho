@@ -627,12 +627,13 @@ namespace xpTURN.Klotho.ECS
         {
             Tick = source.Tick;
             DeltaTimeMs = source.DeltaTimeMs;
+            AssetRegistry = source.AssetRegistry;
             Entities.CopyFrom(source.Entities);
             // No sparse re-initialization — source's sparse (-1 or valid) is duplicated via BlockCopy
             Buffer.BlockCopy(source._heap, 0, _heap, 0, _heapSize);   // single memcpy
             // Not copied: EventRaiser / OnEntityCreated / OnEntityDestroyed (delegates, not shared across ring slots)
             //             SignalSink / SignalMasks (only the executing frame has them — see ISignal.cs)
-            //             AssetRegistry / Prototypes (session-wide shared readonly references)
+            //             Prototypes (session-wide shared readonly reference)
         }
 
         public void Clear()
