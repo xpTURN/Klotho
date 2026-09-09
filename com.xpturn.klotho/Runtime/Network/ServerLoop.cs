@@ -64,6 +64,14 @@ namespace xpTURN.Klotho.Network
         // host application. Defaults to true so existing dedicated-server callers are unchanged.
         private readonly bool _ownsProcess;
 
+        /// <param name="ownsProcess">
+        /// <see langword="true"/> (default) for a dedicated server that owns its process: the loop
+        /// hooks Ctrl-C / process-exit and may force-exit if shutdown wedges. <br/>
+        /// <see langword="false"/> for a loop embedded in a host application. Two obligations come
+        /// with that: the host must call <see cref="Stop"/> itself, since neither signal is hooked —
+        /// exiting without it leaves rooms unshut — and a wedged shutdown is no longer cut loose, so
+        /// the thread running <see cref="Run"/> can block indefinitely rather than force-exiting.
+        /// </param>
         public ServerLoop(
             INetworkTransport transport,
             RoomManager roomManager,
@@ -396,10 +404,18 @@ namespace xpTURN.Klotho.Network
             // host application on a normal session end (the in-process Single Player / listen-server
             // back-out case). See the _ownsProcess field.
             //
-            // The watchdog is also now CANCELLABLE: when shutdown completes within the timeout it is
+            // The watchdog is also CANCELLABLE: when shutdown completes within the timeout it is
             // signalled and exits without force-quitting. Previously it was fire-and-forget — it fired
             // Environment.Exit even after a clean, fast shutdown (and, worse, its warning log was
             // silently dropped if the owner had already disposed the logger by then).
+            //
+            // shutdownDone is deliberately NOT disposed. Disposing it while the watchdog is still
+            // inside Wait() throws ObjectDisposedException on that background thread, and an
+            // unobserved exception there takes the process down — a successful shutdown would end as
+            // a crash. Joining the watchdog first and then disposing would be correct (the join
+            // returns as soon as Set releases it), but it buys nothing for one object per shutdown.
+            // The hazard is a Dispose() added WITHOUT that join, which is what tidying up tends to
+            // produce; leave this alone.
             ManualResetEventSlim shutdownDone = null;
             Thread hardTimeout = null;
             if (_ownsProcess)
@@ -416,43 +432,53 @@ namespace xpTURN.Klotho.Network
                 hardTimeout.Start();
             }
 
-            // (1) Reject new connections
-            _router.StopAccepting();
-
-            // (2) Wait for stragglers to complete.
-            //     _pendingCountdowns may also hold already-complete cycles' countdowns; count only the
-            //     truly-outstanding ones (Wait(0)==false) for the log. Dispose only the ones that
-            //     complete within the timeout — a still-counting one may be Signaled by a late worker,
-            //     so disposing it would risk a disposed-Signal (ThreadPool unobserved exception).
-            int outstanding = 0;
-            for (int i = 0; i < _pendingCountdowns.Count; i++)
-                if (!_pendingCountdowns[i].Wait(0)) outstanding++;
-
-            if (outstanding > 0)
-                _logger?.KInformation(
-                    $"[ServerLoop] Waiting for {outstanding} straggler room(s) to complete...");
-
-            for (int i = 0; i < _pendingCountdowns.Count; i++)
+            // The phases run under try/finally so the watchdog is released on EVERY exit, not just the
+            // clean one. Without it, a throw anywhere below leaves the watchdog armed: it force-exits
+            // SHUTDOWN_TIMEOUT_MS later and logs "hard timeout", which buries the exception that
+            // actually ended the shutdown behind a message about a timeout that never happened.
+            try
             {
-                var cd = _pendingCountdowns[i];
-                if (cd.Wait(SHUTDOWN_PHASE2_TIMEOUT_MS))
-                    cd.Dispose();
-                // else: leave undisposed — GC reclaims it (and, for a process-owning server, the
-                // hard-timeout Environment.Exit if this shutdown ultimately wedges).
+                // (1) Reject new connections
+                _router.StopAccepting();
+
+                // (2) Wait for stragglers to complete.
+                //     _pendingCountdowns may also hold already-complete cycles' countdowns; count only
+                //     the truly-outstanding ones (Wait(0)==false) for the log. Dispose only the ones
+                //     that complete within the timeout — a still-counting one may be Signaled by a late
+                //     worker, so disposing it would risk a disposed-Signal (ThreadPool unobserved
+                //     exception).
+                int outstanding = 0;
+                for (int i = 0; i < _pendingCountdowns.Count; i++)
+                    if (!_pendingCountdowns[i].Wait(0)) outstanding++;
+
+                if (outstanding > 0)
+                    _logger?.KInformation(
+                        $"[ServerLoop] Waiting for {outstanding} straggler room(s) to complete...");
+
+                for (int i = 0; i < _pendingCountdowns.Count; i++)
+                {
+                    var cd = _pendingCountdowns[i];
+                    if (cd.Wait(SHUTDOWN_PHASE2_TIMEOUT_MS))
+                        cd.Dispose();
+                    // else: leave undisposed — GC reclaims it (and, for a process-owning server, the
+                    // hard-timeout Environment.Exit if this shutdown ultimately wedges).
+                }
+                _pendingCountdowns.Clear();
+
+                // (3) Broadcast ServerShutdown to all rooms
+                _roomManager.ShutdownAllRooms();
+
+                // (4) Flush sends + wait
+                _transport.FlushSendQueue();
+                Thread.Sleep(SHUTDOWN_FLUSH_WAIT_MS);
+                _transport.Disconnect();
             }
-            _pendingCountdowns.Clear();
-
-            // (3) Broadcast ServerShutdown to all rooms
-            _roomManager.ShutdownAllRooms();
-
-            // (4) Flush sends + wait
-            _transport.FlushSendQueue();
-            Thread.Sleep(SHUTDOWN_FLUSH_WAIT_MS);
-            _transport.Disconnect();
-
-            // Shutdown finished within the timeout — release the hard-timeout watchdog so it exits
-            // without force-quitting the process (no-op when embedded: no watchdog was armed).
-            shutdownDone?.Set();
+            finally
+            {
+                // Release the hard-timeout watchdog so it exits without force-quitting the process
+                // (no-op when embedded: no watchdog was armed).
+                shutdownDone?.Set();
+            }
 
             _logger?.KInformation($"[ServerLoop] Graceful shutdown complete.");
         }
