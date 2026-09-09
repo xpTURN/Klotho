@@ -78,13 +78,28 @@ namespace xpTURN.Klotho.LiteNetLib
             _useIPv6 = IPv6Helper.IsIPv6(resolvedIp);
             _isServer = true;
             _localPeerId = 0;
-            _netManager = new LiteNetManager(this);
-            _netManager.IPv6Enabled = _useIPv6;
-            if (!_netManager.Start(port))
+            // Tear down any previous manager before binding. Listen() is a per-session entry point
+            // (KlothoSessionFlow.StartHostAndListen) and the session driver keeps one transport across
+            // sessions, so hosting a second time lands here with the first manager still running.
+            // Overwriting the field instead of stopping it left that manager's receive/logic threads
+            // and its bound socket with no reference that could ever stop them — the new Start(port)
+            // then failed with AddressAlreadyInUse, and every later attempt failed the same way.
+            // The stopped manager's peer registrations are dead too, so clear them for the new one.
+            var previous = _netManager;
+            _netManager = null;
+            previous?.Stop();
+            _peerMap.Clear();
+
+            // Publish only after a successful Start: the field must never hold a manager that is not
+            // running, or Broadcast/PollEvents would silently drive a dead one.
+            var manager = new LiteNetManager(this);
+            manager.IPv6Enabled = _useIPv6;
+            if (!manager.Start(port))
             {
                 _logger?.KError($"[LiteNetLibTransport] Server start failed — unable to bind port {port} (already in use?)");
                 return false;
             }
+            _netManager = manager;
             _logger?.KInformation($"[LiteNetLibTransport] Server listening: port {port}");
             return true;
         }
