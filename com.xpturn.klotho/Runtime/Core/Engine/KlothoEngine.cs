@@ -80,8 +80,8 @@ namespace xpTURN.Klotho.Core
         public event Action<AbortReason> OnMatchAborted;
         public event Action<ResetReason> OnMatchReset;
         public event Action OnResyncFailed;
-        // Invoked only under DEVELOPMENT_BUILD || UNITY_EDITOR (cleanup diagnostics).
-        // Suppress CS0067 in release/server builds where neither symbol is defined.
+        // Invoked only under DEBUG || UNITY_EDITOR (cleanup diagnostics).
+        // Suppress CS0067 in builds where neither symbol is defined.
 #pragma warning disable CS0067
         public event Action<int, int, WipeKind> OnPendingWipe;
 #pragma warning restore CS0067
@@ -373,7 +373,7 @@ namespace xpTURN.Klotho.Core
         private EventCollector _eventCollector;
         private EventDispatcher _dispatcher;
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         private long _lastTickWallMs;
 
         // Diagnostic — throttled chain-stall log.
@@ -539,7 +539,7 @@ namespace xpTURN.Klotho.Core
             // frame exists, so base + 1 cannot be Verified either way. That one-tick session-start
             // exposure is accepted; closing it needs an interpolator-side check, not a clock change.
             double verifiedBoundMs = (double)Math.Max(0, _lastVerifiedTick - 1) * tickMs;
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             // Before the write, so the trace sees how far past the bound this frame actually reached.
             TraceVerifiedClamp(_verifiedRenderTimeMs, verifiedBoundMs, targetTimeMs, tickMs);
 #endif
@@ -549,7 +549,7 @@ namespace xpTURN.Klotho.Core
             }
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // Verified-boundary clamp instrumentation.
         //
         // The clamp is silent by design: it discards part of a frame's advance and leaves no trace, so
@@ -908,7 +908,7 @@ namespace xpTURN.Klotho.Core
             for (int i = 0; i < networkService.Players.Count; i++)
                 _activePlayerIds.Add(networkService.Players[i].PlayerId);
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             // Diagnostic — roster snapshot at Initialize.
             {
                 var sb = new System.Text.StringBuilder();
@@ -1487,7 +1487,7 @@ namespace xpTURN.Klotho.Core
 
             _accumulator += deltaTime * 1000f; // accumulate in ms
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             if (_simConfig.TickDriftWarnMultiplier > 0)
             {
                 float maxAccumulator = _simConfig.TickIntervalMs * MAX_TICKS_PER_UPDATE;
@@ -1548,7 +1548,7 @@ namespace xpTURN.Klotho.Core
             {
                 _accumulator -= _simConfig.TickIntervalMs;
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                 if (_simConfig.TickDriftWarnMultiplier > 0)
                 {
                     long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -1636,7 +1636,7 @@ namespace xpTURN.Klotho.Core
             FlushPendingRollback();
             ComputeErrorDeltas();
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             // Chain-stall warning (throttled 1s).
             // After CleanupOldData cap on _lastVerifiedTick, wipe is prevented when lag is high,
             // but the stall itself still indicates a network/sim issue worth surfacing.
@@ -1813,7 +1813,7 @@ namespace xpTURN.Klotho.Core
                 // ("same-tick multiple cmds are legal"). Inert (0) except on a late-join guest.
                 if (targetTick < _lateJoinCommandFloorTick)
                 {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     _logger?.KDebug($"[KlothoEngine][LateJoin] cmd.Tick joinTick floor: computed={targetTick}, floored={_lateJoinCommandFloorTick}");
 #endif
                     targetTick = _lateJoinCommandFloorTick;
@@ -1826,7 +1826,7 @@ namespace xpTURN.Klotho.Core
                 if (clampEngaged)
                 {
                     int clamped = _lastSentCmdTick;
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     _logger?.KDebug($"[KlothoEngine] cmd.Tick monotonic clamp: computed={targetTick}, clamped={clamped}");
 #endif
                     targetTick = clamped;
@@ -1851,7 +1851,7 @@ namespace xpTURN.Klotho.Core
                             _networkService.SendCommand(fillEmpty);
                             _lastSentCmdTick = t;
                         }
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                         _logger?.KInformation($"[KlothoEngine][GapFill] Forward gap filled: [{fillStart}, {fillEnd}], count={fillEnd - fillStart + 1}");
 #endif
                     }
@@ -1893,7 +1893,7 @@ namespace xpTURN.Klotho.Core
                 else if (storeResult == CommandStoreResult.DroppedDuplicate
                          || storeResult == CommandStoreResult.DroppedSealed)
                 {
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                     // Smoke signal: confirms a colliding send was suppressed (empty / real)
                     // so local↔server stay keep-first. Pre-fix this cmd would have been sent and the
                     // server's last-write-wins would diverge.
@@ -2110,7 +2110,7 @@ namespace xpTURN.Klotho.Core
             }
 
             // Store collected events into the tick buffer.
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             WarnIfReclaimingPendingSynced(CurrentTick);
 #endif
             _eventBuffer.ClearTick(CurrentTick);
@@ -2237,7 +2237,7 @@ namespace xpTURN.Klotho.Core
             _tickCommandsCache.Sort(s_commandComparer);
             _simulation.Tick(_tickCommandsCache);
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             WarnIfReclaimingPendingSynced(CurrentTick);
 #endif
             _eventBuffer.ClearTick(CurrentTick);
@@ -2612,7 +2612,7 @@ namespace xpTURN.Klotho.Core
             }
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // Dev guard: slot reuse at execution destroys the previous occupant's
         // events. If that occupant is still beyond chain advance (lag > ring capacity), its
         // pending Synced events are permanently lost — surface it instead of failing silently
@@ -2645,7 +2645,7 @@ namespace xpTURN.Klotho.Core
             int cleanupTick = System.Math.Min(rawCleanupTick, _lastVerifiedTick);
             if (cleanupTick > 0)
             {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                 // Diagnostic — log InputBuffer entries about to be wiped while still beyond
                 // chain advance reach (t > _lastVerifiedTick). Surfaces host self-wipe during
                 // P2P quorum stall — wiped player commands are unrecoverable.

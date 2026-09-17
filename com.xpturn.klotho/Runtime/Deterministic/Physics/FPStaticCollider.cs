@@ -15,7 +15,7 @@ namespace xpTURN.Klotho.Deterministic.Physics
 
         public int id;
         public FPCollider collider;  // shape contains position/rotation internally (stores the FP64-converted result on export)
-        public FPMeshData meshData;  // for the Mesh shape
+        [NonSerialized] public FPMeshData meshData;  // for the Mesh shape
         public bool isTrigger;
         public FP64 restitution;
         public FP64 friction;

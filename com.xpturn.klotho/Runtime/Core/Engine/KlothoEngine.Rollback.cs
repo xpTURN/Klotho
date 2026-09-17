@@ -196,7 +196,7 @@ namespace xpTURN.Klotho.Core
             Stage = SimulationStage.Resimulate;
             try
             {
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                 _inputBuffer.SetResimulating(true);
 #endif
                 int resimTick = resolvedTick;
@@ -250,7 +250,7 @@ namespace xpTURN.Klotho.Core
                     resimTick++;
                 }
 
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                 _inputBuffer.SetResimulating(false);
 #endif
 

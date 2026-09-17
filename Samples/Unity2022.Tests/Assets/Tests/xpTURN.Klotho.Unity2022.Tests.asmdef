@@ -14,7 +14,8 @@
         "xpTURN.Klotho.LiteNetLib",
         "xpTURN.Klotho.Editor",
         "xpTURN.Klotho.Editor.ECS",
-        "xpTURN.Klotho.Editor.FSM"
+        "xpTURN.Klotho.Editor.FSM",
+        "UniTask"
     ],
     "includePlatforms": [
         "Editor"

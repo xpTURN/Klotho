@@ -210,7 +210,7 @@ namespace Brawler
                 directory: GetUserDataPath("Logs"), // same user-data root as the replay, on every platform
                 timestampFormat: "HH:mm:ss.fff"); // date dropped (it's in the filename); hour kept
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             CommandPool.SetDiagnosticLogger(_logger);
             EventPool.SetDiagnosticLogger(_logger);
 #endif

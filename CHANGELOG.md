@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.14.1] - 2026-09-17
+
+### Added — HFSM states can carry display names, and the HFSM window no longer depends on the Brawler sample
+
+- **What was wrong.** The Unity HFSM window found state names by searching every loaded assembly for the
+  type `Brawler.BotStateId` and reading its integer constants. Outside the Brawler sample it found
+  nothing, so every other project saw bare state ids; with more than one HFSM root it put Brawler's names
+  on all of them; and on Unity 6000.6 the assembly scan raised UAC0005.
+- **What changed.** Name a state where you declare it: `.State(Idle).Named(nameof(Idle))`. The name is
+  stored on the graph as `HFSMStateNode.Name`, and the window reads it from the root it is showing. A root
+  without names still shows ids, now with a one-line hint. Names are display only — the runtime never
+  reads them and they are not part of any snapshot or hash — so an overlay on Godot or a server can print
+  them too (`HFSMRoot.Get(rootId).States[id].Name`), no reflection involved.
+- **Compatibility.** Additive: existing graphs build unchanged and unnamed states behave as before.
+  `Named` may be called once per state and rejects a blank name; two states in one root sharing a name is
+  an advisory (a warning, or a throw under `Build(strict: true)`). The Brawler bot graph names its five
+  states.
+
+### Fixed — the package builds on Unity 6000.6 without errors or analyzer warnings
+
+- **What broke.** Unity 6000.6 marks `Object.GetInstanceID()` obsolete *as an error* and makes
+  `EntityId` 64-bit with no integer conversion, so the view pool (keyed by prefab instance id), the
+  static-collider exporter (a `HashSet<int>` of seen objects) and six diagnostic log lines stopped
+  compiling. Unity 6000.4 and 6000.5 already print the deprecation.
+- **What changed.** The pool and the exporter key by the prefab / GameObject reference itself
+  (`Object.Equals` / `GetHashCode` compare the same id the int did, on every supported editor), and the
+  log lines go through a new `UnityObjectId.Of(Object)` helper that returns the raw `EntityId` on
+  6000.4+ and the instance id before that. No behaviour change: pools hit and miss exactly as before,
+  and on 2022.3 / 6000.0 / 6000.3 the logged ids are byte-for-byte what they were. The pool also lost a
+  dictionary that was written but never read.
+- **`DEVELOPMENT_BUILD` is gone from every guard.** Unity 6000.6 flags the symbol (UAC0009) and 6.8
+  removes it — the analyzer reads `#if` lines even inside an inactive `#else`, so a version check cannot
+  hide it. Every development player also defines `DEBUG` (measured on 2022.3, 6000.3 and all four
+  6000.6 managed code variants) and every Klotho guard already had a `DEBUG` term, so nothing changes
+  inside Unity. The one guard without that term, the P2P sample's dev identity, now reads
+  `UNITY_EDITOR || DEBUG`.
+- **Outside Unity, add `DEBUG` where you added `DEVELOPMENT_BUILD`.** In Godot that only matters for
+  `ExportRelease`; `Debug` and `ExportDebug` already define it. For a .NET server's core diagnostics,
+  build with `-c Debug` rather than `-p:DefineConstants=…`, which replaces `DEBUG`, `TRACE` and your
+  project's own defines. Either way `DEBUG` also turns on the core's debug-only checks.
+- **No UAC0005 warnings from the package.** Unity 6000.6 also warns that `AppDomain.GetAssemblies()` can
+  return assemblies a domain reload already unloaded. Klotho calls it in two places: to run the source
+  generator's registrations and to resolve data-asset types in JSON. The 6000.6 editor still runs on
+  Mono, where the call returns exactly what `CurrentAssemblies.GetLoadedAssemblies()` does, in the same
+  order, before and after a script reload (measured). Both calls sit in assemblies that reference no
+  engine code and cannot call that API, so they suppress the warning at the call, which clears it from
+  editor and player builds. This will be revisited when the Unity editor moves to CoreCLR.
+- **`meshData` is marked `[NonSerialized]`.** Unity 6000.6 also warns (UAC1001) that the `meshData`
+  field of `FPPhysicsBody` and `FPStaticCollider` is skipped by serialization, because `FPMeshData` is
+  not `[Serializable]`. Unity never serialized it, and it should not: `FPMeshData` computes its bounds
+  and content hash in `SetData`, which Unity's field-by-field loading would skip. Both fields now say
+  so, which clears the warning. Klotho's binary format, the collider JSON sidecar and the source
+  generator ignore the attribute. **One visible change:** Json.NET honours `[NonSerialized]`, so if you
+  serialize these structs with Json.NET, `meshData` is no longer written.
+- **Verified.** The EditMode suites pass on Unity 2022.3.62f3, 6000.3.9f1 and 6000.6.0f1, and the 6000.6
+  run recompiles the package without UAC0009, UAC0005 or UAC1001. New EditMode tests on 2022.3 and
+  6000.6 cover the prefab-keyed view pool and `UnityObjectId`. The P2P sample compiles on 6000.3, the
+  Godot samples build against the rebuilt addon, and the dotnet suites pass with no failures.
+- **Tooling.** The 6000.6 project `Samples/Unity6000.6.Tests` joins `Tools/run-all-tests.sh` as a third
+  editor gate (`--no-unity-6000-6` to skip, `UNITY_6000_6_PATH` to point at another install). The runner
+  also reports when the 2022.3 and 6000.6 copies of the smoke tests drift apart; the report never fails
+  the run. CI now fails if `DEVELOPMENT_BUILD` or `UNITY_64` comes back, in C# sources or in the
+  committed Godot addon DLLs.
+
 ## [0.14.0] - 2026-09-09
 
 ### Changed — a hop is costed boundary to boundary, so a long route no longer drifts off the straight line

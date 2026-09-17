@@ -3,7 +3,7 @@
 // The carry-only provider a joining peer presents + the host-side validator (public key). NO private key
 // here: the public key is verify-only (cannot forge), so embedding it in clients is safe. The private
 // signing seed and ticket minting live in the issuer partial (P2pDevIdentity.Server.cs), which must NEVER
-// ship in a real client. The whole type is build-gated (UNITY_EDITOR || DEVELOPMENT_BUILD) so it drops out
+// ship in a real client. The whole type is build-gated (UNITY_EDITOR || DEBUG) so it drops out
 // of release builds; without it the sample simply runs in no-lobby mode (validator/provider unset →
 // existing fallback behaviour).
 //
@@ -22,7 +22,7 @@
 //   • If there is genuinely no trusted issuer at all, the signed-ticket model does not apply: fall back to
 //     self-asserted identity (no cryptographic guarantee) or this no-lobby mode. Embedding a signing key in
 //     the client is never an acceptable substitute for an issuer.
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
 using System;
 using xpTURN.Klotho.Network;
 using xpTURN.Klotho.Samples.Identity;

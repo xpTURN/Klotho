@@ -259,7 +259,7 @@ namespace xpTURN.Klotho.Core.Tests
         // ApplyFullState called EventPool.ClearAll() and wiped that tracking, so B's later legitimate
         // Return was flagged as an ownership violation (KError + pool-insert skip = leak). With the
         // fix (ClearAll removed) B's _outstanding survives and its Return is clean.
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
         // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]
@@ -295,7 +295,7 @@ namespace xpTURN.Klotho.Core.Tests
         // removing EventPool.ClearAll() must not surface a masked leak. Repeated
         // ApplyFullState with no ticks between must not accumulate outstanding pool instances
         // (the per-apply _eventBuffer.ClearAll() returns this engine's buffered events each time).
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
         // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]

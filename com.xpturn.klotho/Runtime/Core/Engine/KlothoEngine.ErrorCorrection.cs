@@ -13,7 +13,7 @@ namespace xpTURN.Klotho.Core
         private readonly Dictionary<int, FP64> _yawDeltas = new();
         private readonly HashSet<int> _teleportedEntities = new();
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // Latched: a misconfigured game rolls back continuously, and one line is the whole message.
         private bool _warnedNoCorrectionTargets;
         // Consecutive rollbacks whose target filter matched nothing. A single observation is not evidence —
@@ -177,7 +177,7 @@ namespace xpTURN.Klotho.Core
             // DEBUG is included so `dotnet test` covers this — the repository's convention for dev-only
             // guards (see the 0.9.1 Filter watch). The neighbouring [EC][DIAG] block below predates that
             // and stays Unity-only; widening it is not this change's business.
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             // Getting here means error correction is on and a rollback is happening, so if the filter
             // matched nothing then no entity carries ErrorCorrectionTargetComponent and no correction will
             // ever be computed. That is the misconfiguration itself, not an inference from it.
@@ -275,7 +275,7 @@ namespace xpTURN.Klotho.Core
             foreach (int idx in _teleportedEntities) _pendingResyncTeleported.Add(idx);
             _teleportedEntities.Clear();
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             float peak = 0f;
             foreach (var kvp in _pendingResyncPos)
             {
@@ -343,7 +343,7 @@ namespace xpTURN.Klotho.Core
                     var newPos = FPVector3.Lerp(t.PreviousPosition, t.Position, alpha);
                     var delta = oldPos - newPos;
                     var deltaMag = delta.magnitude.ToFloat();
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     _logger?.KDebug($"[EC][DIAG] entity={idx} posDelta={deltaMag:F5}m");
 #endif
                     if (deltaMag >= _ecSettings.PosMinCorrection)
@@ -365,7 +365,7 @@ namespace xpTURN.Klotho.Core
                 {
                     var newYaw = LerpYaw(t.PreviousRotation, t.Rotation, alpha);
                     var yawDelta = WrapYaw(oldYaw - newYaw);
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     _logger?.KDebug($"[EC][DIAG] entity={idx} yawDelta={FP64.Abs(yawDelta).ToFloat() * 57.29578f:F3}deg");
 #endif
                     if (FP64.Abs(yawDelta) >= rotMin)

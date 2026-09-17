@@ -336,7 +336,7 @@ namespace xpTURN.Klotho.Core.Tests
         public void RollbackWithNoCorrectionTarget_WarnsOnce()
         {
 #if !DEBUG
-            // The warning is guarded by DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR, and a Release
+            // The warning is guarded by DEBUG || UNITY_EDITOR, and a Release
             // `dotnet test` defines none of them — same shape as FPNavMeshRebakePoolOverlapTests.
             Assert.Ignore("the no-target warning is dev-build-only");
 #else

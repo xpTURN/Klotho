@@ -197,13 +197,13 @@ namespace xpTURN.Klotho.Editor
         {
             _untagged = new List<string>();
             _taggedInactive = new List<string>();
-            var seen = new HashSet<int>();   // one entry per GameObject, not per Collider
+            var seen = new HashSet<GameObject>();   // one entry per GameObject, not per Collider
 
             foreach (var col in AllColliders())
             {
                 if (col == null) continue;
                 var go = col.gameObject;
-                if (go == null || !seen.Add(go.GetInstanceID())) continue;
+                if (go == null || !seen.Add(go)) continue;
 
                 // go.tag is a plain string read — unlike CompareTag/FindGameObjectsWithTag it cannot throw
                 // when a tag is missing from the project's tag list.

@@ -27,6 +27,7 @@ namespace xpTURN.Klotho.ECS.FSM
             public int StateId;
             public int ParentId;
             public int DefaultChildId;
+            public string Name;
             public AIAction[] OnEnterActions;
             public AIAction[] OnUpdateActions;
             public AIAction[] OnExitActions;
@@ -101,6 +102,7 @@ namespace xpTURN.Klotho.ECS.FSM
                 throw new HFSMValidationException($"Default state {_defaultStateId} not declared in HFSM root {_rootId}");
 
             // Reference integrity + advisory findings (declaration order = deterministic).
+            var seenNames = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var s in _states)
             {
                 if (s.ParentId >= 0 && !byId.ContainsKey(s.ParentId))
@@ -117,6 +119,14 @@ namespace xpTURN.Klotho.ECS.FSM
                         Advisory(strict, $"State {s.StateId} has a self-transition (priority {t.Priority}) in HFSM root {_rootId}");
                     if (!seenPriorities.Add(t.Priority))
                         Advisory(strict, $"State {s.StateId} has duplicate transition priority {t.Priority} in HFSM root {_rootId}");
+                }
+
+                if (s.Name != null)
+                {
+                    if (seenNames.TryGetValue(s.Name, out int firstId))
+                        Advisory(strict, $"States {firstId} and {s.StateId} share the name \"{s.Name}\" in HFSM root {_rootId}");
+                    else
+                        seenNames.Add(s.Name, s.StateId);
                 }
             }
 
@@ -137,6 +147,7 @@ namespace xpTURN.Klotho.ECS.FSM
                     StateId         = s.StateId,
                     ParentId        = s.ParentId,
                     DefaultChildId  = s.DefaultChildId,
+                    Name            = s.Name,
                     OnEnterActions  = s.OnEnterActions,
                     OnUpdateActions = s.OnUpdateActions,
                     OnExitActions   = s.OnExitActions,
@@ -370,6 +381,17 @@ namespace xpTURN.Klotho.ECS.FSM
                 if (_def.OnExitActions != null)
                     throw new HFSMValidationException($"State {_def.StateId} OnExit set more than once in HFSM root {_builder._rootId}");
                 _def.OnExitActions = actions;
+                return this;
+            }
+
+            /// <summary>Sets the current state's display name (<see cref="HFSMStateNode.Name"/>). May be called at most once.</summary>
+            public StateBuilder Named(string name)
+            {
+                if (_def.Name != null)
+                    throw new HFSMValidationException($"State {_def.StateId} Named set more than once in HFSM root {_builder._rootId}");
+                if (string.IsNullOrWhiteSpace(name))
+                    throw new HFSMValidationException($"State {_def.StateId} name must not be null or blank in HFSM root {_builder._rootId}");
+                _def.Name = name;
                 return this;
             }
 

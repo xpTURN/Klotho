@@ -32,12 +32,12 @@ namespace xpTURN.Klotho.Logging
 
         // Debug / Trace: runtime gate plus build-time removal. In release builds the call,
         // the compiler-generated handler, and its arguments are all stripped from IL.
-        [Conditional("DEVELOPMENT_BUILD"), Conditional("UNITY_EDITOR"), Conditional("DEBUG")]
+        [Conditional("UNITY_EDITOR"), Conditional("DEBUG")]
         public static void KDebug(this IKLogger logger,
             [InterpolatedStringHandlerArgument("logger")] ref KLogHandlerDebug handler)
         { if (handler.Enabled) logger.Log(KLogLevel.Debug, handler.ToState(), null); }
 
-        [Conditional("DEVELOPMENT_BUILD"), Conditional("UNITY_EDITOR"), Conditional("DEBUG")]
+        [Conditional("UNITY_EDITOR"), Conditional("DEBUG")]
         public static void KTrace(this IKLogger logger,
             [InterpolatedStringHandlerArgument("logger")] ref KLogHandlerTrace handler)
         { if (handler.Enabled) logger.Log(KLogLevel.Trace, handler.ToState(), null); }

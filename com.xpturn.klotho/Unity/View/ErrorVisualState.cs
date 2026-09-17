@@ -112,7 +112,7 @@ namespace xpTURN.Klotho
         /// <summary>Final view output — Y-axis radians. Used after conversion via Quaternion.Euler.</summary>
         public float SmoothedYawError => _smoothedYawError;
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         public float AccumulatedPosMagnitude => _accumulatedPosError.magnitude;
 #endif
 
@@ -186,7 +186,7 @@ namespace xpTURN.Klotho
             _smoothedPosError = Vector3.Lerp(_smoothedPosError, _accumulatedPosError, blend);
             _smoothedYawError = Mathf.Lerp(_smoothedYawError, _accumulatedYawError, blend);
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             // What the engine actually handed this view, per rollback. A "no delta for 300 frames" warning
             // used to sit beside it, asking whether the entity carried ErrorCorrectionTargetComponent — but
             // it was gated on having received a delta at least once, and deltas are only produced for
@@ -217,7 +217,7 @@ namespace xpTURN.Klotho
         /// Silent when there is nothing to say — a teleport reset on a view that had accumulated nothing
         /// is a no-op, and this runs per view per frame.
         /// </summary>
-        [System.Diagnostics.Conditional("DEBUG"), System.Diagnostics.Conditional("DEVELOPMENT_BUILD"), System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEBUG"), System.Diagnostics.Conditional("UNITY_EDITOR")]
         private void LogDiscarded(IKLogger logger, int entityIndex, string reason,
                                   Vector3 rollbackDelta, float rollbackYawDelta, float bound)
         {

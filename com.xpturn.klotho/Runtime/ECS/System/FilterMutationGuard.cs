@@ -81,7 +81,7 @@ namespace xpTURN.Klotho.ECS
     /// </remarks>
     internal struct FilterMutationGuard
     {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         private ComponentStorageWatch _watch;
         private int _prevCount;
         private int _entityIndex; // entity handed out by the previous Next()
@@ -90,7 +90,7 @@ namespace xpTURN.Klotho.ECS
 
         internal FilterMutationGuard(in ComponentStorageWatch watch)
         {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             _watch = watch;
             _prevCount = watch.Count;
             _entityIndex = 0;
@@ -111,7 +111,7 @@ namespace xpTURN.Klotho.ECS
         /// both per branch, and a mismatched pair stays invisible to arity tests unless the two storages
         /// differ in count — which is exactly when the pairing matters.
         /// </param>
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static FilterMutationGuard Create<T>(in ComponentStorageFlat<T> storage, int count)
             where T : unmanaged, IComponent
@@ -132,11 +132,11 @@ namespace xpTURN.Klotho.ECS
         /// as the previous loop body left it. Must run on the pass that ends the loop too — a body that
         /// violates the rule on the final entity would otherwise go unreported.
         /// </summary>
-        [Conditional("DEBUG"), Conditional("DEVELOPMENT_BUILD"), Conditional("UNITY_EDITOR")]
+        [Conditional("DEBUG"), Conditional("UNITY_EDITOR")]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal void Check()
         {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             if (!_started) return;
 
             int live = _watch.Count;
@@ -172,11 +172,11 @@ namespace xpTURN.Klotho.ECS
 #endif
         }
 
-        [Conditional("DEBUG"), Conditional("DEVELOPMENT_BUILD"), Conditional("UNITY_EDITOR")]
+        [Conditional("DEBUG"), Conditional("UNITY_EDITOR")]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal void Record(int entityIndex)
         {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             _entityIndex = entityIndex;
             _started = true;
 #endif

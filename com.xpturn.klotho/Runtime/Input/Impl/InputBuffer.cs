@@ -74,7 +74,7 @@ namespace xpTURN.Klotho.Input
 
         public void SetLogger(IKLogger logger) => _logger = logger;
 
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
         private bool _resimulating;
 
         internal void SetResimulating(bool value) => _resimulating = value;
@@ -118,7 +118,7 @@ namespace xpTURN.Klotho.Input
             if (command == null)
                 return CommandStoreResult.DroppedNull;
 
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
             if (_resimulating)
             {
                 _logger?.KError($"[InputBuffer] AddCommand called during re-simulation: tick={command.Tick}, playerId={command.PlayerId}, type={command.GetType().Name}. Predicted commands must go into _tickCommandsCache/_pendingCommands only.");
@@ -144,7 +144,7 @@ namespace xpTURN.Klotho.Input
             long sealKey = ((long)tick << 32) | (uint)playerId;
             if (_sealedTickPlayer.Contains(sealKey))
             {
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                 // The arrival must not be the stored placeholder itself — a caller returning
                 // DroppedSealed rejects to the pool would hand back a buffer-owned instance.
                 // ClearAfter removes commands but keeps seals, so an empty slot is legitimate;
@@ -289,7 +289,7 @@ namespace xpTURN.Klotho.Input
             return _commands.ContainsKey(tick) && _commands[tick].Count > 0;
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         public void DumpTickRange(int fromTick, int toTick)
         {
             if (_logger == null)
@@ -351,7 +351,7 @@ namespace xpTURN.Klotho.Input
             return false;
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         public (int lo, int hi) GetBufferedTickRange(int playerId)
         {
             int lo = int.MaxValue;

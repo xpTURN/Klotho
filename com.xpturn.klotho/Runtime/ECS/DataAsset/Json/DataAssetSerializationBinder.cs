@@ -42,7 +42,9 @@ namespace xpTURN.Klotho.ECS.Json
             _scanned = true;
 
             var iDataAsset = typeof(IDataAsset);
+#pragma warning disable UAC0005 // Unity's Mono editor returns the same list as CurrentAssemblies.GetLoadedAssemblies(), which this engine-free assembly cannot call. Revisit on a CoreCLR editor.
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+#pragma warning restore UAC0005
             {
                 var asmName = asm.GetName().Name;
                 if (asmName.StartsWith("System") || asmName.StartsWith("Microsoft")

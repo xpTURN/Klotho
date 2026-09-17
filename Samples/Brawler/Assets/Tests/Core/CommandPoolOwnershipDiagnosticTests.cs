@@ -19,7 +19,7 @@ namespace xpTURN.Klotho.Core.Tests
     ///
     /// Tests are DEBUG-only — the diagnostic is compiled out in release.
     /// </summary>
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
     [TestFixture]
     public class CommandPoolOwnershipDiagnosticTests
     {

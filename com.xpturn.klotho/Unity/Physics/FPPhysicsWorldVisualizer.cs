@@ -92,7 +92,7 @@ namespace xpTURN.Klotho.Unity.Physics
         Dictionary<int, int> _idToIndex       = new Dictionary<int, int>();
         Dictionary<int, int> _staticIdToIndex = new Dictionary<int, int>();
 
-#if DEBUG || UNITY_EDITOR || DEVELOPMENT_BUILD
+#if DEBUG || UNITY_EDITOR
 
         // ---- Lifecycle ----
 

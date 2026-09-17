@@ -105,32 +105,33 @@ namespace Brawler
             //    non-dense ids, default-not-set, reachability) and stably sorts each state's
             //    transitions by descending priority before registering it under Id.
             //    Priorities are named constants in BotPriority (below).
+            //    Named(...) is a display name only (Unity HFSM window / overlays), never read by the runtime.
             new HFSMBuilder(Id)
                 .Default(Idle)
-                .State(Idle)                                       // excludes the self transition
+                .State(Idle).Named(nameof(Idle))                   // excludes the self transition
                     .OnEnter(_clearDest)
                     .To(Evade,  _shouldEvade,    priority: BotPriority.Evade)
                     .To(Chase,  _isKnockback,    priority: BotPriority.Knockback)
                     .To(Attack, _inAttackRange,  priority: BotPriority.Attack)
                     .To(Skill,  _shouldUseSkill, priority: BotPriority.Skill)
                     .To(Chase,  _hasTarget,      priority: BotPriority.HasTarget)
-                .State(Chase)                                      // excludes the hasTarget transition
+                .State(Chase).Named(nameof(Chase))                 // excludes the hasTarget transition
                     .To(Evade,  _shouldEvade,    priority: BotPriority.Evade)
                     .To(Chase,  _isKnockback,    priority: BotPriority.Knockback)
                     .To(Attack, _inAttackRange,  priority: BotPriority.Attack)
                     .To(Skill,  _shouldUseSkill, priority: BotPriority.Skill)
                     .To(Idle,   _noTarget,       priority: BotPriority.NoTarget)
-                .State(Attack)                                     // excludes the self transition
+                .State(Attack).Named(nameof(Attack))               // excludes the self transition
                     .OnEnter(_clearDest)
                     .To(Evade,  _shouldEvade,    priority: BotPriority.Evade)
                     .To(Chase,  _isKnockback,    priority: BotPriority.Knockback)
                     .To(Skill,  _shouldUseSkill, priority: BotPriority.Skill)
                     .To(Chase,  _hasTarget,      priority: BotPriority.HasTarget)
                     .To(Idle,   _noTarget,       priority: BotPriority.NoTarget)
-                .State(Evade)                                      // committed: single exit transition
+                .State(Evade).Named(nameof(Evade))                 // committed: single exit transition
                     .OnEnter(_evadeEnter)
                     .To(Idle,   _evadeArrived,   priority: BotPriority.EvadeArrived)
-                .State(Skill)                                      // committed: returns to Chase once the action lock clears
+                .State(Skill).Named(nameof(Skill))                 // committed: returns to Chase once the action lock clears
                     .OnEnter(_clearDest)
                     .OnUpdate(_skillUpdate)
                     .To(Chase,  _skillDone,      priority: BotPriority.SkillDone)
@@ -164,8 +165,8 @@ namespace Brawler
 ```
 
 **Key types**:
-- `HFSMBuilder` — Fluent assembler (`Default`, `State`, `OnEnter / OnUpdate / OnExit`, `To`, `Build`). `Build()` validates the graph at registration and fails fast on structural defects (duplicate / dangling / non-dense state ids, default-not-set), runs a reachability BFS, and stably sorts each state's transitions by descending priority — the runtime evaluates transitions in array order, so the sort is what gives `priority` its meaning. Advisory findings (unreachable / duplicate priority / self-transition) warn via `IKLogger` by default; `Build(strict: true)` promotes them to throws.
-- `HFSMRoot` — Root registry (`.Register`, `.Has`, `.Get`) + the instance type itself (`RootId`, `DefaultStateId`, `States`). `HFSMBuilder.Build()` constructs and registers it for you.
+- `HFSMBuilder` — Fluent assembler (`Default`, `State`, `OnEnter / OnUpdate / OnExit`, `Named`, `To`, `Build`). `Build()` validates the graph at registration and fails fast on structural defects (duplicate / dangling / non-dense state ids, default-not-set), runs a reachability BFS, and stably sorts each state's transitions by descending priority — the runtime evaluates transitions in array order, so the sort is what gives `priority` its meaning. `Named` may be called once per state and rejects a blank name; the name is stored on `HFSMStateNode.Name` for display only (the Unity HFSM window shows it in place of the id) and is never part of a snapshot or hash. Advisory findings (unreachable / duplicate priority / self-transition / two states sharing a name) warn via `IKLogger` by default; `Build(strict: true)` promotes them to throws.
+- `HFSMRoot` — Root registry (`.Register`, `.Has`, `.Get`) + the instance type itself (`RootId`, `DefaultStateId`, `States`; each `States[id].Name` carries the `Named` display name). `HFSMBuilder.Build()` constructs and registers it for you.
 - `HFSMManager` — Static driver over a per-entity HFSM component. `Init` / `Deinit` / `Update(ref Frame, EntityRef, ref AIContext)` / `GetLeafStateId` / `TriggerEvent`. The non-generic overloads operate on `HFSMComponent`; the generic `HFSMManager.Update<TComp>` form supports multiple HFSM axes per entity.
 - `HFSMComponent` — Per-entity HFSM runtime state (active state chain, elapsed ticks, pending events) added by `HFSMManager.Init`. The bot filter requires it.
 - `AIContext` — `ref struct` passed to every Decide/Execute call. Carries `Frame`, `Entity`, `NavQuery`, `CommandSystem`, `RayCaster`, `Logger`. Built fresh by `BotFSMSystem` each tick.

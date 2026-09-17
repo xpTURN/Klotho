@@ -77,7 +77,7 @@ jobs:
 
           # Second pass, Debug, for the one project that has build-gated tests. The dev-only
           # detectors (FilterMutationGuard, the ApplyFullState leak checks) hang off
-          # DEBUG/DEVELOPMENT_BUILD/UNITY_EDITOR, and [Conditional] removes the CALL, not the
+          # DEBUG/UNITY_EDITOR, and [Conditional] removes the CALL, not the
           # method — so a Release-only run compiles their call sites away and asserts nothing
           # about them. Their fixtures are #if-gated to match, which keeps Release green but
           # also silent; this run is what actually exercises them. Scoped to one project on
@@ -141,6 +141,19 @@ jobs:
       # committed without its .cs.meta and only Unity noticed, long after the fact.
       - name: Check .meta / .cs.uid
         run: .github/scripts/check-asset-sidecars.sh
+
+  deprecated-defines-check:
+    name: No Unity-deprecated defines
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Unity 6000.6 warns on DEVELOPMENT_BUILD / UNITY_64 (UAC0009 / UAC0008) and Unity 6.8 makes them
+      # compile errors — even inside an inactive #else. CI never runs Unity, so this is what fails when
+      # one comes back, in C# sources or in the committed Godot addon DLLs (check-dist-sync skips DLLs).
+      - name: Check DEVELOPMENT_BUILD / UNITY_64
+        run: .github/scripts/check-deprecated-defines.sh
 
   version-check:
     name: Version manifests agree

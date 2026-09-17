@@ -45,7 +45,7 @@ namespace xpTURN.Klotho.Core.Tests
                 "Regular event must not be collected by the SD server collector");
             Assert.AreEqual(before + 1, EventPool.GetTotalPooledCount(),
                 "dropped Regular event must be returned to the pool");
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             Assert.AreEqual(0, EventPool.GetOutstandingCount(),
                 "returned Regular event must clear the outstanding set (no leak)");
 #endif
@@ -68,7 +68,7 @@ namespace xpTURN.Klotho.Core.Tests
             Assert.AreSame(evt, collector.Collected[0]);
             Assert.AreEqual(before, EventPool.GetTotalPooledCount(),
                 "collected Synced event must NOT be returned by the collector — the buffer owns its return");
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             Assert.AreEqual(1, EventPool.GetOutstandingCount(),
                 "Synced event stays outstanding until the buffer returns it");
 #endif
@@ -99,7 +99,7 @@ namespace xpTURN.Klotho.Core.Tests
             Assert.AreEqual(0, collector.Count, "no Regular event is ever collected by the SD server collector");
             Assert.LessOrEqual(EventPool.GetTotalPooledCount(), 64,
                 "pooled count stays within the per-type cap (64) regardless of tick count");
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             Assert.AreEqual(0, EventPool.GetOutstandingCount(),
                 $"sustained drop+return over {ticks * eventsPerTick} events must leave outstanding at 0 — "
                 + "a leak would grow it ~proportionally to the raise count");

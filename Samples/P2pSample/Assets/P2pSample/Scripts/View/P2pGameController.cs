@@ -74,7 +74,7 @@ namespace xpTURN.Samples.P2pSample
                 .WithAssetRegistry(_assetRegistry)
                 .WithLifecycleObserver(this)
                 .WithUnityDefaults();
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             // Dev lobby identity (signed Ed25519 ticket). Editor/dev only (P2pDevIdentity is build-gated).
             // The builder is built once for both host and guest; the validator is simply not consulted on
             // a guest (host-only verification), so both are set unconditionally.

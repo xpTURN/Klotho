@@ -32,14 +32,10 @@ namespace xpTURN.Klotho.Editor.FSM
         private readonly int[] _pendingEventsBuf = new int[4];
         private int _pendingEventCount;
 
-        // Current stage: BotStateId is specified directly
-        private Type _stateIdType;
-
         void OnEnable()
         {
             EditorApplication.playModeStateChanged += OnPlayModeChanged;
             EditorApplication.update += OnEditorUpdate;
-            ResolveStateIdType();
         }
 
         void OnDisable()
@@ -110,10 +106,7 @@ namespace xpTURN.Klotho.Editor.FSM
                 {
                     _cachedRootId = rootId;
                     _childMap = HFSMReflectionCache.GetChildMap(rootId, _cachedRoot);
-                    if (_stateIdType != null)
-                        _stateNameMap = HFSMReflectionCache.GetStateNameMap(rootId, _stateIdType);
-                    else
-                        _stateNameMap = new Dictionary<int, string>();
+                    _stateNameMap = HFSMReflectionCache.GetStateNameMap(rootId, _cachedRoot);
                 }
                 else
                 {
@@ -128,6 +121,8 @@ namespace xpTURN.Klotho.Editor.FSM
             // Left: state tree
             EditorGUILayout.BeginVertical(GUILayout.Width(position.width * 0.4f));
             EditorGUILayout.LabelField("State Graph", EditorStyles.boldLabel);
+            if (_stateNameMap.Count == 0)
+                EditorGUILayout.HelpBox("States have no names — declare them with .Named(...) in the HFSMBuilder.", MessageType.Info);
             _selectedStateId = HFSMStateTreeRenderer.Render(
                 _cachedRoot, _childMap, _stateNameMap,
                 _activeIdsBuf, _activeDepth, _selectedStateId,
@@ -231,20 +226,6 @@ namespace xpTURN.Klotho.Editor.FSM
             for (int i = 0; i < actions.Length; i++)
                 names[i] = HFSMReflectionCache.GetActionName(actions[i]);
             return "[" + string.Join(", ", names) + "]";
-        }
-
-        private void ResolveStateIdType()
-        {
-            // Current stage: search BotStateId directly
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                var type = asm.GetType("Brawler.BotStateId");
-                if (type != null)
-                {
-                    _stateIdType = type;
-                    return;
-                }
-            }
         }
     }
 }

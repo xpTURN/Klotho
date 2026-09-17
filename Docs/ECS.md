@@ -383,8 +383,8 @@ Development builds carry a runtime check. `Filter` watches the storage it walks 
 `InvalidOperationException` from the *next* `Next()` if that storage shrank for any reason other than the
 entity `Next()` had just handed out. The message names the mechanism and the fix, so the common form of
 this bug stops being something you have to reason about. It is compiled out of release players — the entry
-points carry `[Conditional("DEBUG")]`, `[Conditional("DEVELOPMENT_BUILD")]` and
-`[Conditional("UNITY_EDITOR")]`, and the guard struct is left with no fields at all.
+points carry `[Conditional("DEBUG")]` and `[Conditional("UNITY_EDITOR")]`, and the guard struct is left with
+no fields at all.
 
 Which configurations have it:
 
@@ -392,7 +392,7 @@ Which configurations have it:
 | --- | --- |
 | `dotnet test -c Debug` | ✅ (`DEBUG`) |
 | Unity Editor / EditMode tests | ✅ (`UNITY_EDITOR`) |
-| Unity development player | ✅ (`DEVELOPMENT_BUILD`) |
+| Unity development player | ✅ (`DEBUG` — every development build defines it) |
 | `dotnet` Release, Unity release player | ❌ |
 | **Godot, in every configuration** | ❌ — see below |
 

@@ -51,14 +51,14 @@ namespace Brawler
                 _playerId = f.GetReadOnly<OwnerComponent>(EntityRef).OwnerId;
 
             _activateCount++;
-            Engine?.Logger?.KDebug($"[ViewLife][Activate] playerId={_playerId}, entity={EntityRef.Index}, viewIID={GetInstanceID()}, activateCount={_activateCount}");
+            Engine?.Logger?.KDebug($"[ViewLife][Activate] playerId={_playerId}, entity={EntityRef.Index}, viewIID={UnityObjectId.Of(this)}, activateCount={_activateCount}");
         }
 
         public override void OnDeactivate()
         {
             base.OnDeactivate();
             _deactivateCount++;
-            Engine?.Logger?.KDebug($"[ViewLife][Deactivate] playerId={_playerId}, entity={EntityRef.Index}, viewIID={GetInstanceID()}, deactivateCount={_deactivateCount}");
+            Engine?.Logger?.KDebug($"[ViewLife][Deactivate] playerId={_playerId}, entity={EntityRef.Index}, viewIID={UnityObjectId.Of(this)}, deactivateCount={_deactivateCount}");
         }
 
         public override void OnUpdateView()

@@ -5,7 +5,7 @@
 // only the issued ticket + the public verify key. See P2pDevIdentity.Client.cs for the full trust-model
 // rationale. Kept on the same build gate as the client partial here for sample simplicity; a stricter
 // build can narrow this file's gate further (or exclude it outright) without touching the client side.
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
 using System;
 using xpTURN.Klotho.Samples.Identity;
 

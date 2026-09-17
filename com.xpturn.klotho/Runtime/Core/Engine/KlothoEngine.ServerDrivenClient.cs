@@ -49,7 +49,7 @@ namespace xpTURN.Klotho.Core
         // same-instance re-entry is closed by the Initialize/enqueue guards) — insurance.
         private readonly List<ICommand> _rejectedVerifiedCmdsCache = new List<ICommand>();
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // Per-tick perf measurement. Logs only when an iteration exceeds TickIntervalMs.
         private readonly System.Diagnostics.Stopwatch _perfSw = new System.Diagnostics.Stopwatch();
 #endif
@@ -238,7 +238,7 @@ namespace xpTURN.Klotho.Core
 
                 _accumulator -= _simConfig.TickIntervalMs;
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                 if (_simConfig.TickDriftWarnMultiplier > 0)
                 {
                     long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -303,7 +303,7 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         private void ExecuteClientPredictionTick()
         {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             _perfSw.Restart();
 #endif
             int frameTick = _simulation.CurrentTick;
@@ -328,7 +328,7 @@ namespace xpTURN.Klotho.Core
                     var predicted = _inputPredictor.PredictInput(playerId, CurrentTick, _previousCommandsCache);
                     _tickCommandsCache.Add(predicted);
                     // On the SD path, prediction validation is replaced by the state hash, so _pendingCommands is not used.
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     // Ask the level before computing. KDebug's interpolated-string handler already skips
                     // the holes when Debug is off, so the message itself is free — but GetBufferedTickRange
                     // is a plain statement outside it, and it walks the whole command buffer. The gate that
@@ -346,7 +346,7 @@ namespace xpTURN.Klotho.Core
             _tickCommandsCache.Sort(s_commandComparer);
             _simulation.Tick(_tickCommandsCache);
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             // Prediction-tick hash is dev-only diagnostics; NOT recorded into the history — the
             // verified resim re-executes and re-records this tick, so a predicted value would be
             // overwritten anyway and buys no prod signal.
@@ -365,7 +365,7 @@ namespace xpTURN.Klotho.Core
             OnTickExecutedWithState?.Invoke(executedTick, FrameState.Predicted);
             DispatchTickEvents(executedTick, FrameState.Predicted);
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             _perfSw.Stop();
             long elapsedMs = _perfSw.ElapsedMilliseconds;
             if (elapsedMs >= _simConfig.TickIntervalMs)
@@ -389,7 +389,7 @@ namespace xpTURN.Klotho.Core
             if (_pendingVerifiedQueue.Count == 0)
                 return;
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             int batchCount = _pendingVerifiedQueue.Count;
             var sw = System.Diagnostics.Stopwatch.StartNew();
 #endif
@@ -405,7 +405,7 @@ namespace xpTURN.Klotho.Core
                 Stage = SimulationStage.Forward;
             }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             sw.Stop();
             long elapsedMs = sw.ElapsedMilliseconds;
             if (elapsedMs >= _simConfig.TickIntervalMs)
@@ -476,7 +476,7 @@ namespace xpTURN.Klotho.Core
                     _logger?.KDebug($"[KlothoEngine][SD] Rollback: restoreTick={restoreTick}, frame.Tick before={_simulation.CurrentTick}");
                     _simulation.Rollback(restoreTick);
                     _logger?.KDebug($"[KlothoEngine][SD] Rollback: frame.Tick after={_simulation.CurrentTick}");
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     _logger?.KDebug($"[SD][DIAG] PostRestore: restoreTick={restoreTick} hash=0x{_simulation.GetStateHash():X16}");
 #endif
                     rollbackPerformed = true;
@@ -521,7 +521,7 @@ namespace xpTURN.Klotho.Core
                 }
 
                 // Overwrite the predicted input in the InputBuffer with the verified input.
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                 {
                     bool hasLocal = false;
                     for (int i = 0; i < entry.Commands.Count; i++)
@@ -532,7 +532,7 @@ namespace xpTURN.Klotho.Core
                         _logger?.KWarning($"[SD] Verified entry missing local input: executionTick={executionTick}, localId={LocalPlayerId}, entryCmds={entry.Commands.Count}");
                 }
 #endif
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                 {
                     // Remote player commands are not stored in _inputBuffer (prediction only),
                     // so verify predicted-vs-verified consistency only for LocalPlayerId.
@@ -586,11 +586,11 @@ namespace xpTURN.Klotho.Core
                 _logger?.KDebug($"[SD] Resim: executionTick={executionTick}, entry.Tick={entry.Tick}, frame.Tick before={_simulation.CurrentTick}, cmds={_tickCommandsCache.Count}");
                 _eventCollector.BeginTick(executionTick);
                 _tickCommandsCache.Sort(s_commandComparer);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                 _inputBuffer.SetResimulating(true);
 #endif
                 _simulation.Tick(_tickCommandsCache);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                 _inputBuffer.SetResimulating(false);
 #endif
                 _logger?.KDebug($"[SD] Resim: frame.Tick after={_simulation.CurrentTick}");
@@ -602,7 +602,7 @@ namespace xpTURN.Klotho.Core
                 // Verified resim hashes every tick, so recording is a free byproduct. This is
                 // the SD client's prod accumulation path (the prediction tick is intentionally skipped).
                 _diagHistorySim?.RecordHashHistory(executionTick);
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                 _logger?.KDebug($"[SD][DIAG] VerifiedHash: executionTick={executionTick} hash=0x{resimHash:X16}");
 #endif
                 if (resimHash != entry.StateHash)
@@ -713,7 +713,7 @@ namespace xpTURN.Klotho.Core
             // Prediction resimulation runs only once per batch.
             if (lastVerifiedTick >= 0 && lastVerifiedTick + 1 < CurrentTick)
             {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                 _logger?.KDebug($"[SD][DIAG] PredResim: range=[{lastVerifiedTick + 1},{CurrentTick - 1}] depth={CurrentTick - lastVerifiedTick - 1} activeIds=[{string.Join(",", _activePlayerIds)}]");
 #endif
                 int resimTick = lastVerifiedTick + 1;
@@ -731,7 +731,7 @@ namespace xpTURN.Klotho.Core
                         int playerId = _activePlayerIds[pi];
                         if (!_inputBuffer.HasCommandForTick(resimTick, playerId))
                         {
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                             if (playerId == LocalPlayerId)
                                 _logger?.KWarning($"[SD] PredResim: local input missing, using predictor: resimTick={resimTick}, localId={LocalPlayerId}");
 #endif
@@ -743,15 +743,15 @@ namespace xpTURN.Klotho.Core
 
                     _eventCollector.BeginTick(resimTick);
                     _tickCommandsCache.Sort(s_commandComparer);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                     _inputBuffer.SetResimulating(true);
 #endif
                     _simulation.Tick(_tickCommandsCache);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                     _inputBuffer.SetResimulating(false);
 #endif
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     _logger?.KDebug($"[SD][HASH] ResimTick: tick={resimTick} hash=0x{_simulation.GetStateHash():X16}");
 #endif
 
@@ -800,11 +800,11 @@ namespace xpTURN.Klotho.Core
             // Open the collector for this gap tick so RaiseEvent stamps evt.Tick correctly and any
             // stale residue from the prior path is cleared (mirrors every other Tick path).
             _eventCollector.BeginTick(gapTick);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
             _inputBuffer.SetResimulating(true);
 #endif
             _simulation.Tick(_tickCommandsCache);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
             _inputBuffer.SetResimulating(false);
 #endif
             // Gap-tick events are state-advance only — they fall below both the old-event backup and
@@ -1116,11 +1116,11 @@ namespace xpTURN.Klotho.Core
 
                     _eventCollector.BeginTick(resimTick);
                     _tickCommandsCache.Sort(s_commandComparer);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                     _inputBuffer.SetResimulating(true);
 #endif
                     _simulation.Tick(_tickCommandsCache);
-#if DEBUG || DEVELOPMENT_BUILD
+#if DEBUG
                     _inputBuffer.SetResimulating(false);
 #endif
                     for (int ei = 0; ei < _eventCollector.Count; ei++)

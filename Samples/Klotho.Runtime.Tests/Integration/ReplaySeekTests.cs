@@ -115,7 +115,7 @@ namespace xpTURN.Klotho.Integration.Tests
 
         // ── seek re-simulation loop returns raised events to the pool (no leak) ──
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
         // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]

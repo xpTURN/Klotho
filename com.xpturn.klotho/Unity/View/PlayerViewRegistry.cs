@@ -51,14 +51,14 @@ namespace xpTURN.Klotho
             if (view == null) return;
             if (_views.TryGetValue(playerId, out var existing) && existing == view)
             {
-                _engine?.Logger?.KDebug($"[ViewBind][Dedup] playerId={playerId}, viewIID={view.GetInstanceID()} (same instance, skip rebind)");
+                _engine?.Logger?.KDebug($"[ViewBind][Dedup] playerId={playerId}, viewIID={UnityObjectId.Of(view)} (same instance, skip rebind)");
                 return;
             }
-            int prevIID = existing != null ? existing.GetInstanceID() : 0;
+            long prevIID = existing != null ? UnityObjectId.Of(existing) : 0;
             _views[playerId] = view;
 
             bool isLocal = IsActuallyLocal(playerId);
-            _engine?.Logger?.KDebug($"[ViewBind][New] playerId={playerId}, viewIID={view.GetInstanceID()}, prevIID={prevIID}, isLocal={isLocal}");
+            _engine?.Logger?.KDebug($"[ViewBind][New] playerId={playerId}, viewIID={UnityObjectId.Of(view)}, prevIID={prevIID}, isLocal={isLocal}");
 
             OnViewRegistered?.Invoke(playerId, view);
             if (isLocal) OnLocalViewRegistered?.Invoke(view);
@@ -68,7 +68,7 @@ namespace xpTURN.Klotho
         {
             if (_views.TryGetValue(playerId, out var current) && current != view)
             {
-                _engine?.Logger?.KDebug($"[ViewBind][UnregSkip] playerId={playerId}, requesterIID={view?.GetInstanceID()}, currentIID={current.GetInstanceID()}");
+                _engine?.Logger?.KDebug($"[ViewBind][UnregSkip] playerId={playerId}, requesterIID={UnityObjectId.Of(view)}, currentIID={UnityObjectId.Of(current)}");
                 return;
             }
             if (!_views.Remove(playerId))

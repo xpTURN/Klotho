@@ -58,15 +58,15 @@ namespace xpTURN.Klotho.Editor.FSM
             return map;
         }
 
-        public static Dictionary<int, string> GetStateNameMap(int rootId, Type stateIdType)
+        public static Dictionary<int, string> GetStateNameMap(int rootId, HFSMRoot root)
         {
             if (s_stateNames.TryGetValue(rootId, out var map)) return map;
 
             map = new Dictionary<int, string>();
-            foreach (var field in stateIdType.GetFields(BindingFlags.Public | BindingFlags.Static))
+            foreach (var state in root.States)
             {
-                if (field.FieldType == typeof(int))
-                    map[(int)field.GetValue(null)] = field.Name;
+                if (state.Name != null)
+                    map[state.StateId] = state.Name;
             }
             s_stateNames[rootId] = map;
             return map;

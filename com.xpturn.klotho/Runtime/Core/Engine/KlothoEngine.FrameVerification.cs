@@ -15,7 +15,7 @@ namespace xpTURN.Klotho.Core
 
         public int LastVerifiedTick => _lastVerifiedTick;
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // Diagnostic — throttled break-cause log for chain advance stall.
         private long _lastChainBreakLogMs;
         // Bitmask of which active-player slots were missing at the last logged break, and how many breaks
@@ -72,7 +72,7 @@ namespace xpTURN.Klotho.Core
                 if (!_inputBuffer.HasAllCommands(tick, _activePlayerIds))
                 {
                     OnChainAdvanceBreak?.Invoke();
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
                     LogChainAdvanceBreak(tick);
 #endif
                     break;
@@ -99,7 +99,7 @@ namespace xpTURN.Klotho.Core
             }
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         private void LogChainAdvanceBreak(int tick)
         {
             // Which active-player slots are missing a command at the stalled tick, and is any of them a

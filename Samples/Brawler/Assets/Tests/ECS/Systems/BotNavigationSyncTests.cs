@@ -225,6 +225,20 @@ namespace xpTURN.Klotho.Tests
         }
 
         /// <summary>
+        /// Every state of the bot graph carries a display name (HFSMStateNode.Name), which the HFSM window
+        /// shows in place of the numeric id. Guards against a state declared without .Named(...).
+        /// </summary>
+        [Test]
+        public void Init_BotHFSMRootStatesAreNamed()
+        {
+            CreateSimulation(); // OnInit -> BotHFSMRoot.Build()
+
+            var root = xpTURN.Klotho.ECS.FSM.HFSMRoot.Get(BotHFSMRoot.Id);
+            foreach (var state in root.States)
+                Assert.IsFalse(string.IsNullOrEmpty(state.Name), $"BotHFSMRoot state {state.StateId} has no name");
+        }
+
+        /// <summary>
         /// Verifies that calling HFSMManager.Init directly on a bot spawned after Initialize()
         /// correctly adds the HFSMComponent.
         /// EcsSimulation.Initialize() runs Frame.Clear() first, so any pre-spawned entities

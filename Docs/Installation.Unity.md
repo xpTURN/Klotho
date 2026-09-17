@@ -22,6 +22,8 @@ Pin a specific Klotho version with `#vX.Y.Z` (e.g. `https://github.com/xpTURN/Kl
 
 Unity registry packages (`com.unity.inputsystem`, `com.unity.ai.navigation` for the NavMesh exporter, `com.unity.nuget.newtonsoft-json`) resolve automatically via the package's `dependencies` field.
 
+Verified editors: **2022.3.62f3** (the declared minimum), **6000.3.9f1** and **6000.6.0f1**. Each has a smoke project under `Samples/` (`Unity2022.Tests`, `Brawler`, `Unity6000.6.Tests`) that `Tools/run-all-tests.sh` runs in batch mode.
+
 ### Polyfill activation (C# 9–11 syntax)
 
 Klotho uses C# 11 features (`required`, `init`, custom interpolated string handlers, etc.) in some assemblies. After installing `xpTURN.Polyfill`, enable the language version once per project:

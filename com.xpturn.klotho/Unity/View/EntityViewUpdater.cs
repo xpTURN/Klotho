@@ -329,7 +329,7 @@ namespace xpTURN.Klotho
                 else
                 {
 
-                    Engine?.Logger?.KDebug($"[ViewLife][Rebind] entity={entity.Index}, version={entity.Version}, viewType={existing.GetType().Name}, viewIID={existing.GetInstanceID()}");
+                    Engine?.Logger?.KDebug($"[ViewLife][Rebind] entity={entity.Index}, version={entity.Version}, viewType={existing.GetType().Name}, viewIID={UnityObjectId.Of(existing)}");
                     existing.OnDeactivate();
                     TryUnregisterPlayerView(existing);
                     if (_factory != null) _factory.Destroy(existing);
@@ -488,7 +488,7 @@ namespace xpTURN.Klotho
                 var view = _viewsByEntity[key];
 
                 // Above the log line, not just above OnDeactivate: the interpolated arguments include
-                // GetInstanceID(), which throws on a destroyed view whenever Debug logging is live.
+                // UnityObjectId.Of(view) and view.EntityRef, which must not be read from a destroyed view.
                 // The bookkeeping still runs — TryUnregisterPlayerView reads the cached owner, a
                 // managed field, so a destroyed view can and must still be unbound.
                 if (IsGone(view))
@@ -500,7 +500,7 @@ namespace xpTURN.Klotho
                     continue;
                 }
 
-                Engine?.Logger?.KDebug($"[ViewLife][StaleDestroy] entity={view.EntityRef.Index}, viewType={view.GetType().Name}, viewVersion={view.EntityRef.Version}, grace={_despawnVerifiedTick.ContainsKey(key)}, viewIID={view.GetInstanceID()}");
+                Engine?.Logger?.KDebug($"[ViewLife][StaleDestroy] entity={view.EntityRef.Index}, viewType={view.GetType().Name}, viewVersion={view.EntityRef.Version}, grace={_despawnVerifiedTick.ContainsKey(key)}, viewIID={UnityObjectId.Of(view)}");
                 view.OnDeactivate();
                 TryUnregisterPlayerView(view);
                 if (_factory != null) _factory.Destroy(view);

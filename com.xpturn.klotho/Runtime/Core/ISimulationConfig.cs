@@ -256,7 +256,7 @@ namespace xpTURN.Klotho.Core
         /// </summary>
         int RollbackWindowTicks { get; }
 
-        // --- Diagnostics (DEVELOPMENT_BUILD / UNITY_EDITOR only) ---
+        // --- Diagnostics (DEBUG / UNITY_EDITOR only) ---
 
         /// <summary>
         /// Warning threshold for OnEvent* handler execution time (milliseconds).

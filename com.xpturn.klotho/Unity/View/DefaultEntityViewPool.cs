@@ -5,7 +5,7 @@ using UnityEngine;
 namespace xpTURN.Klotho
 {
     /// <summary>
-    /// A simple view pool keyed by prefab instance ID.
+    /// A simple view pool keyed by prefab.
     /// If an inactive view exists in the pool, it is reactivated and returned synchronously; otherwise, it is instantiated immediately.
     /// The first OnInitialize call is handled by the EVU side.
     /// </summary>
@@ -13,12 +13,10 @@ namespace xpTURN.Klotho
     {
         [SerializeField] private Transform _poolRoot;
 
-        // prefab instanceID → idle view queue
-        private readonly Dictionary<int, Queue<EntityView>> _pools = new();
-        // active view → source prefab instanceID (for correct return)
-        private readonly Dictionary<EntityView, int>        _sourcePrefabId = new();
-        // instanceID → prefab reference (for hit reuse active SetActive)
-        private readonly Dictionary<int, GameObject>        _prefabById = new();
+        // prefab → idle view queue
+        private readonly Dictionary<GameObject, Queue<EntityView>> _pools = new();
+        // active view → source prefab (for correct return)
+        private readonly Dictionary<EntityView, GameObject>        _sourcePrefab = new();
 
         private Transform PoolRoot => _poolRoot != null ? _poolRoot : transform;
 
@@ -26,13 +24,10 @@ namespace xpTURN.Klotho
         {
             if (prefab == null) return UniTask.FromResult<EntityView>(null);
 
-            int id = prefab.GetInstanceID();
-            _prefabById[id] = prefab;
-
-            if (_pools.TryGetValue(id, out var queue) && queue.Count > 0)
+            if (_pools.TryGetValue(prefab, out var queue) && queue.Count > 0)
             {
                 var view = queue.Dequeue();
-                ActivateFromPool(view, id, pos, rot);
+                ActivateFromPool(view, pos, rot);
                 return UniTask.FromResult(view);   // hit — synchronous return
             }
 
@@ -46,7 +41,7 @@ namespace xpTURN.Klotho
                 Destroy(go);
                 return UniTask.FromResult<EntityView>(null);
             }
-            _sourcePrefabId[newView] = id;
+            _sourcePrefab[newView] = prefab;
             return UniTask.FromResult(newView);
         }
 
@@ -54,7 +49,7 @@ namespace xpTURN.Klotho
         {
             if (view == null) return;
 
-            if (!_sourcePrefabId.TryGetValue(view, out int id))
+            if (!_sourcePrefab.TryGetValue(view, out var prefab))
             {
                 // Created outside the pool — just Destroy
                 Destroy(view.gameObject);
@@ -64,10 +59,10 @@ namespace xpTURN.Klotho
             view.gameObject.SetActive(false);
             view.transform.SetParent(PoolRoot, worldPositionStays: false);
 
-            if (!_pools.TryGetValue(id, out var queue))
+            if (!_pools.TryGetValue(prefab, out var queue))
             {
                 queue = new Queue<EntityView>();
-                _pools[id] = queue;
+                _pools[prefab] = queue;
             }
             queue.Enqueue(view);
         }
@@ -76,13 +71,10 @@ namespace xpTURN.Klotho
         {
             if (prefab == null || count <= 0) return;
 
-            int id = prefab.GetInstanceID();
-            _prefabById[id] = prefab;
-
-            if (!_pools.TryGetValue(id, out var queue))
+            if (!_pools.TryGetValue(prefab, out var queue))
             {
                 queue = new Queue<EntityView>();
-                _pools[id] = queue;
+                _pools[prefab] = queue;
             }
 
             for (int i = 0; i < count; i++)
@@ -95,12 +87,12 @@ namespace xpTURN.Klotho
                     Destroy(go);
                     continue;
                 }
-                _sourcePrefabId[view] = id;
+                _sourcePrefab[view] = prefab;
                 queue.Enqueue(view);
             }
         }
 
-        private void ActivateFromPool(EntityView view, int prefabId, Vector3? pos, Quaternion? rot)
+        private void ActivateFromPool(EntityView view, Vector3? pos, Quaternion? rot)
         {
             var t = view.transform;
             t.SetParent(null, worldPositionStays: false);

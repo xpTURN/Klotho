@@ -12,9 +12,9 @@ A deterministic, ECS-native hierarchical finite state machine for authoring agen
 | Type | Role |
 | ---- | ---- |
 | `HFSMBuilder` | Fluent assembler. Collects states/transitions, validates the graph, sorts transitions by priority, and registers an `HFSMRoot`. |
-| `HFSMBuilder.StateBuilder` | Per-state builder returned by `State(...)` (`OnEnter` / `OnUpdate` / `OnExit` / `To`). |
+| `HFSMBuilder.StateBuilder` | Per-state builder returned by `State(...)` (`OnEnter` / `OnUpdate` / `OnExit` / `Named` / `To`). |
 | `HFSMRoot` | Built graph + static registry (`Register` / `Has` / `Get`). Holds `RootId`, `DefaultStateId`, and the dense `States[]` array. |
-| `HFSMStateNode` | One state node: ids (`StateId` / `ParentId` / `DefaultChildId`), the three action arrays, and `Transitions[]`. |
+| `HFSMStateNode` | One state node: ids (`StateId` / `ParentId` / `DefaultChildId`), an optional display `Name`, the three action arrays, and `Transitions[]`. |
 | `HFSMTransitionNode` | One transition: `Priority`, `TargetStateId`, `Decision`, `EventId`. |
 | `HFSMState` | The actual per-axis runtime state (`[KlothoSerializableStruct]`): active-state stack, pending events, elapsed ticks. Embedded as a host component's first field. |
 | `HFSMComponent` | Default single-axis host (`[KlothoComponent(200)] : IHFSMHost`) — embeds `HFSMState` as its first field. |
@@ -106,18 +106,18 @@ public static class BotHFSMRoot
 
         new HFSMBuilder(Id)
             .Default(Idle)
-            .State(Idle)
+            .State(Idle).Named(nameof(Idle))
                 .OnEnter(_clearDest)
                 .To(Evade,  _shouldEvade,    priority: 90)
                 .To(Chase,  _isKnockback,    priority: 80)
                 .To(Attack, _inAttackRange,  priority: 70)
                 .To(Skill,  _shouldUseSkill, priority: 60)
                 .To(Chase,  _hasTarget,      priority: 50)
-            .State(Chase)
+            .State(Chase).Named(nameof(Chase))
                 .To(Evade,  _shouldEvade,    priority: 90)
                 .To(Attack, _inAttackRange,  priority: 70)
                 .To(Idle,   _noTarget,       priority: 40)
-            .State(Skill)                            // committed state: single exit
+            .State(Skill).Named(nameof(Skill))       // committed state: single exit
                 .OnEnter(_clearDest)
                 .OnUpdate(_skillUpdate)
                 .To(Chase,  _skillDone,      priority: 100)
@@ -134,6 +134,8 @@ A composite state declares its parent/default-child via the `State` overload:
 .State(Chase,  parentId: Combat)
 .State(Attack, parentId: Combat)
 ```
+
+`Named(...)` gives a state a display name — `nameof` keeps it in step with the constant. Names are **display only**: the Unity HFSM window shows them in place of ids, and your own overlays can read `HFSMRoot.Get(rootId).States[id].Name`, but the runtime never reads them, they are not part of any snapshot or hash, and logic must not branch on them. A state without a name shows its id.
 
 `Build()` returns the registered `HFSMRoot`. The builder constructs and registers it for you via `HFSMRoot.Register` — you normally never construct `HFSMRoot`/`HFSMStateNode` arrays by hand.
 
@@ -175,6 +177,7 @@ This is pure authoring sugar: the helper just calls `To(...)` per state, so the 
 | `ParentId` / `DefaultChildId` / transition targets must reference declared states | "… not declared" / "transitions to undeclared state" |
 | State ids must be dense `0..maxId` | "States must be dense … (StateId==index)" |
 | `OnEnter` / `OnUpdate` / `OnExit` set at most once per state | "… set more than once" |
+| `Named` set at most once per state, with a non-blank name (thrown at the call, not at `Build()`) | "… Named set more than once" / "name must not be null or blank" |
 | A state's `DefaultChildId` target must have that state as its `ParentId` | "DefaultChild … has ParentId …, expected …" |
 | The default (entry) state must be top-level (`ParentId == -1`) | "Default state … must be top-level (ParentId == -1)" |
 | No cycles in any `ParentId` chain | "… has a cycle in its ParentId chain" |
@@ -184,7 +187,8 @@ This is pure authoring sugar: the helper just calls `To(...)` per state, so the 
 
 - a state unreachable from the default state (reachability BFS over transitions + default-child chain),
 - a duplicate transition priority within a state,
-- a self-transition.
+- a self-transition,
+- two states in one root sharing a display name.
 
 ```csharp
 new HFSMBuilder(Id, logger).Default(Idle)./* … */.Build(strict: true);
@@ -419,9 +423,9 @@ HFSMManager.GetDebugInfo(ref frame, entity, out var rootId, out var depth, out v
 // GetActiveStateIds / GetPendingEventIds for the full chain + queued events
 ```
 
-Wire these into whatever overlay or log your host uses (a Godot `_Draw` overlay, a server log line, etc.).
+Wire these into whatever overlay or log your host uses (a Godot `_Draw` overlay, a server log line, etc.). For states declared with `.Named(...)`, print `HFSMRoot.Get(rootId).States[leaf].Name` instead of the id.
 
-On **Unity** specifically, the same data is also available visually: open **Tools ▸ Klotho ▸ Visualizer ▸ HFSM** to inspect a live entity's state tree, active chain, and pending events in real time. There is no Godot editor window for this yet — use the query API above.
+On **Unity** specifically, the same data is also available visually: open **Tools ▸ Klotho ▸ Visualizer ▸ HFSM** to inspect a live entity's state tree, active chain, and pending events in real time. States show their `.Named(...)` names; a root with no named states shows ids and a hint. There is no Godot editor window for this yet — use the query API above.
 
 ## Worked Example
 

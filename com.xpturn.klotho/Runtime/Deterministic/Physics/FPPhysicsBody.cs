@@ -13,7 +13,7 @@ namespace xpTURN.Klotho.Deterministic.Physics
         public int id;
         public FPRigidBody rigidBody;
         public FPCollider collider;
-        public FPMeshData meshData;
+        [NonSerialized] public FPMeshData meshData;
         public FPVector3 position;
         public FPQuaternion rotation;
         public FPVector3 colliderOffset;

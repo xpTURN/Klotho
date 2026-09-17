@@ -52,7 +52,7 @@ namespace xpTURN.Klotho.ECS.Tests
     ///
     /// <para>Excluded from the normal suite: run explicitly, in Release. DEBUG keeps
     /// <c>FilterMutationGuard.Check/Record</c> alive (they are
-    /// <c>[Conditional("DEBUG"), Conditional("DEVELOPMENT_BUILD"), Conditional("UNITY_EDITOR")]</c>),
+    /// <c>[Conditional("DEBUG"), Conditional("UNITY_EDITOR")]</c>),
     /// which is one of the two candidate explanations this probe exists to separate:
     ///   dotnet test -c Release --filter FullyQualifiedName~ComponentsSpanRemeasureTests</para>
     ///

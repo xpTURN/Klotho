@@ -391,7 +391,7 @@ namespace xpTURN.Klotho.Logging.Tests
             Assert.That(_sink.Entries[0].Exception, Is.SameAs(ex));
         }
 
-        // KDebug and KTrace are [Conditional("DEVELOPMENT_BUILD"), Conditional("UNITY_EDITOR"),
+        // KDebug and KTrace are [Conditional("UNITY_EDITOR"),
         // Conditional("DEBUG")]: the CALL is removed in a shipping build so verbose logging costs
         // nothing there — including the interpolated-string handler that would otherwise run.
         // So the routing assertion is a DEBUG claim, and the stripping is the release claim.

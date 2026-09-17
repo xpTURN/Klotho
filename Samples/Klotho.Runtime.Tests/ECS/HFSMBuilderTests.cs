@@ -327,5 +327,93 @@ namespace xpTURN.Klotho.ECS.Tests
                 .Build();
             Assert.IsNotNull(root);
         }
+
+        // ── State names (display only) ────────────────────────────────────────
+
+        [Test]
+        public void Named_CopiesNameToNode_UnnamedStaysNull()
+        {
+            var root = new HFSMBuilder(9129)
+                .Default(0)
+                .State(0).Named("Idle").To(1, True, priority: 50)
+                .State(1).To(0, True, priority: 50)
+                .Build();
+
+            Assert.AreEqual("Idle", root.States[0].Name);
+            Assert.IsNull(root.States[1].Name, "a state declared without Named keeps a null name");
+        }
+
+        [Test]
+        public void Named_Twice_Throws()
+        {
+            Assert.Throws<HFSMValidationException>(() =>
+                new HFSMBuilder(9130).Default(0).State(0).Named("A").Named("B"));
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase("   ")]
+        public void Named_NullOrBlank_Throws(string name)
+        {
+            Assert.Throws<HFSMValidationException>(() =>
+                new HFSMBuilder(9131).Default(0).State(0).Named(name));
+        }
+
+        [Test]
+        public void DuplicateNames_WarnByDefault_ThrowInStrict()
+        {
+            var logger = new RecordLogger();
+            new HFSMBuilder(9132, logger).Default(0)
+                .State(0).Named("Same").To(1, True, priority: 50)
+                .State(1).Named("Same").To(0, True, priority: 50)
+                .Build();
+            Assert.AreEqual(1, logger.WarningCount, "a repeated name should warn once, not throw");
+
+            Assert.Throws<HFSMValidationException>(() =>
+                new HFSMBuilder(9133).Default(0)
+                    .State(0).Named("Same").To(1, True, priority: 50)
+                    .State(1).Named("Same").To(0, True, priority: 50)
+                    .Build(strict: true));
+        }
+
+        [Test]
+        public void Names_DoNotChangeTheBuiltGraph()
+        {
+            HFSMRoot BuildGraph(int rootId, bool named)
+            {
+                var b = new HFSMBuilder(rootId).Default(0);
+                var s0 = b.State(0);
+                if (named) s0.Named("Zero");
+                s0.To(1, True, priority: 10).To(2, True, priority: 90);
+                var s1 = b.State(1, defaultChildId: 2);
+                if (named) s1.Named("One");
+                s1.To(0, True, priority: 50);
+                var s2 = b.State(2, parentId: 1);
+                if (named) s2.Named("Two");
+                return b.Build();
+            }
+
+            var plain = BuildGraph(9134, named: false);
+            var named = BuildGraph(9135, named: true);
+
+            Assert.AreEqual(plain.DefaultStateId, named.DefaultStateId);
+            Assert.AreEqual(plain.States.Length, named.States.Length);
+            for (int i = 0; i < plain.States.Length; i++)
+            {
+                HFSMStateNode a = plain.States[i], b = named.States[i];
+                Assert.AreEqual(a.StateId, b.StateId);
+                Assert.AreEqual(a.ParentId, b.ParentId);
+                Assert.AreEqual(a.DefaultChildId, b.DefaultChildId);
+                Assert.AreEqual(a.Transitions.Length, b.Transitions.Length);
+                for (int t = 0; t < a.Transitions.Length; t++)
+                {
+                    Assert.AreEqual(a.Transitions[t].TargetStateId, b.Transitions[t].TargetStateId);
+                    Assert.AreEqual(a.Transitions[t].Priority, b.Transitions[t].Priority);
+                    Assert.AreEqual(a.Transitions[t].EventId, b.Transitions[t].EventId);
+                    Assert.AreSame(a.Transitions[t].Decision, b.Transitions[t].Decision);
+                }
+            }
+            Assert.AreEqual(new[] { "Zero", "One", "Two" }, new[] { named.States[0].Name, named.States[1].Name, named.States[2].Name });
+        }
     }
 }

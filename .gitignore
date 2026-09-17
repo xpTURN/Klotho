@@ -59,6 +59,10 @@
 **/Unity2022.Tests/*.sln
 **/Unity2022.Tests/*.slnx
 
+**/Unity6000.6.Tests/*.csproj
+**/Unity6000.6.Tests/*.sln
+**/Unity6000.6.Tests/*.slnx
+
 **/export_presets.cfg
 
 Klotho.Tests.sln

@@ -52,30 +52,30 @@ namespace Brawler
 
             new HFSMBuilder(Id)
                 .Default(Idle)
-                .State(Idle)                                       // excludes the self transition
+                .State(Idle).Named(nameof(Idle))                   // excludes the self transition
                     .OnEnter(_clearDest)
                     .To(Evade,  _shouldEvade,    priority: BotPriority.Evade)
                     .To(Chase,  _isKnockback,    priority: BotPriority.Knockback)
                     .To(Attack, _inAttackRange,  priority: BotPriority.Attack)
                     .To(Skill,  _shouldUseSkill, priority: BotPriority.Skill)
                     .To(Chase,  _hasTarget,      priority: BotPriority.HasTarget)
-                .State(Chase)                                      // excludes the hasTarget transition
+                .State(Chase).Named(nameof(Chase))                 // excludes the hasTarget transition
                     .To(Evade,  _shouldEvade,    priority: BotPriority.Evade)
                     .To(Chase,  _isKnockback,    priority: BotPriority.Knockback)
                     .To(Attack, _inAttackRange,  priority: BotPriority.Attack)
                     .To(Skill,  _shouldUseSkill, priority: BotPriority.Skill)
                     .To(Idle,   _noTarget,       priority: BotPriority.NoTarget)
-                .State(Attack)                                     // excludes the self transition
+                .State(Attack).Named(nameof(Attack))               // excludes the self transition
                     .OnEnter(_clearDest)
                     .To(Evade,  _shouldEvade,    priority: BotPriority.Evade)
                     .To(Chase,  _isKnockback,    priority: BotPriority.Knockback)
                     .To(Skill,  _shouldUseSkill, priority: BotPriority.Skill)
                     .To(Chase,  _hasTarget,      priority: BotPriority.HasTarget)
                     .To(Idle,   _noTarget,       priority: BotPriority.NoTarget)
-                .State(Evade)                                      // committed: single exit transition
+                .State(Evade).Named(nameof(Evade))                 // committed: single exit transition
                     .OnEnter(_evadeEnter)
                     .To(Idle,   _evadeArrived,   priority: BotPriority.EvadeArrived)
-                .State(Skill)                                      // committed: returns to Chase once the action lock clears
+                .State(Skill).Named(nameof(Skill))                 // committed: returns to Chase once the action lock clears
                     .OnEnter(_clearDest)
                     .OnUpdate(_skillUpdate)
                     .To(Chase,  _skillDone,      priority: BotPriority.SkillDone)

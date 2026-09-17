@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
 using System.Text.RegularExpressions;
 #endif
 using NUnit.Framework;
@@ -36,7 +36,7 @@ namespace xpTURN.Klotho.Core.Tests
             public override int EventTypeId => 9_900_102;
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         private static readonly Regex s_diagnosticPattern =
             new Regex(@"\[EventPool\] Return called on non-pool instance");
 
@@ -102,7 +102,7 @@ namespace xpTURN.Klotho.Core.Tests
                 "pooled count must stay within the per-type cap");
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // ── 2. Non-pool instance Return → diagnostic + pool unchanged ──
 
         [Test]

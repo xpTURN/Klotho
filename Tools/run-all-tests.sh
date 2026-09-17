@@ -5,9 +5,9 @@
 # Runs the .NET unit tests (dotnet test), the Brawler dedicated server's own
 # self-hosted suite (`--test`), and the Unity Test Runner suites (EditMode, via
 # command line) from a single entry point, then prints a final console summary
-# report. Two Unity projects are covered: Brawler on the primary editor, and
-# Unity2022.Tests on the 2022.3 LTS line the package declares as its minimum (a
-# separate editor install).
+# report. Three Unity projects are covered: Brawler on the primary editor,
+# Unity2022.Tests on the 2022.3 LTS line the package declares as its minimum, and
+# Unity6000.6.Tests on the newest editor line (each a separate editor install).
 #
 # The server suite is not a `dotnet test` project — it is a mini-framework inside
 # the server binary (rooms, transports and threads that NUnit's host does not
@@ -20,6 +20,7 @@
 #   Tools/run-all-tests.sh --dotnet-only    # .NET tests only
 #   Tools/run-all-tests.sh --unity-only     # Unity EditMode tests only
 #   Tools/run-all-tests.sh --no-unity-2022  # skip the 2022.3 LTS project (editor not installed)
+#   Tools/run-all-tests.sh --no-unity-6000-6 # skip the 6000.6 project (editor not installed)
 #   Tools/run-all-tests.sh --no-server-test # skip the Brawler server's own --test suite
 #   Tools/run-all-tests.sh --no-build       # pass --no-build to dotnet test (every configuration
 #                                           # below must already be built — checked up front)
@@ -35,6 +36,7 @@
 # Environment variables:
 #   UNITY_PATH        Override the Unity executable path (default: Hub 6000.3.9f1)
 #   UNITY_2022_PATH   Override the 2022.3 LTS editor path (default: Hub 2022.3.62f3)
+#   UNITY_6000_6_PATH Override the 6000.6 editor path (default: Hub 6000.6.0f1)
 #
 # Exit code: non-zero if anything fails (CI friendly).
 
@@ -59,6 +61,13 @@ UNITY_2022_VERSION="2022.3.62f3"
 UNITY_2022_PROJECT="${REPO_ROOT}/Samples/Unity2022.Tests"
 UNITY_2022_PATH="${UNITY_2022_PATH:-/Applications/Unity/Hub/Editor/${UNITY_2022_VERSION}/Unity.app/Contents/MacOS/Unity}"
 
+# Unity 6000.6 compatibility project — the newest editor line, where Object.GetInstanceID() is an
+# error and Unity's own analyzers (UAC*) run. Same shape as the 2022.3 project: a copy of the smoke
+# sources under its own asmdef name, on its own editor install.
+UNITY_6000_6_VERSION="6000.6.0f1"
+UNITY_6000_6_PROJECT="${REPO_ROOT}/Samples/Unity6000.6.Tests"
+UNITY_6000_6_PATH="${UNITY_6000_6_PATH:-/Applications/Unity/Hub/Editor/${UNITY_6000_6_VERSION}/Unity.app/Contents/MacOS/Unity}"
+
 # The Brawler dedicated server's self-hosted suite. Runs through `dotnet run`, not `dotnet test`:
 # its cases spin up rooms, transports and threads, so they live in the binary rather than in a test
 # host. Same configurations as the dotnet tests below, for the same reason (dev-only guards).
@@ -75,11 +84,12 @@ DOTNET_TEST_PROJECTS=(
 RUN_DOTNET=1
 RUN_UNITY=1
 RUN_UNITY_2022=1
+RUN_UNITY_6000_6=1
 RUN_SERVER_TEST=1
 DOTNET_NO_BUILD=0
 # Configurations passed to dotnet test, in run order. Debug alone matches the
 # dotnet default, so the unqualified invocation behaves as it always has.
-# Both by default. A dev-only guard (#if DEBUG / DEVELOPMENT_BUILD / UNITY_EDITOR) compiles out of a
+# Both by default. A dev-only guard (#if DEBUG / UNITY_EDITOR) compiles out of a
 # Release build, so a Debug-only default silently skips every test that covers one — which is exactly
 # how an engine warning added under such a guard shipped "passing" while Release failed on it.
 # Several guards already exist (Filter loop-mutation watch, rebake pool overlap, EC diagnostics), so the
@@ -93,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --dotnet-only)   RUN_UNITY=0 ;;
     --unity-only)    RUN_DOTNET=0 ;;
     --no-unity-2022) RUN_UNITY_2022=0 ;;
+    --no-unity-6000-6) RUN_UNITY_6000_6=0 ;;
     --no-server-test) RUN_SERVER_TEST=0 ;;
     --no-build)      DOTNET_NO_BUILD=1 ;;
     --debug)         DOTNET_CONFIGS=("Debug") ;;
@@ -261,7 +272,41 @@ run_unity_tests() {
     echo "${C_YEL}▶ Unity2022.Tests EditMode — skipped (--no-unity-2022)${C_RST}"
   fi
 
+  if [[ "${RUN_UNITY_6000_6}" -eq 1 ]]; then
+    run_unity_editmode "Unity6000.6.Tests EditMode (${UNITY_6000_6_VERSION})" \
+      "${UNITY_6000_6_PATH}" "${UNITY_6000_6_PROJECT}" "6000_6-editmode" "UNITY_6000_6_PATH" || overall=1
+  else
+    echo "${C_YEL}▶ Unity6000.6.Tests EditMode — skipped (--no-unity-6000-6)${C_RST}"
+  fi
+
+  report_smoke_copy_drift
   return ${overall}
+}
+
+# The 2022.3 and 6000.6 projects carry copies of the same smoke sources. Only the namespace / asmdef
+# name (Unity2022 ↔ Unity6000_6), comment wording and the editor-version assertion are meant to
+# differ, and a fix that lands in one copy but not the other is invisible whenever either editor is
+# skipped above. So the copies are compared here (code lines only) regardless of which editors ran.
+# Informational: it never fails the run.
+report_smoke_copy_drift() {
+  local a="${UNITY_2022_PROJECT}/Assets/Tests" b="${UNITY_6000_6_PROJECT}/Assets/Tests" f n drift=0
+  # Dropped before comparing: comment lines, and the editor-version assertion (its name, the
+  # StartsWith and its message) — that one differs by design, so a drift there is the one this
+  # check cannot see.
+  normalize() {
+    sed -e 's/Unity2022/Unity6000_6/g' -e '/^[[:space:]]*\/\//d' \
+        -e '/EditorVersion_Is/d' -e '/unityVersion\.StartsWith/d' -e '/must run on the/d' "$1"
+  }
+  for f in "${a}"/*.cs; do
+    n="$(basename "${f}")"
+    if [[ ! -f "${b}/${n}" ]]; then
+      echo "${C_YEL}  smoke copy missing in Unity6000.6.Tests: ${n}${C_RST}"; drift=1
+    elif ! diff -q <(normalize "${f}") <(normalize "${b}/${n}") >/dev/null; then
+      echo "${C_YEL}  smoke copies differ (2022 ↔ 6000.6): ${n}${C_RST}"; drift=1
+    fi
+  done
+  [[ ${drift} -eq 0 ]] && echo "  smoke copies in sync (Unity2022.Tests ↔ Unity6000.6.Tests)"
+  return 0
 }
 
 # ── Final summary report (parses TRX + Unity NUnit XML) ──────────────────────
@@ -290,6 +335,7 @@ print_summary() {
   if [[ "${RUN_UNITY}" -eq 1 ]]; then
     expected+=("Unity: brawler-editmode")
     [[ "${RUN_UNITY_2022}" -eq 1 ]] && expected+=("Unity: 2022lts-editmode")
+    [[ "${RUN_UNITY_6000_6}" -eq 1 ]] && expected+=("Unity: 6000_6-editmode")
   fi
 
   EXPECTED_SUITES="$(printf '%s\n' ${expected[@]+"${expected[@]}"})" \

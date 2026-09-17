@@ -77,7 +77,7 @@ namespace xpTURN.Klotho.ECS.Tests
         public void GuardStruct_CarriesFieldsOnlyInDevBuilds()
         {
             int size = Unsafe.SizeOf<FilterMutationGuard>();
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
             // Fields present: watch + prevCount + entityIndex + started.
             Assert.Greater(size, 1,
                 "The guard has no fields in a build that defines the dev symbols — the #if gate is wrong.");
@@ -89,7 +89,7 @@ namespace xpTURN.Klotho.ECS.Tests
 #endif
         }
 
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // (Runtime #if gate) — Check()'s call sites are compiled away without these symbols, so the
         // assertions below would all fail for a reason that has nothing to do with the guard.
 

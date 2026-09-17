@@ -14,7 +14,9 @@ namespace xpTURN.Klotho.Core
             lock (_lock)
             {
                 if (_done) return;
+#pragma warning disable UAC0005 // Unity's Mono editor returns the same list as CurrentAssemblies.GetLoadedAssemblies(), which this engine-free assembly cannot call. Revisit on a CoreCLR editor.
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+#pragma warning restore UAC0005
                 {
                     try
                     {

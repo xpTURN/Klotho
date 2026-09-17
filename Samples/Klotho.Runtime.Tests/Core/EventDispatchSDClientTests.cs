@@ -920,7 +920,7 @@ namespace xpTURN.Klotho.Core.Tests
         // the gap tick and asserts the pool's outstanding count is unchanged (delta 0). Full-path
         // gap-fill triggering (restoreTick < firstExecutionTick) is exercised by integration; this
         // unit test pins the helper's pool hygiene directly.
-#if DEBUG || DEVELOPMENT_BUILD || UNITY_EDITOR
+#if DEBUG || UNITY_EDITOR
         // EventPool outstanding-count diagnostics exist only in DEBUG-family builds
         // (Runtime #if gate) — this leak test is meaningless without them.
         [Test]

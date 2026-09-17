@@ -37,6 +37,11 @@ namespace xpTURN.Klotho.ECS.FSM
         public int ParentId;
         public int DefaultChildId;
 
+        /// <summary>Display name declared with <see cref="HFSMBuilder.StateBuilder.Named"/>; null when none was.
+        /// Display only — tools and logs read it, the runtime never does. It is not part of any snapshot or hash,
+        /// so logic must not branch on it: renaming a state must never change behaviour.</summary>
+        public string Name;
+
         public AIAction[] OnEnterActions;
         public AIAction[] OnUpdateActions;
         public AIAction[] OnExitActions;
