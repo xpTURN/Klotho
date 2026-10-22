@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.14.3] - 2026-10-23
+
+### Fixed — a null or uninitialized collection field no longer breaks the generated codec
+
+- **What was wrong.** In `[KlothoSerializable]` types and data assets, a collection field (`T[]`,
+  `List<T>`, `Dictionary<K,V>`) that was null made the generated codec throw `NullReferenceException` —
+  in `GetSerializedSize` for most element types, in `Serialize` for `string` elements. A `List` or
+  `Dictionary` field without an initializer threw on read even when the sender had filled it, because the
+  generated `Deserialize` starts by clearing it. In server-driven mode the throw came after the command was
+  already in the local input buffer, so the client predicted an input the server never received.
+- **What changed.** A null collection is now written as empty and reads back as an empty instance — the
+  same direction as `string`. On read, a null `List`/`Dictionary` is created at the read count and an
+  existing one is cleared and reused, so a pooled command still allocates only on its first read;
+  `readonly` fields and get-only properties are refilled in place. A zero-length array reads back as
+  `Array.Empty<T>()`. `Serialize` allocates nothing, null or filled. The rules for all three kinds —
+  `string`, `byte[]` and collections — are now in
+  [Serialization.md §6](Docs/Serialization.md#6-supported-field-types).
+- **Compatibility.** The wire format does not change: count 0 was already how an empty collection was
+  encoded, and filled collections serialize byte for byte as before (pinned for a command, a data asset and
+  three engine messages). The generated code calls no new runtime API, so a newer analyzer over an older
+  `xpTURN.Klotho.Runtime.dll` still compiles. What you cannot do any more is tell null from empty on the
+  receiving side; if a command needs "absent", give it a `bool`.
+
+### Added — KLSG008: a collection field without an initializer
+
+- **What it says.** A collection field with no declaration initializer (`= new List<int>()`,
+  `= System.Array.Empty<int>()`) gets a warning. The codec turns its null into an empty collection, so a
+  null the game meant as "absent" is lost, and a server-driven client predicts with a null that the server
+  and its own verified resimulation never see. Data assets are included: one registered straight from JSON
+  (`LoadFromJsonAndRegister`) never passes through the codec, so a field the JSON leaves out stays null.
+  Not reported for a type that writes its own `SerializeData`/`GetSerializedSize`, nor for `string` and
+  `byte[]` fields.
+- **If your build treats warnings as errors**, an existing collection field without an initializer now
+  fails it. Add the initializer, or `#pragma warning disable KLSG008`. All 18 collection fields in this
+  repository already had one.
+- **The warning does not withhold the codec.** The serializable analyzer used to generate a type only when
+  it had no diagnostics at all; it now stops only on errors. It reported nothing but errors before, so no
+  existing type is affected.
+
+### Tests
+
+- **The shipped analyzer DLL is now under test, not just the generator source.** New dotnet tests declare
+  their own commands and data assets, so their codecs come from
+  `com.xpturn.klotho/Plugins/Analyzers/KlothoGenerator.dll`; a DLL that was not rebuilt after a generator
+  change fails them. They cover the null and uninitialized cases above, the wire goldens, and the
+  `string[]` / `List<string>` size term the generator gained in 0.5.0 — prompted by
+  [xhocquet/Klotho#3](https://github.com/xhocquet/Klotho/issues/3), where a project's copy of the DLL
+  predated it.
+- **Verified.** Of the tests for the null handling, 8 of 14 runtime tests and 3 of 7 generator tests fail
+  on the previous analyzer and pass on this one. The rest pin what must hold either way: the five wire
+  goldens were taken from the previous analyzer; the round trip of `readonly` and get-only members, like the
+  codec surviving the warning, was checked to fail when the rule it guards is undone; and four generator
+  cases cover where KLSG008 must stay silent. The dotnet suites pass in Debug and Release with no failures,
+  the EditMode suites pass on Unity 2022.3.62f3, 6000.3.9f1 and 6000.6.0f1 with the package recompiled and
+  no KLSG008, and the Godot samples build against the rebuilt addon.
+
 ## [0.14.2] - 2026-10-22
 
 ### Fixed — frames handed to view code can read data assets

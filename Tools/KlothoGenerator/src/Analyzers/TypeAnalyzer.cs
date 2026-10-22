@@ -88,6 +88,7 @@ namespace xpTURN.Klotho.Generator.Analyzers
                 };
 
                 ClassifyFieldType(fieldInfo, fieldType);
+                ReadDeclarationTraits(member, fieldInfo, ct);
                 info.Fields.Add(fieldInfo);
             }
 
@@ -95,8 +96,11 @@ namespace xpTURN.Klotho.Generator.Analyzers
 
             // --- Validation ---
             ValidateFields(info, symbol, result.Diagnostics);
+            if (!info.HasManualSerialization)
+                ReportCollectionsWithoutInitializer(info.Fields, symbol, result.Diagnostics);
 
-            result.TypeInfo = result.Diagnostics.Count == 0 ? info : null;
+            // Only errors withhold the codec — a warning (KLSG008) must not cost the type its GetSerializedSize.
+            result.TypeInfo = result.Diagnostics.All(d => d.Severity != DiagnosticSeverity.Error) ? info : null;
             return result;
         }
 
@@ -167,6 +171,34 @@ namespace xpTURN.Klotho.Generator.Analyzers
                             field.ValueTypeName));
                     }
                 }
+            }
+        }
+
+        internal static void ReadDeclarationTraits(ISymbol member, SerializableFieldInfo field, CancellationToken ct)
+        {
+            if (member is IFieldSymbol f)
+            {
+                field.IsAssignable = !f.IsReadOnly && !f.IsConst;
+                field.HasInitializer = f.DeclaringSyntaxReferences.Any(r =>
+                    r.GetSyntax(ct) is VariableDeclaratorSyntax v && v.Initializer != null);
+            }
+            else if (member is IPropertySymbol p)
+            {
+                field.IsAssignable = p.SetMethod != null && !p.SetMethod.IsInitOnly;
+                field.HasInitializer = p.DeclaringSyntaxReferences.Any(r =>
+                    r.GetSyntax(ct) is PropertyDeclarationSyntax d && d.Initializer != null);
+            }
+        }
+
+        // KLSG008 — shared with DataAssetAnalyzer, like the field-type diagnostics.
+        internal static void ReportCollectionsWithoutInitializer(List<SerializableFieldInfo> fields, INamedTypeSymbol symbol, List<Diagnostic> diagnostics)
+        {
+            foreach (var field in fields)
+            {
+                if (!field.IsCollection || field.HasInitializer) continue;
+                diagnostics.Add(Diagnostic.Create(
+                    DiagnosticDescriptors.CollectionWithoutInitializer,
+                    GetMemberLocation(symbol, field.Name), field.Name));
             }
         }
 

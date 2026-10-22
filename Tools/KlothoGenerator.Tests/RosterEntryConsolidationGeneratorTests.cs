@@ -134,7 +134,7 @@ namespace Demo
             Assert.That(o.HostSource, Does.Contain("var __e_Roster = default(Demo.RosterEntry);"));
             Assert.That(o.HostSource, Does.Contain("__e_Roster.Deserialize(ref reader);"));
             Assert.That(o.HostSource, Does.Contain("this.Roster.Add(__e_Roster);"));
-            Assert.That(o.HostSource, Does.Contain("this.Roster.Count * default(Demo.RosterEntry).GetSerializedSize()"));
+            Assert.That(o.HostSource, Does.Contain("(this.Roster?.Count ?? 0) * default(Demo.RosterEntry).GetSerializedSize()"));
         }
     }
 }

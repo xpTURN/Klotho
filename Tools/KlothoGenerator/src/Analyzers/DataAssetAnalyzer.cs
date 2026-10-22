@@ -194,10 +194,12 @@ namespace xpTURN.Klotho.Generator.Analyzers
                 };
 
                 ClassifyFieldType(fieldInfo, fieldType);
+                TypeAnalyzer.ReadDeclarationTraits(member, fieldInfo, ct);
                 info.Fields.Add(fieldInfo);
             }
 
             info.Fields.Sort((a, b) => a.Order.CompareTo(b.Order));
+            TypeAnalyzer.ReportCollectionsWithoutInitializer(info.Fields, symbol, diagnostics);
 
             // Validate duplicate Order
             var orderGroups = info.Fields.GroupBy(f => f.Order).Where(g => g.Count() > 1);

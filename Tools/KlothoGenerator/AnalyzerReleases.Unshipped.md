@@ -30,3 +30,4 @@ KLOTHO_DET004 | KlothoGenerator.Determinism | Warning | Wall-clock time in deter
 KLSG_SS001 | KlothoGenerator.SerializableStruct | Error | [KlothoSerializableStruct] missing partial keyword
 KLSG_SS002 | KlothoGenerator.SerializableStruct | Error | [KlothoSerializableStruct] not unmanaged
 KLSG_SS003 | KlothoGenerator.SerializableStruct | Error | [KlothoSerializableStruct] missing [StructLayout(Sequential, Pack=4)]
+KLSG008 | KlothoGenerator | Warning | Collection field without initializer
