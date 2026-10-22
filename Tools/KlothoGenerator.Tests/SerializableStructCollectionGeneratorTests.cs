@@ -129,7 +129,7 @@ namespace Demo
         public void ArrayOfNestedStruct_DeserializeAddressable()
         {
             var o = Run(Host("        [KlothoOrder] public Item[] Items;"), "MyCommand");
-            Assert.That(o.CommandSource, Does.Contain("this.Items = new Demo.Item[__count_Items];"));
+            Assert.That(o.CommandSource, Does.Contain("this.Items = __count_Items == 0 ? System.Array.Empty<Demo.Item>() : new Demo.Item[__count_Items];"));
             Assert.That(o.CommandSource, Does.Contain("this.Items[__i].Deserialize(ref reader);"));
         }
 
@@ -139,8 +139,8 @@ namespace Demo
             var o = Run(Host(
                 "        [KlothoOrder] public List<Item> Items = new List<Item>();\n" +
                 "        [KlothoOrder] public Item[] Arr;"), "MyCommand");
-            Assert.That(o.CommandSource, Does.Contain("this.Items.Count * default(Demo.Item).GetSerializedSize()"));
-            Assert.That(o.CommandSource, Does.Contain("this.Arr.Length * default(Demo.Item).GetSerializedSize()"));
+            Assert.That(o.CommandSource, Does.Contain("(this.Items?.Count ?? 0) * default(Demo.Item).GetSerializedSize()"));
+            Assert.That(o.CommandSource, Does.Contain("(this.Arr?.Length ?? 0) * default(Demo.Item).GetSerializedSize()"));
         }
 
         [Test]
@@ -149,7 +149,7 @@ namespace Demo
             var o = Run(Host("        [KlothoOrder] public List<int> Numbers = new List<int>();"), "MyCommand");
             // existing primitive-element path: WriteInt32 loop + Count*4 size, no nested delegation
             Assert.That(o.CommandSource, Does.Contain("writer.WriteInt32(this.Numbers[__i]);"));
-            Assert.That(o.CommandSource, Does.Contain("this.Numbers.Count * 4"));
+            Assert.That(o.CommandSource, Does.Contain("(this.Numbers?.Count ?? 0) * 4"));
             Assert.That(o.CommandSource, Does.Not.Contain("default(int).GetSerializedSize()"));
         }
     }

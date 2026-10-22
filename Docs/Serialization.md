@@ -174,6 +174,18 @@ The generator maps these directly (fixed size in bytes shown where applicable):
 
 **Reference categories only** (`[KlothoSerializable]` Entity/Command/Message/Event, *not* components) additionally support **collections** of supported element types: `T[]`, `List<T>`, and `Dictionary<TKey,TValue>`.
 
+**Null and empty.** The codec never carries a null collection: a null one is written as empty and reads back as an empty instance.
+
+| Field | A null value is written as | Reads back as |
+| ---- | ---- | ---- |
+| `string` | `""` | `""` |
+| `byte[]` | empty | `null` (an empty array also reads back as `null`) |
+| `T[]` / `List<T>` / `Dictionary<TKey,TValue>` | empty (count 0) | an empty instance — a zero-length array is `Array.Empty<T>()` |
+
+So null is not a value you can send. If a command needs "absent" as distinct from "empty", give it a `bool`. Initialize collection fields where you declare them (`= new List<int>()`, `= System.Array.Empty<int>()`); the generator warns (**KLSG008**) when one has no initializer. The warning matters most for commands in server-driven mode: the client predicts with the object it submitted, while the server — and the client's own resimulation once the tick is verified — runs the decoded copy, so a null is seen as null only during prediction.
+
+On read, a `List`/`Dictionary` field that is null is created at the read count; an existing one is cleared and refilled, so a pooled command allocates only on its first read. A `readonly` field or get-only property is always refilled in place.
+
 > **Components are different.** A `[KlothoComponent]` struct must be **`unmanaged`** — value types only, no `string`/array/`List`/`Dictionary`/managed references. For text in a component use `FixedString32`/`FixedString64` (the fixed-width string entry above — first-class mapped types that serialize as a constant 32/64 bytes); for inline arrays use a fixed-size value struct. This is why the component and `[KlothoSerializable]` planes have different type rules.
 
 Additionally, a **`[KlothoSerializableStruct]` value struct** ([§3.1](#31-klothoserializablestruct--reusable-inline-field-bundles)) is supported as a **direct field** in all three host categories — it serializes inline via its own generated codec. Because it must itself be `unmanaged`, it is also valid inside a `[KlothoComponent]`. In the reference categories it is **also** supported as a **`List<T>` / `T[]` element** (each element serialized inline via the struct's codec; serialized size is `count * <const>`). It is **not** supported as a `Dictionary` key/value, nor as a `struct`-typed property.
@@ -210,6 +222,7 @@ The generator reports compile-time errors/warnings so a malformed type fails the
 | `KLSG004` | Error | `[KlothoSerializable]` base is not `EntityBase`/`CommandBase`/`NetworkMessageBase` (or `SimulationEvent`). |
 | `KLSG005` / `KLSG006` | Error | Unsupported collection element / dictionary key-value type. |
 | `KLSG007` | Error | Duplicate wire `TYPE_ID` within a category. |
+| `KLSG008` | Warning | Collection field (`T[]`/`List<T>`/`Dictionary<K,V>`) has no initializer — a null is written as empty and reads back empty ([§6](#6-supported-field-types)). Not reported for a type with manual serialization ([§10](#10-manual-serialization-escape-hatch)). Also reported for data assets. |
 | `KLSG_ECS001` | Error | Duplicate `[KlothoComponent]` type id. |
 | `KLSG_ECS002` | Error | `[KlothoComponent]` struct doesn't implement `IComponent`. |
 | `KLSG_ECS003` | Error | `[KlothoComponent]` struct is not `unmanaged`. |
@@ -271,7 +284,7 @@ When it is on, a file whose content has not changed is left alone (no rewritten 
 
 ## 10. Manual Serialization Escape Hatch
 
-If a type already declares its own `Serialize`/`Deserialize`/`GetSerializedSize` (the generator detects this as "manual serialization"), the generator won't overwrite them — you keep full control for an exotic encoding. Use this sparingly: hand-written codecs must keep `GetSerializedSize()` exact (release builds skip the bounds check) and must stay byte-identical across peers, which is exactly the discipline the generator exists to enforce for you.
+If a type already declares its own `Serialize`/`Deserialize`/`GetSerializedSize` (the generator detects this as "manual serialization"), the generator won't overwrite them — you keep full control for an exotic encoding. Use this sparingly: hand-written codecs must keep `GetSerializedSize()` exact (release builds skip the bounds check) and must stay byte-identical across peers, which is exactly the discipline the generator exists to enforce for you. The null rule of [§6](#6-supported-field-types) is yours too: a type with manual serialization gets no **KLSG008**, and what a null collection becomes on the wire is up to your codec.
 
 ---
 

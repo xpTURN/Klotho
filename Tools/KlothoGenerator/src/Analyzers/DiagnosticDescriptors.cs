@@ -60,6 +60,14 @@ namespace xpTURN.Klotho.Generator.Analyzers
             DiagnosticSeverity.Error,
             isEnabledByDefault: true);
 
+        public static readonly DiagnosticDescriptor CollectionWithoutInitializer = new DiagnosticDescriptor(
+            "KLSG008",
+            "Collection field without initializer",
+            "Collection field '{0}' has no initializer; a null value is written as empty and reads back as an empty collection",
+            "KlothoGenerator",
+            DiagnosticSeverity.Warning,
+            isEnabledByDefault: true);
+
         // --- ECS Component diagnostics ---
 
         public static readonly DiagnosticDescriptor DuplicateComponentTypeId = new DiagnosticDescriptor(

@@ -133,7 +133,7 @@ A common convention (from the Brawler sample) is to encode category in the leadi
 
 ## 6. Supported Field Types
 
-Use only these types for `[KlothoOrder]` fields. Each may also be used as an **array** (`T[]`), and `Dictionary<K,V>` is supported when both `K` and `V` are mapped types.
+Use only these types for `[KlothoOrder]` fields. Each may also be used as an **array** (`T[]`) or a **`List<T>`**, and `Dictionary<K,V>` is supported when both `K` and `V` are mapped types. A null collection is written as empty and reads back as an empty one — initialize collection fields where you declare them (`= System.Array.Empty<int>()`, `= new List<int>()`). An asset registered straight from JSON (`LoadFromJsonAndRegister`) never goes through the binary codec, so an uninitialized field the JSON leaves out stays null there. See [Serialization.md §6](Serialization.md#6-supported-field-types).
 
 | Category | Types |
 |---|---|
@@ -291,7 +291,7 @@ The generator/analyzer surfaces these at compile time (category `KlothoGenerator
 | `KLSG_DA005` | Duplicate DataAsset TypeId | Two classes share a `[KlothoDataAsset(N)]` TypeId — assign distinct ids. |
 | `KLSG_DA006` | Mixed user/generated members | You hand-wrote some generated members but not others — author **both or neither**. |
 
-Plus field-level diagnostics: duplicate `[KlothoOrder]`, unsupported field type, unsupported collection element, unsupported dictionary key/value.
+Plus field-level diagnostics: duplicate `[KlothoOrder]`, unsupported field type, unsupported collection element, unsupported dictionary key/value, and **KLSG008** (warning) — a collection field with no initializer.
 
 ---
 

@@ -94,7 +94,7 @@ namespace Demo
             var o = Run("        [KlothoOrder] public List<FixedString32> Names = new List<FixedString32>();");
             Assert.That(o.Diagnostics.Select(d => d.Id), Does.Not.Contain("KLSG005"));
             Assert.That(o.CommandSource, Does.Contain("writer.WriteFixedString32(this.Names[__i]);"));
-            Assert.That(o.CommandSource, Does.Contain("this.Names.Count * 32"));
+            Assert.That(o.CommandSource, Does.Contain("(this.Names?.Count ?? 0) * 32"));
         }
 
         [Test]
@@ -102,7 +102,7 @@ namespace Demo
         {
             var o = Run("        [KlothoOrder] public FixedString32[] Names;");
             Assert.That(o.Diagnostics.Select(d => d.Id), Does.Not.Contain("KLSG005"));
-            Assert.That(o.CommandSource, Does.Contain("this.Names.Length * 32"));
+            Assert.That(o.CommandSource, Does.Contain("(this.Names?.Length ?? 0) * 32"));
         }
 
         [Test]

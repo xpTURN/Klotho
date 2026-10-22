@@ -58,5 +58,15 @@ namespace xpTURN.Klotho.Generator.Model
         /// serialize each element by delegating to its generated codec. Orthogonal to
         /// <see cref="IsNestedSerializable"/> (which is for a direct nested struct field).</summary>
         public bool ElementIsNestedSerializable { get; set; }
+
+        /// <summary>The generated Deserialize may assign the member — false for a readonly field, a get-only
+        /// property and an init-only setter, which are cleared and refilled in place instead.</summary>
+        public bool IsAssignable { get; set; } = true;
+
+        /// <summary>The declaration carries an initializer (<c>= new …</c>) — KLSG008 is reported for a
+        /// collection without one.</summary>
+        public bool HasInitializer { get; set; }
+
+        public bool IsCollection => ElementTypeName != null || KeyTypeName != null;
     }
 }
