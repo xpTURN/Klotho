@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.14.2] - 2026-10-22
+
+### Fixed — frames handed to view code can read data assets
+
+- **What was wrong.** `VerifiedFrame`, `PredictedPreviousFrame` and `TryGetFrameAtTick` hand out
+  ring-buffer slots, and `PreviousUpdatePredictedFrame` a copy taken at the start of the previous
+  update — not the live frame. Those frames are created without an asset registry and filled by
+  `Frame.CopyFrom`, which copied the state but not the registry. On them `GetAsset` threw
+  `KeyNotFoundException` (`DataAsset not found`) and `TryGetAsset` returned `false`, while the same call
+  on `PredictedFrame` succeeded. A view factory or `OnActivate` that looked up, say, a character's stats
+  on the verified frame failed. Klotho's own view code and the samples read assets only from the live
+  frame, which is why nothing caught it.
+- **What changed.** `Frame.CopyFrom` now carries the registry along with the state, so every copy
+  resolves exactly the assets the live frame does. The registry is shared, not duplicated: the copy
+  still allocates nothing, and the registry is not part of the state hash or of any snapshot, so
+  determinism and the wire format are unchanged. A rollback hands the live frame back the registry it
+  was saved with, which is the one it already had. Prototypes are still not copied — snapshot frames
+  are for reading, and `CreateEntity(prototypeId)` belongs on the live frame.
+- **Compatibility.** One behaviour change, for code that calls `Frame.CopyFrom` itself: the target now
+  takes the source's registry. Copying *into* the live frame from a frame you built without a registry
+  would now leave the live frame with that empty one, so copy into it only from a frame that was
+  filled from it — as the engine's rollback does — or pass the registry when you construct the frame.
+- **Attribution.** The fix was contributed as
+  [`xhocquet/Klotho@0411a61b`](https://github.com/xhocquet/Klotho/commit/0411a61b3de1e08adac2f41b55f125cb80bfa754)
+  (both repositories are Apache-2.0). The corrected source comment and the regression tests are ours.
+- **Verified.** The new `FrameAssetRegistryCopyTests` fail on 0.14.1 (two of three; the third pins the
+  rollback case above) and pass with the fix. The dotnet runtime suite passes in Debug and Release with
+  no failures, and the Godot samples build against the rebuilt addon.
+
 ## [0.14.1] - 2026-09-17
 
 ### Added — HFSM states can carry display names, and the HFSM window no longer depends on the Brawler sample

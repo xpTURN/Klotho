@@ -633,7 +633,7 @@ namespace xpTURN.Klotho.ECS
             Buffer.BlockCopy(source._heap, 0, _heap, 0, _heapSize);   // single memcpy
             // Not copied: EventRaiser / OnEntityCreated / OnEntityDestroyed (delegates, not shared across ring slots)
             //             SignalSink / SignalMasks (only the executing frame has them — see ISignal.cs)
-            //             Prototypes (session-wide shared readonly reference)
+            //             Prototypes (per-frame instance; only the live frame's is populated, and copies never instantiate prototypes)
         }
 
         public void Clear()
