@@ -650,6 +650,8 @@ namespace xpTURN.Klotho.Replay
 
             int tickCount = reader.ReadInt32();
             int bufferSize = reader.ReadInt32();
+            if (bufferSize < 0 || bufferSize > reader.Remaining)
+                throw new InvalidDataException($"Replay stream size {bufferSize} exceeds the {reader.Remaining} remaining bytes");
 
             if (bufferSize > _buffer.Length)
                 _buffer = new byte[bufferSize];

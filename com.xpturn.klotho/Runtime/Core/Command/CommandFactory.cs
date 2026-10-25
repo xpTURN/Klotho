@@ -80,7 +80,16 @@ namespace xpTURN.Klotho.Core
             }
 
             ICommand command = CreateCommand(commandType);
-            command.Deserialize(ref reader);
+            try
+            {
+                command.Deserialize(ref reader);
+            }
+            catch
+            {
+                // A malformed payload leaves a half-filled pooled instance — hand it back before rethrowing.
+                CommandPool.Return(command);
+                throw;
+            }
             return command;
         }
 
@@ -163,6 +172,29 @@ namespace xpTURN.Klotho.Core
             var empty = (EmptyCommand)cmd;
             empty.PlayerId = playerId;
             empty.Tick = tick;
+        }
+    }
+
+    public static class CommandFactoryExtensions
+    {
+        /// <summary>
+        /// Decodes a raw command without throwing. False: the payload is malformed (the decode threw).
+        /// True with a null command: the command type is unknown (DeserializeCommandRaw's null).
+        /// </summary>
+        public static bool TryDeserializeCommandRaw(this ICommandFactory factory, ref SpanReader reader, out ICommand command)
+        {
+            // Outside the try: a missing factory is a setup bug, not a malformed peer payload.
+            if (factory == null) throw new ArgumentNullException(nameof(factory));
+            try
+            {
+                command = factory.DeserializeCommandRaw(ref reader);
+                return true;
+            }
+            catch (Exception)
+            {
+                command = null;
+                return false;
+            }
         }
     }
 }

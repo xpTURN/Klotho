@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.15.0] - 2026-10-25
+
+### Security — a malformed or hostile payload can no longer make a peer allocate, read stale bytes, or throw past the serializer
+
+- **What was wrong.** Lengths and counts read from the wire were trusted.
+  - A `ClientInput`, `ReliableCommandSubmit`, `Command` or `VerifiedState` message whose length field
+    claimed more bytes than were sent was accepted, and its command bytes were read from whatever the pooled
+    receive buffer still held — an earlier packet's bytes, possibly another peer's. A negative length was
+    accepted too and threw later, in the handler.
+  - A collection count was allocated before anything was read: a 9-byte `ClientInputBundle` made the
+    server allocate 762 MiB, a 13-byte `GameStart` 190 MiB. That held before authentication as well — the
+    serializer picks the type from the first byte whatever the sender's role, and `RoomRouter` decoded any
+    type before checking for a handshake. A replay did the same with its stream size (a 213-byte file,
+    953 MiB) on the server-side `--verify` path, which exists to read replays clients submit.
+  - A command that failed to decode inside a well-formed message threw out of the handler: the server kept
+    the sender connected and lost the pooled command, and a peer-to-peer host relayed it to every guest
+    first, each of which threw in turn.
+- **What changed.**
+  - `SpanReader.Skip` refuses to move past the end. The four zero-copy messages skip their command bytes
+    through it, so a short message is malformed and `MessageSerializer.Deserialize` returns null — the
+    server or host disconnects the sender, as for any malformed message.
+  - A generated `Deserialize` checks every collection count against the bytes left before it allocates:
+    each element writes at least a known number of bytes (its size, or the 4-byte length prefix of a
+    `string`), so a count that cannot fit throws `InvalidDataException`. `ClientInputBundle` and the replay
+    stream size are checked the same way by hand.
+  - Before authentication only first-message types are deserialized: `RoomHandshake` at the router,
+    `PlayerJoin` / `ReconnectRequest` / `SpectatorJoin` at the server and the peer-to-peer host.
+  - A command that fails to decode goes back to the pool and its sender is disconnected by the authority;
+    a guest logs and drops it. The peer-to-peer host decodes before it relays, so a malformed command is no
+    longer relayed. An unknown command type is handled as before.
+  - The zero-copy messages read the right bytes when the message does not start at index 0 of its buffer
+    (latent — no caller did that with these messages).
+  - What a hand-written codec that reads another machine's bytes has to do — check a length or count
+    against the bytes left before allocating for it, and assign every member on every read — is in
+    [Serialization.md §10](Docs/Serialization.md#10-manual-serialization-escape-hatch).
+- **Compatibility.** The wire format does not change, and bytes a writer produced always pass: every
+  registered message round-trips empty and filled. The generated code calls no new runtime API, so a newer
+  analyzer over an older `xpTURN.Klotho.Runtime.dll` still compiles. What behaves differently: a negative
+  collection count, which a `List` field used to read as empty, is now refused, and a hand-written codec
+  whose `Skip` runs past the end now throws instead of leaving the reader past it.
+
+### Added
+
+- **`CommandFactoryExtensions.TryDeserializeCommandRaw`** — decodes a raw command without throwing. False
+  when the payload is malformed, true with a null command when its type is unknown. `ICommandFactory` is
+  unchanged.
+- **`SpanReader.SourceOffset`** — the offset the byte-array constructor was given, for indexing into
+  `SourceBuffer`.
+
+### Tests
+
+- **Hostile payloads are under test.** New dotnet tests send each shape above — a length past the end, a
+  negative length, a count bomb on every collection field of the engine messages (a reflection test keeps
+  that list complete), a truncated command on every authority path, a non-handshake first message, a
+  replay with a forged stream size — and check that it is refused without allocating, that the sender is
+  disconnected, and that the decoded command goes back to the pool.
+- **Verified.** On the previous runtime and analyzer, 50 of the 56 new tests fail; the other six pin what
+  must hold either way — no false reject across every registered message, the normal path allocates
+  nothing, the count-bomb list is complete, and the peer-to-peer host's early exits return their command
+  — and each was checked to fail when the rule it guards is undone. Compiling one of the checks out of
+  release builds was caught only by the Release run, so the dotnet suites ran in both: they pass in Debug
+  and Release with no failures, the EditMode suites pass on Unity 2022.3.62f3, 6000.3.9f1 and 6000.6.0f1 with the package
+  recompiled, and the Godot samples build against the rebuilt addon.
+
 ## [0.14.3] - 2026-10-23
 
 ### Fixed — a null or uninitialized collection field no longer breaks the generated codec

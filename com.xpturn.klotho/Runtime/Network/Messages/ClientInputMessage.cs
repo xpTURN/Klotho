@@ -61,7 +61,7 @@ namespace xpTURN.Klotho.Network
             _sourceBuffer = reader.SourceBuffer;
             if (_sourceBuffer != null)
             {
-                _commandDataOffset = reader.Position;
+                _commandDataOffset = reader.SourceOffset + reader.Position;
                 CommandDataLength = len;
                 CommandData = null;
                 reader.Skip(len);

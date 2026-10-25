@@ -67,7 +67,7 @@ namespace xpTURN.Klotho.Network
             _sourceBuffer = reader.SourceBuffer;
             if (_sourceBuffer != null)
             {
-                _confirmedInputsOffset = reader.Position;
+                _confirmedInputsOffset = reader.SourceOffset + reader.Position;
                 ConfirmedInputsDataLength = len;
                 ConfirmedInputsData = null;
                 reader.Skip(len);

@@ -959,6 +959,15 @@ namespace xpTURN.Klotho.Network
 
         // ── Message handling ─────────────────────────────────────
 
+        private static bool IsPreAuthFirstMessageType(byte[] data, int length)
+        {
+            if (length < 1) return false;
+            var type = (NetworkMessageType)data[0];
+            return type == NetworkMessageType.PlayerJoin
+                || type == NetworkMessageType.ReconnectRequest
+                || type == NetworkMessageType.SpectatorJoin;
+        }
+
         private void HandleDataReceived(int peerId, byte[] data, int length)
         {
             if (_pendingPeers.ContainsKey(peerId))
@@ -972,7 +981,9 @@ namespace xpTURN.Klotho.Network
                     DisconnectWithReason(peerId, JoinFailReason.IdentityInvalid.ToWireCode());
                     return;
                 }
-                var firstMsg = _messageSerializer.Deserialize(data, length);
+                // Pre-auth: decode only the three first-message types; anything else takes the
+                // malformed/unknown branch below without being deserialized.
+                var firstMsg = IsPreAuthFirstMessageType(data, length) ? _messageSerializer.Deserialize(data, length) : null;
                 _pendingPeers.Remove(peerId);
                 if (firstMsg is PlayerJoinMessage playerJoin)
                 {
@@ -1338,6 +1349,14 @@ namespace xpTURN.Klotho.Network
             }
         }
 
+        // A command that fails to decode inside a well-formed message gets the malformed-message policy:
+        // the sender is disconnected.
+        private void DisconnectForMalformedCommand(int peerId, string source)
+        {
+            _logger?.KWarning($"[ServerNetworkService] Malformed command payload ({source}) from peerId={peerId} — disconnect");
+            _transport.DisconnectPeer(peerId);
+        }
+
         private void HandleClientInputMessage(int peerId, ClientInputMessage msg)
         {
             _logger?.KTrace($"[HandleClientInput] peerId={peerId}, tick={msg.Tick}, dataLen={msg.CommandDataLength}");
@@ -1348,7 +1367,11 @@ namespace xpTURN.Klotho.Network
                 return;
 
             var reader = new SpanReader(cmdSpan);
-            var command = _commandFactory.DeserializeCommandRaw(ref reader);
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+            {
+                DisconnectForMalformedCommand(peerId, "ClientInput");
+                return;
+            }
             if (command == null)
                 return;
 
@@ -1383,7 +1406,11 @@ namespace xpTURN.Klotho.Network
             if (cmdSpan.Length < 4)
                 return;
             var reader = new SpanReader(cmdSpan);
-            var command = _commandFactory.DeserializeCommandRaw(ref reader);
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+            {
+                DisconnectForMalformedCommand(peerId, "ReliableCommandSubmit");
+                return;
+            }
             if (command == null)
                 return;
 
@@ -1425,7 +1452,11 @@ namespace xpTURN.Klotho.Network
                     continue;
 
                 var reader = new SpanReader(entry.CommandData.AsSpan(0, entry.CommandDataLength));
-                var command = _commandFactory.DeserializeCommandRaw(ref reader);
+                if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+                {
+                    DisconnectForMalformedCommand(peerId, "ClientInputBundle");
+                    return;
+                }
                 if (command == null)
                     continue;
 

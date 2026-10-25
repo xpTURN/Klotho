@@ -1112,7 +1112,12 @@ namespace xpTURN.Klotho.Network
             var cmdSpan = msg.CommandDataSpan;
             if (cmdSpan.Length < 4) return;
             var reader = new SpanReader(cmdSpan);
-            var command = _commandFactory.DeserializeCommandRaw(ref reader);
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+            {
+                _logger?.KWarning($"[KlothoNetworkService] Malformed command payload (ReliableCommandSubmit) from peerId={fromPeerId} — disconnect");
+                if (fromPeerId != -1) _transport.DisconnectPeer(fromPeerId);
+                return;
+            }
             if (command == null) return;
 
             // Dormant: a host would do commit-tick placement + (playerId, sequence) dedup +
@@ -1276,6 +1281,15 @@ namespace xpTURN.Klotho.Network
             _transport?.FlushSendQueue();
         }
 
+        private static bool IsPreAuthFirstMessageType(byte[] data, int length)
+        {
+            if (length < 1) return false;
+            var type = (NetworkMessageType)data[0];
+            return type == NetworkMessageType.PlayerJoin
+                || type == NetworkMessageType.ReconnectRequest
+                || type == NetworkMessageType.SpectatorJoin;
+        }
+
         private void HandleDataReceived(int peerId, byte[] data, int length)
         {
             if (_pendingPeers.Contains(peerId))
@@ -1289,7 +1303,9 @@ namespace xpTURN.Klotho.Network
                     DisconnectWithReason(peerId, JoinFailReason.IdentityInvalid.ToWireCode());
                     return;
                 }
-                var firstMsg = _messageSerializer.Deserialize(data, length);
+                // Pre-auth: decode only the three first-message types; anything else takes the
+                // malformed/unknown branch below without being deserialized.
+                var firstMsg = IsPreAuthFirstMessageType(data, length) ? _messageSerializer.Deserialize(data, length) : null;
                 _pendingPeers.Remove(peerId);
                 if (firstMsg is PlayerJoinMessage playerJoin)
                 {
@@ -1500,6 +1516,19 @@ namespace xpTURN.Klotho.Network
                 return;
             }
 
+            // Decode before anything else so a malformed payload is neither relayed nor executed.
+            // Only a throw is a failure: a null command (unknown type) is relayed as before and
+            // dropped below. The authority disconnects the sender, as it does for any malformed
+            // message; a guest only logs.
+            var reader = new SpanReader(cmdSpan);
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+            {
+                _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] Malformed command payload from peerId={fromPeerId} (dataLen={cmdSpan.Length})");
+                if (IsHost && fromPeerId != -1)
+                    _transport.DisconnectPeer(fromPeerId);
+                return;
+            }
+
             // Guest >> Host >> other guests
             if (IsHost && fromPeerId != -1)
             {
@@ -1512,6 +1541,7 @@ namespace xpTURN.Klotho.Network
                 if (isSealedHere)
                 {
                     _relaySealDropCount++;
+                    if (command != null) CommandPool.Return(command);
                     return;
                 }
                 RelayMessage(msg, fromPeerId, DeliveryMethod.ReliableOrdered);
@@ -1525,10 +1555,11 @@ namespace xpTURN.Klotho.Network
 
             // Our own command received via the network has already been processed locally — avoid duplicates
             if (fromPeerId != -1 && msg.PlayerId == LocalPlayerId)
+            {
+                if (command != null) CommandPool.Return(command);
                 return;
+            }
 
-            var reader = new SpanReader(cmdSpan);
-            var command = _commandFactory.DeserializeCommandRaw(ref reader);
             if (command == null)
             {
                 _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] DeserializeCommandRaw returned null (dataLen={cmdSpan.Length})");

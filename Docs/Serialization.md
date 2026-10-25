@@ -44,6 +44,7 @@ EntityRef e = reader.ReadEntityRef();
 
 - **All integers are little-endian** (`BinaryPrimitives`), so the wire format is identical across platforms and architectures.
 - **Bounds checking is `[Conditional("DEBUG")]`** — `SpanWriter` throws "buffer overflow" in debug builds if you under-size the buffer, but the check is compiled out of release. So `GetSerializedSize()` must be correct; the generator computes it for you.
+- **Reading is checked in every build.** Each `SpanReader` read is bounds-checked by the span, and `Skip` refuses to move past the end. A generated `Deserialize` also checks every collection count against the bytes left *before* it allocates — each element writes at least a known number of bytes (its size, or the 4-byte length prefix of a `string` / `byte[]`), so a count that cannot fit throws `InvalidDataException` instead of allocating for it. A count the writer produced always passes. For a network message the throw ends in `MessageSerializer.Deserialize` returning null, and the server or host disconnects the sender.
 - **`ISpanSerializable`** is the manual contract — `Serialize(ref SpanWriter)`, `Deserialize(ref SpanReader)`, `GetSerializedSize()`. The generator implements exactly this shape; `IComponent` ([ECS.md](ECS.md)) extends it with `GetHash`.
 - **`SerializationBuffer`** is a pooled, `IDisposable` managed `byte[]` for when you need a heap buffer instead of `stackalloc`.
 
@@ -285,6 +286,8 @@ When it is on, a file whose content has not changed is left alone (no rewritten 
 ## 10. Manual Serialization Escape Hatch
 
 If a type already declares its own `Serialize`/`Deserialize`/`GetSerializedSize` (the generator detects this as "manual serialization"), the generator won't overwrite them — you keep full control for an exotic encoding. Use this sparingly: hand-written codecs must keep `GetSerializedSize()` exact (release builds skip the bounds check) and must stay byte-identical across peers, which is exactly the discipline the generator exists to enforce for you. The null rule of [§6](#6-supported-field-types) is yours too: a type with manual serialization gets no **KLSG008**, and what a null collection becomes on the wire is up to your codec.
+
+Two more rules come with a codec that reads bytes from another machine. **Check a length or count against `reader.Remaining` before you allocate for it** — the generated code does, and `DesyncProbePayload.TryUnpackL1` shows the hand-written form (a negative count, or one whose elements cannot fit, is refused first). **Assign every member in `DeserializeData`, unconditionally** — commands are pooled, and a command whose decode fails part-way is returned to the pool half-filled, so a member you write only on some paths keeps whatever the last payload left in it.
 
 ---
 

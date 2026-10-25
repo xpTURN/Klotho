@@ -9,22 +9,26 @@ namespace xpTURN.Klotho.Serialization
         private ReadOnlySpan<byte> _buffer;
         private int _position;
         private readonly byte[] _sourceBuffer;
+        private readonly int _sourceOffset;
 
         public int Position => _position;
         public int Length => _buffer.Length;
         public int Remaining => _buffer.Length - _position;
         public byte[] SourceBuffer => _sourceBuffer;
+        public int SourceOffset => _sourceOffset;
 
         public SpanReader(ReadOnlySpan<byte> buffer)
         {
             _buffer = buffer;
             _position = 0;
             _sourceBuffer = null;
+            _sourceOffset = 0;
         }
 
         public SpanReader(byte[] buffer, int offset, int length)
         {
             _sourceBuffer = buffer;
+            _sourceOffset = offset;
             _buffer = buffer.AsSpan(offset, length);
             _position = 0;
         }
@@ -115,6 +119,8 @@ namespace xpTURN.Klotho.Serialization
 
         public void Skip(int count)
         {
+            if ((uint)count > (uint)Remaining)
+                throw new ArgumentOutOfRangeException(nameof(count), count, $"Skip past the end: {Remaining} bytes remaining");
             _position += count;
         }
 

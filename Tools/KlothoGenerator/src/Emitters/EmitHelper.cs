@@ -257,6 +257,7 @@ namespace xpTURN.Klotho.Generator.Emitters
             if (field.ElementIsNestedSerializable)
             {
                 sb.AppendLine($"{indent}int __count_{field.Name} = reader.ReadInt32();");
+                EmitCountGuard(sb, field, indent);
                 sb.AppendLine($"{indent}{instancePrefix}.{field.Name} = __count_{field.Name} == 0 ? System.Array.Empty<{field.ElementTypeName}>() : new {field.ElementTypeName}[__count_{field.Name}];");
                 sb.AppendLine($"{indent}for (int __i = 0; __i < __count_{field.Name}; __i++)");
                 sb.AppendLine($"{indent}    {instancePrefix}.{field.Name}[__i].Deserialize(ref reader);");   // array element is addressable
@@ -264,6 +265,7 @@ namespace xpTURN.Klotho.Generator.Emitters
             }
             if (!TypeMappings.TryGetMapping(field.ElementTypeName, out var elemMapping)) return;
             sb.AppendLine($"{indent}int __count_{field.Name} = reader.ReadInt32();");
+            EmitCountGuard(sb, field, indent);
             sb.AppendLine($"{indent}{instancePrefix}.{field.Name} = __count_{field.Name} == 0 ? System.Array.Empty<{field.ElementTypeName}>() : new {field.ElementTypeName}[__count_{field.Name}];");
             sb.AppendLine($"{indent}for (int __i = 0; __i < __count_{field.Name}; __i++)");
             sb.AppendLine($"{indent}    {instancePrefix}.{field.Name}[__i] = reader.{elemMapping.ReadMethod}();");
@@ -298,6 +300,7 @@ namespace xpTURN.Klotho.Generator.Emitters
             if (field.ElementIsNestedSerializable)
             {
                 sb.AppendLine($"{indent}int __count_{field.Name} = reader.ReadInt32();");
+                EmitCountGuard(sb, field, indent);
                 EmitListReset(sb, field, indent, instancePrefix);
                 sb.AppendLine($"{indent}for (int __i = 0; __i < __count_{field.Name}; __i++)");
                 sb.AppendLine($"{indent}{{");
@@ -309,6 +312,7 @@ namespace xpTURN.Klotho.Generator.Emitters
             }
             if (!TypeMappings.TryGetMapping(field.ElementTypeName, out var elemMapping)) return;
             sb.AppendLine($"{indent}int __count_{field.Name} = reader.ReadInt32();");
+            EmitCountGuard(sb, field, indent);
             EmitListReset(sb, field, indent, instancePrefix);
             sb.AppendLine($"{indent}for (int __i = 0; __i < __count_{field.Name}; __i++)");
             sb.AppendLine($"{indent}    {instancePrefix}.{field.Name}.Add(reader.{elemMapping.ReadMethod}());");
@@ -370,6 +374,7 @@ namespace xpTURN.Klotho.Generator.Emitters
             if (!TypeMappings.TryGetMapping(field.ValueTypeName, out var valMapping)) return;
 
             sb.AppendLine($"{indent}int __count_{field.Name} = reader.ReadInt32();");
+            EmitCountGuard(sb, field, indent);
             if (field.IsAssignable)
             {
                 sb.AppendLine($"{indent}if ({instancePrefix}.{field.Name} == null)");
@@ -388,6 +393,30 @@ namespace xpTURN.Klotho.Generator.Emitters
             sb.AppendLine($"{indent}    {instancePrefix}.{field.Name}[__key] = __val;");
             sb.AppendLine($"{indent}}}");
         }
+
+        // --- Wire count guard ---
+
+        // A wire count is untrusted: reject a negative count, or one whose elements cannot fit in the
+        // bytes left (every element writes at least MinWireBytes), before anything is allocated.
+        private static void EmitCountGuard(StringBuilder sb, SerializableFieldInfo field, string indent)
+        {
+            string c = $"__count_{field.Name}";
+            sb.AppendLine($"{indent}if ({c} < 0 || (long){c} * {GetMinWireBytes(field)} > reader.Remaining)");
+            sb.AppendLine($"{indent}    throw new System.IO.InvalidDataException(\"{field.Name}: count \" + {c} + \" exceeds the \" + reader.Remaining + \" remaining bytes\");");
+        }
+
+        private static string GetMinWireBytes(SerializableFieldInfo field)
+        {
+            if (field.KeyTypeName != null && field.ValueTypeName != null)
+                return (MinWireBytes(field.KeyTypeName) + MinWireBytes(field.ValueTypeName)).ToString();
+            if (field.ElementIsNestedSerializable)
+                return $"System.Math.Max(1, default({field.ElementTypeName}).GetSerializedSize())";
+            return MinWireBytes(field.ElementTypeName).ToString();
+        }
+
+        // Fixed-size mapped types write exactly Size; the variable ones (string, byte[]) write a 4-byte length prefix first.
+        private static int MinWireBytes(string typeName)
+            => TypeMappings.TryGetMapping(typeName, out var m) && m.Size > 0 ? m.Size : 4;
 
         // --- Helpers ---
 

@@ -156,7 +156,10 @@ namespace xpTURN.Klotho.Network
 
         private void RouteFirstMessage(int peerId, byte[] data, int length)
         {
-            var msg = _serializer.Deserialize(data, length) as RoomHandshakeMessage;
+            // Pre-auth: look at the type byte before deserializing — only a handshake is decoded here.
+            var msg = length >= 1 && data[0] == (byte)NetworkMessageType.RoomHandshake
+                ? _serializer.Deserialize(data, length) as RoomHandshakeMessage
+                : null;
             if (msg == null)
             {
                 _logger?.KWarning($"[RoomRouter] Peer {peerId}: first message is not RoomHandshakeMessage, disconnecting");

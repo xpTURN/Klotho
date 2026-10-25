@@ -52,6 +52,9 @@ namespace xpTURN.Klotho.Network
         {
             PlayerId = reader.ReadInt32();
             Count = reader.ReadInt32();
+            // Each entry writes at least Tick(4) + length(4): bound the wire count before allocating.
+            if (Count < 0 || (long)Count * 8 > reader.Remaining)
+                throw new System.IO.InvalidDataException($"ClientInputBundle: count {Count} exceeds the {reader.Remaining} remaining bytes");
             if (Entries.Length < Count)
                 Entries = new BundleEntry[Count];
             for (int i = 0; i < Count; i++)
