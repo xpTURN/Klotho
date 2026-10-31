@@ -340,21 +340,32 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
                 resultReason = e?.Reason.ToString() ?? string.Empty;
             };
 
-            while (engine.State == KlothoState.Running && updates < budget)
+            // A throw during playback — a command blob that does not decode, or a game system failing on what
+            // it decoded — is a verdict like a failed session setup, never a process failure: escaping here
+            // would end the batch and exit with a code outside the verdict range.
+            try
             {
-                session.Update(dt);
-                updates++;
-
-                // The environment anchors were taken at the recording's snapshot instant, so the
-                // comparable moment here is right after the restored world has run its first tick —
-                // that is when the game's systems have installed their geometry. Later is wrong: runtime
-                // rebakes move the navigation term during a match, by design.
-                if (!envChecked && engine.CurrentTick >= 1)
+                while (engine.State == KlothoState.Running && updates < budget)
                 {
-                    envChecked = true;
-                    env = CompareEnvironment(session.Simulation, meta);
-                    if (env.Mismatched != null) break;
+                    session.Update(dt);
+                    updates++;
+
+                    // The environment anchors were taken at the recording's snapshot instant, so the
+                    // comparable moment here is right after the restored world has run its first tick —
+                    // that is when the game's systems have installed their geometry. Later is wrong: runtime
+                    // rebakes move the navigation term during a match, by design.
+                    if (!envChecked && engine.CurrentTick >= 1)
+                    {
+                        envChecked = true;
+                        env = CompareEnvironment(session.Simulation, meta);
+                        if (env.Mismatched != null) break;
+                    }
                 }
+            }
+            catch (Exception e)
+            {
+                return Line(ExitUnverifiable, path,
+                    $"playbackFailed={e.GetType().Name}:{Sanitize(e.Message)} ticks={engine.CurrentTick}/{meta.TotalTicks}", attribution);
             }
 
             if (env.Mismatched != null)

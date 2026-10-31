@@ -11,6 +11,8 @@ using xpTURN.Klotho.Deterministic.Navigation;
 using xpTURN.Klotho.Network;
 using xpTURN.Klotho.Replay;   // ReplaySystem / CommandFactory — reading back the file the room wrote
 
+using Brawler;   // BrawlerMatchConfig — the capacity a rebuilt tick 0 needs
+
 namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
 {
     /// <summary>
@@ -48,6 +50,7 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             NE9_NoRoomManagerWiringWithoutAttach();
             NE10_IsEnded_FalseForEnding();
             NE11_ServerWritesItsReplay_AndItRebuilds();
+            NE12_PlaybackThrow_IsAVerdictNotACrash();
 
             Console.WriteLine($"\n=== NormalEndLifecycle results: {_passed} passed, {_failed} failed ===");
             _loggerFactory.Dispose();
@@ -139,6 +142,109 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
                        first.Code == BrawlerReplayVerifier.ExitUnverifiable);
                 Assert("NE11d repeated verification in one process is stable",
                        second.Code == first.Code && second.Line == first.Line);
+            }
+            finally
+            {
+                try { Directory.Delete(dir, recursive: true); } catch { /* temp cleanup is best-effort */ }
+            }
+        }
+
+        // ── NE12: a replay that throws during playback is a verdict, not a process failure ──
+
+        /// <para>A server file stops before playback (see NE11), so it is given what the gates ask for — two
+        /// environment anchors, a roster with a capacity, and the rebuilt tick-0 hash. The clean file then plays
+        /// past tick 0 (its verdict is the post-tick-1 anchor comparison). In the broken copy tick 0's command
+        /// blob claims more commands than it holds — in range, so the reader's table check passes it and the
+        /// throw comes from decoding, mid-playback. The clean file is verified before and after the broken one:
+        /// an abandoned session must not change the next file's verdict.</para>
+        static void NE12_PlaybackThrow_IsAVerdictNotACrash()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "klotho-server-replay-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var env = CreateTestEnv(EndGracePolicy.Continue, endGraceMs: 40, abortGraceMs: 40, replaySaveDir: dir);
+                var room = env.RoomManager.CreateRoom(0);
+                JoinPeer(env, peerId: 1, roomId: 0);
+                room.Update(0.025f);
+                room.Engine.Start();
+                for (int i = 0; i < 8; i++) room.Update(0.025f);
+                room.RequestEnd(EndReason.MatchEnded, TimeSpan.FromMilliseconds(40));
+                Thread.Sleep(80);
+                room.Update(0.025f);
+                env.RoomManager.TransitionDrainingRooms();
+                env.RoomManager.CleanupDisposingRooms();
+                env.Dispose();
+
+                var files = Directory.GetFiles(dir, "*.rply");
+                Assert("NE12a server wrote a replay", files.Length == 1);
+                if (files.Length != 1) return;
+
+                var data = new ReplayData();
+                data.Deserialize(File.ReadAllBytes(files[0]));
+                var m = (ReplayMetadata)data.Metadata;
+                m.StaticColliderFingerprint = 0x1111_2222_3333_4444L;
+                m.GameFingerprint = unchecked((long)0x9999_AAAA_BBBB_CCCCUL);
+                // The harness starts the sim without GameStart, so the file has no snapshot to restore and its
+                // tick blobs are empty: give it a roster and a capacity, so the runner rebuilds tick 0 instead.
+                m.InitialRoster.Clear();
+                m.InitialRoster.Add(1);
+                m.PlayerCount = 1;
+                m.MatchConfigData = BrawlerMatchConfig.Encode(new BrawlerMatchConfigData { BotCount = 0, MaxPlayers = 4 });
+                // The rebuilt tick-0 hash is this build's own; a probe run reports it as the mismatch's `local=`.
+                m.InitialStateHash = 1;
+                string probePath = Path.Combine(dir, "probe.rply");
+                File.WriteAllBytes(probePath, data.Serialize());
+                var probe = BrawlerReplayVerifier.Verify(probePath, null);
+                const string localKey = "tick0hash=mismatch file=0x0000000000000001 local=0x";
+                int at = probe.Line.IndexOf(localKey, StringComparison.Ordinal);
+                Assert($"NE12b the probe reaches the tick-0 comparison ({probe.Line})", at >= 0);
+                if (at < 0) return;
+                m.InitialStateHash = unchecked((long)Convert.ToUInt64(probe.Line.Substring(at + localKey.Length, 16), 16));
+                byte[] clean = data.Serialize();
+
+                // The file ends with the command stream and then one (tick, offset, length) entry per tick.
+                const BindingFlags priv = BindingFlags.NonPublic | BindingFlags.Instance;
+                int tickCount = ((System.Collections.ICollection)typeof(ReplayData).GetField("_tickOffsets", priv).GetValue(data)).Count;
+                int bufferSize = (int)typeof(ReplayData).GetField("_bufferPosition", priv).GetValue(data);
+                int tableStart = clean.Length - tickCount * 12;
+                int bufferStart = tableStart - bufferSize;
+                int blob = -1;
+                for (int i = 0; i < tickCount; i++)
+                {
+                    int entry = tableStart + i * 12;
+                    if (BitConverter.ToInt32(clean, entry) == 0) blob = BitConverter.ToInt32(clean, entry + 4);
+                }
+                Assert("NE12c the recording has a tick-0 blob", blob >= 0);
+                if (blob < 0) return;
+                byte[] broken = (byte[])clean.Clone();
+                BitConverter.GetBytes(1_000_000).CopyTo(broken, bufferStart + blob);   // its command count
+
+                string cleanPath = Path.Combine(dir, "clean.rply");
+                string brokenPath = Path.Combine(dir, "broken.rply");
+                File.WriteAllBytes(cleanPath, clean);
+                File.WriteAllBytes(brokenPath, broken);
+
+                var before = BrawlerReplayVerifier.Verify(cleanPath, null);
+                Assert($"NE12d the clean file plays past tick 0 ({before.Line})",
+                       before.Line.Contains("anchors=mismatch:", StringComparison.Ordinal));
+
+                BrawlerReplayVerifier.Outcome broke;
+                try
+                {
+                    broke = BrawlerReplayVerifier.Verify(brokenPath, null);
+                }
+                catch (Exception e)
+                {
+                    Assert($"NE12e a playback throw is a verdict (Verify threw {e.GetType().Name}: {e.Message})", false);
+                    return;
+                }
+                Assert($"NE12e a playback throw is a verdict ({broke.Line})",
+                       broke.Code == BrawlerReplayVerifier.ExitUnverifiable
+                       && broke.Line.Contains("playbackFailed=", StringComparison.Ordinal));
+
+                var after = BrawlerReplayVerifier.Verify(cleanPath, null);
+                Assert("NE12f the abandoned session leaves the next verdict unchanged", after.Line == before.Line);
             }
             finally
             {

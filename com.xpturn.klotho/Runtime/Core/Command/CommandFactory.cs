@@ -143,11 +143,22 @@ namespace xpTURN.Klotho.Core
             var reader = new SpanReader(data);
             int count = reader.ReadInt32();
 
-            for (int i = 0; i < count; i++)
+            try
             {
-                ICommand cmd = DeserializeCommand(ref reader);
-                if (cmd != null)
-                    _deserializeListCache.Add(cmd);
+                for (int i = 0; i < count; i++)
+                {
+                    ICommand cmd = DeserializeCommand(ref reader);
+                    if (cmd != null)
+                        _deserializeListCache.Add(cmd);
+                }
+            }
+            catch
+            {
+                // An array that fails part-way hands back the commands it already decoded before rethrowing.
+                for (int i = 0; i < _deserializeListCache.Count; i++)
+                    CommandPool.Return(_deserializeListCache[i]);
+                _deserializeListCache.Clear();
+                throw;
             }
 
             return _deserializeListCache;
@@ -182,17 +193,26 @@ namespace xpTURN.Klotho.Core
         /// True with a null command: the command type is unknown (DeserializeCommandRaw's null).
         /// </summary>
         public static bool TryDeserializeCommandRaw(this ICommandFactory factory, ref SpanReader reader, out ICommand command)
+            => TryDeserializeCommandRaw(factory, ref reader, out command, out _);
+
+        /// <summary>
+        /// Same as the three-argument form, and also hands back what the decode threw (null when it did not),
+        /// so a caller can tell a malformed payload from a local fault in its log.
+        /// </summary>
+        public static bool TryDeserializeCommandRaw(this ICommandFactory factory, ref SpanReader reader, out ICommand command, out Exception error)
         {
             // Outside the try: a missing factory is a setup bug, not a malformed peer payload.
             if (factory == null) throw new ArgumentNullException(nameof(factory));
             try
             {
                 command = factory.DeserializeCommandRaw(ref reader);
+                error = null;
                 return true;
             }
-            catch (Exception)
+            catch (Exception e)
             {
                 command = null;
+                error = e;
                 return false;
             }
         }

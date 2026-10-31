@@ -148,6 +148,46 @@ namespace xpTURN.Klotho.Tests.Network
             Assert.IsInstanceOf<EmptyCommand>(commands[0]);
         }
 
+        // ── #2c ServerInputCollector slot stamping ─────
+        // The payload's PlayerId/Tick are untrusted: the server executes the command it collects, but an
+        // SD client files the broadcast command under the payload's (Tick, PlayerId). An accepted command
+        // carries the slot it was stored under.
+
+        [Test]
+        public void ServerInputCollector_AcceptedInput_CarriesItsSlot()
+        {
+            var collector = new ServerInputCollector();
+            collector.Configure(new Dictionary<int, int> { { 1, 10 } });
+            collector.AddPlayer(10);
+
+            // Header (tick 7, player 10) passes the peer check; the payload claims player 11 at tick 9.
+            var cmd = new StopCommand(11, 9);
+            Assert.IsTrue(collector.TryAcceptInput(1, 7, 10, cmd));
+
+            var commands = collector.CollectTickInputs(7);
+            Assert.AreEqual(1, commands.Count);
+            Assert.AreSame(cmd, commands[0]);
+            Assert.AreEqual(10, cmd.PlayerId, "PlayerId must be the peer-validated slot, not the payload's");
+            Assert.AreEqual(7, cmd.Tick, "Tick must be the slot tick, not the payload's");
+        }
+
+        [Test]
+        public void ServerInputCollector_BootstrapRedirectedInput_CarriesTheRedirectedTick()
+        {
+            var collector = new ServerInputCollector();
+            collector.Configure(new Dictionary<int, int> { { 1, 10 } });
+            collector.AddPlayer(10);
+            collector.SetBootstrapPending(true);
+
+            // Header tick -1 is redirected to the first scheduled tick (0); the payload says -5.
+            var cmd = new EmptyCommand(10, -5);
+            Assert.IsTrue(collector.TryAcceptInput(1, -1, 10, cmd));
+
+            var commands = collector.CollectTickInputs(0);
+            Assert.AreSame(cmd, commands[0]);
+            Assert.AreEqual(0, cmd.Tick, "A redirected input carries the tick it is executed at");
+        }
+
         // ── #3 ClientInputMessage.Serialize/Deserialize ─────
 
         [Test]

@@ -41,13 +41,14 @@ namespace xpTURN.Klotho.Network.Tests
         private static void SealCommandAt(KlothoEngine engine, int tick, int playerId)
             => ReadInputBuffer(engine).SealEmpty(tick, playerId);
 
-        // CommandDataSpan length must be >= 4 to pass the malformed-length guard at the top of
-        // HandleCommandMessage. The first 4 bytes are read as commandType by DeserializeCommandRaw;
-        // we encode 0xFFFFFFFF (int.MinValue path) — an unlikely commandType — so the factory falls
-        // through to the null-return path instead of attempting to deserialize beyond the 4 bytes.
+        // A well-formed command whose payload agrees with its header, so the decode and the host's
+        // sender check pass and the seal guard is what decides.
         private static CommandMessage MakeCommandMessage(int tick, int playerId)
         {
-            var data = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+            var cmd = new EmptyCommand(playerId, tick);
+            var data = new byte[cmd.GetSerializedSize()];
+            var writer = new SpanWriter(data);
+            cmd.Serialize(ref writer);
             return new CommandMessage
             {
                 Tick = tick,

@@ -1349,11 +1349,27 @@ namespace xpTURN.Klotho.Network
             }
         }
 
-        // A command that fails to decode inside a well-formed message gets the malformed-message policy:
-        // the sender is disconnected.
-        private void DisconnectForMalformedCommand(int peerId, string source)
+        // A command payload inside a well-formed message that yields no command — too short to hold a type,
+        // a decode that throws, or a type this build does not register — gets the malformed-message policy:
+        // the sender is disconnected. The warning names which.
+        private void DisconnectForMalformedCommand(int peerId, string source, ReadOnlySpan<byte> cmdSpan, Exception error)
         {
-            _logger?.KWarning($"[ServerNetworkService] Malformed command payload ({source}) from peerId={peerId} — disconnect");
+            if (error != null)
+                _logger?.KWarning($"[ServerNetworkService] Malformed command payload ({source}) from peerId={peerId}: {error.GetType().Name}: {error.Message} — disconnect");
+            else if (cmdSpan.Length < 4)
+                _logger?.KWarning($"[ServerNetworkService] Malformed command payload ({source}) from peerId={peerId}: length {cmdSpan.Length} — disconnect");
+            else
+                _logger?.KWarning($"[ServerNetworkService] Malformed command payload ({source}) from peerId={peerId}: unknown command type {System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(cmdSpan)} — disconnect");
+            _transport.DisconnectPeer(peerId);
+        }
+
+        // A decoded command of a kind its path does not carry: a framework system command (PlayerJoin) is
+        // server-authored, and a reliable command belongs on ReliableCommandSubmit, where the entitlement gate
+        // and the sequence dedup apply. An honest client sends neither, so the sender is disconnected.
+        private void DisconnectForCommandNotAccepted(int peerId, string source, ICommand command)
+        {
+            _logger?.KWarning($"[ServerNetworkService] Command not accepted ({source}) from peerId={peerId}: {command.GetType().Name} — disconnect");
+            CommandPool.Return(command);
             _transport.DisconnectPeer(peerId);
         }
 
@@ -1364,16 +1380,22 @@ namespace xpTURN.Klotho.Network
             // Deserialize command
             var cmdSpan = msg.CommandDataSpan;
             if (cmdSpan.Length < 4)
-                return;
-
-            var reader = new SpanReader(cmdSpan);
-            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
             {
-                DisconnectForMalformedCommand(peerId, "ClientInput");
+                DisconnectForMalformedCommand(peerId, "ClientInput", cmdSpan, null);
                 return;
             }
-            if (command == null)
+
+            var reader = new SpanReader(cmdSpan);
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command, out var error) || command == null)
+            {
+                DisconnectForMalformedCommand(peerId, "ClientInput", cmdSpan, error);
                 return;
+            }
+            if (command is ISystemCommand)
+            {
+                DisconnectForCommandNotAccepted(peerId, "ClientInput", command);
+                return;
+            }
 
             // Delegate to InputCollector (includes peerId-PlayerId validation and deadline check)
             if (_inputCollector.TryAcceptInput(peerId, msg.Tick, msg.PlayerId, command))
@@ -1404,15 +1426,21 @@ namespace xpTURN.Klotho.Network
 
             var cmdSpan = msg.CommandDataSpan;
             if (cmdSpan.Length < 4)
-                return;
-            var reader = new SpanReader(cmdSpan);
-            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
             {
-                DisconnectForMalformedCommand(peerId, "ReliableCommandSubmit");
+                DisconnectForMalformedCommand(peerId, "ReliableCommandSubmit", cmdSpan, null);
                 return;
             }
-            if (command == null)
+            var reader = new SpanReader(cmdSpan);
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command, out var error) || command == null)
+            {
+                DisconnectForMalformedCommand(peerId, "ReliableCommandSubmit", cmdSpan, error);
                 return;
+            }
+            if (command is ISystemCommand && !(command is IReliableCommand))
+            {
+                DisconnectForCommandNotAccepted(peerId, "ReliableCommandSubmit", command);
+                return;
+            }
 
             // In-match entitlement gate (opt-in; null = accept all, no regression). The entire block is
             // gated on the gate being set so an unset gate is byte-identical to the prior path. Resolve the
@@ -1448,17 +1476,24 @@ namespace xpTURN.Klotho.Network
             for (int i = 0; i < bundle.Count; i++)
             {
                 var entry = bundle.Entries[i];
-                if (entry.CommandDataLength < 4)
-                    continue;
-
-                var reader = new SpanReader(entry.CommandData.AsSpan(0, entry.CommandDataLength));
-                if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+                var cmdSpan = entry.CommandData.AsSpan(0, entry.CommandDataLength);
+                if (cmdSpan.Length < 4)
                 {
-                    DisconnectForMalformedCommand(peerId, "ClientInputBundle");
+                    DisconnectForMalformedCommand(peerId, "ClientInputBundle", cmdSpan, null);
                     return;
                 }
-                if (command == null)
-                    continue;
+
+                var reader = new SpanReader(cmdSpan);
+                if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command, out var error) || command == null)
+                {
+                    DisconnectForMalformedCommand(peerId, "ClientInputBundle", cmdSpan, error);
+                    return;
+                }
+                if (command is ISystemCommand)
+                {
+                    DisconnectForCommandNotAccepted(peerId, "ClientInputBundle", command);
+                    return;
+                }
 
                 if (_inputCollector.TryAcceptInput(peerId, entry.Tick, bundle.PlayerId, command))
                 {

@@ -34,11 +34,13 @@
 # unaffected (the editor compiles the project with its own settings).
 #
 # Environment variables:
-#   UNITY_PATH        Override the Unity executable path (default: Hub 6000.3.9f1)
+#   UNITY_PATH        Override the Unity executable path (default: Hub 6000.3.27f2)
 #   UNITY_2022_PATH   Override the 2022.3 LTS editor path (default: Hub 2022.3.62f3)
-#   UNITY_6000_6_PATH Override the 6000.6 editor path (default: Hub 6000.6.0f1)
+#   UNITY_6000_6_PATH Override the 6000.6 editor path (default: Hub 6000.6.7f1)
+#   UNITY_TIMEOUT     Outer limit of each Unity run in seconds (default: 3600; 0 = none)
 #
-# Exit code: non-zero if anything fails (CI friendly).
+# Exit code: non-zero if anything fails (CI friendly). A suite that ran no tests fails, and so does a Unity fixture
+# that failed outside its tests (a one-time setup or teardown).
 
 set -uo pipefail
 
@@ -50,7 +52,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RESULTS_DIR="${REPO_ROOT}/Logs/test-results"
 
 # Unity project & version
-UNITY_VERSION="6000.3.9f1"
+UNITY_VERSION="6000.3.27f2"
 UNITY_PROJECT="${REPO_ROOT}/Samples/Brawler"
 UNITY_PATH="${UNITY_PATH:-/Applications/Unity/Hub/Editor/${UNITY_VERSION}/Unity.app/Contents/MacOS/Unity}"
 
@@ -64,9 +66,11 @@ UNITY_2022_PATH="${UNITY_2022_PATH:-/Applications/Unity/Hub/Editor/${UNITY_2022_
 # Unity 6000.6 compatibility project — the newest editor line, where Object.GetInstanceID() is an
 # error and Unity's own analyzers (UAC*) run. Same shape as the 2022.3 project: a copy of the smoke
 # sources under its own asmdef name, on its own editor install.
-UNITY_6000_6_VERSION="6000.6.0f1"
+UNITY_6000_6_VERSION="6000.6.7f1"
 UNITY_6000_6_PROJECT="${REPO_ROOT}/Samples/Unity6000.6.Tests"
 UNITY_6000_6_PATH="${UNITY_6000_6_PATH:-/Applications/Unity/Hub/Editor/${UNITY_6000_6_VERSION}/Unity.app/Contents/MacOS/Unity}"
+
+UNITY_TIMEOUT="${UNITY_TIMEOUT:-3600}"
 
 # The Brawler dedicated server's self-hosted suite. Runs through `dotnet run`, not `dotnet test`:
 # its cases spin up rooms, transports and threads, so they live in the binary rather than in a test
@@ -238,7 +242,8 @@ run_unity_editmode() {
   echo "${C_BLD}▶ ${label}${C_RST}  (log: ${unity_log})"
   # -runTests handles batch mode and exit automatically (do not combine with -quit).
   # Unity returns an exit code based on the test result (0=pass, 2=test failure, etc.).
-  "${editor}" \
+  # perl's alarm cuts the editor off after UNITY_TIMEOUT seconds (exit 142).
+  perl -e 'alarm shift; exec @ARGV' "${UNITY_TIMEOUT}" "${editor}" \
     -runTests \
     -batchmode \
     -nographics \
@@ -248,6 +253,7 @@ run_unity_editmode() {
     -logFile "${unity_log}" \
     -buildTarget StandaloneOSX
   local rc=$?
+  [[ ${rc} -eq 142 ]] && echo "${C_RED}The editor ran past UNITY_TIMEOUT (${UNITY_TIMEOUT} s) and was stopped.${C_RST}" >&2
 
   if [[ ! -f "${results_xml}" ]]; then
     echo "${C_RED}Unity result file was not produced. Check the log:${C_RST} ${unity_log}" >&2
@@ -355,6 +361,7 @@ RST = "\033[0m"  if tty else ""
 
 rows = []          # (suite, total, passed, failed, skipped)
 failures = []      # (suite, test_fullname)
+fixtures = []      # (suite, fixture_fullname, site, message): a Unity fixture that failed outside its tests
 
 # Suites the runner said it would produce. Empty when nothing was asked for.
 expected = [x.strip() for x in os.environ.get("EXPECTED_SUITES", "").split("\n") if x.strip()]
@@ -425,6 +432,12 @@ for path in sorted(glob.glob(os.path.join(results_dir, "unity-*.xml"))):
     for tc in root.iter("test-case"):
         if tc.get("result") == "Failed":
             failures.append((suite, tc.get("fullname", tc.get("name", "?"))))
+    # A fixture that failed outside its tests says so on its own suite only. After a one-time teardown its tests
+    # passed, so the root counts and the editor's exit code (0) miss it. A suite that failed because a test under it
+    # did says site="Child".
+    for ts in root.iter("test-suite"):
+        if ts.get("result") == "Failed" and ts.get("site") != "Child":
+            fixtures.append((suite, ts.get("fullname", ts.get("name", "?")), ts.get("site", "?"), (ts.findtext("failure/message") or "").strip()))
 
 missing = []   # filled after the table is built
 
@@ -438,6 +451,12 @@ if not rows:
     print(f"{YEL}No test results were collected.{RST}")
     sys.exit(0)
 
+# A suite that ran no tests — none passed, none failed: no test at all (an assembly left out by a define constraint,
+# a filter that matches nothing) or skips alone. A suite whose result did not parse is reported there instead.
+unparsed = {x[0] for x in failures if x[1].startswith("<parse")}
+empty = [r[0] for r in rows if r[2] == 0 and r[3] == 0 and r[0] not in unparsed]
+bad = set(empty) | {x[0] for x in fixtures}   # rows that fail the gate besides their FAIL count
+
 # Print the table
 name_w = max(len(r[0]) for r in rows + [("SUITE", 0, 0, 0, 0)])
 def fmt(s, t, p, f, k):
@@ -447,13 +466,13 @@ print("  " + "-" * (name_w + 31))
 tot = pas = fai = ski = 0
 for s, t, p, f, k in rows:
     tot += t; pas += p; fai += f; ski += k
-    color = RED if f > 0 else GRN
+    color = RED if f > 0 or s in bad else GRN
     print(f"{color}{fmt(s, t, p, f, k)}{RST}")
 print("  " + "-" * (name_w + 31))
 print(f"{BLD}{fmt('TOTAL', tot, pas, fai, ski)}{RST}")
 
 # Suites that were expected but left no result file. A compile error, a licence failure or a hung
-# editor all land here, and none of them produce a row of their own.
+# editor (stopped at UNITY_TIMEOUT) all land here, and none of them produce a row of their own.
 found = {r[0] for r in rows}
 missing = [name for name in expected if name not in found]
 if missing:
@@ -470,6 +489,16 @@ if real_failures:
     print(f"{RED}{BLD}Failed tests ({len(real_failures)}):{RST}")
     for suite, name in real_failures:
         print(f"  {RED}✗{RST} [{suite}] {name}")
+if empty:
+    print()
+    print(f"{RED}{BLD}Suites that ran no tests ({len(empty)}):{RST}")
+    for name in empty:
+        print(f"  {RED}✗{RST} {name}")
+if fixtures:
+    print()
+    print(f"{RED}{BLD}Fixtures that failed outside their tests ({len(fixtures)}):{RST}")
+    for suite, name, site, msg in fixtures:
+        print(f"  {RED}✗{RST} [{suite}] {name} @{site} — {msg}")
 if parse_errors:
     print()
     print(f"{YEL}Result parse warnings:{RST}")
@@ -477,11 +506,13 @@ if parse_errors:
         print(f"  {YEL}![{suite}] {msg}{RST}")
 
 print()
-if fai == 0 and not parse_errors and not missing:
+if fai == 0 and not parse_errors and not missing and not empty and not fixtures:
     print(f"{GRN}{BLD}✔ All passed ({pas}/{tot}){RST}")
     sys.exit(0)
 else:
     suffix = f", {len(missing)} suite(s) missing" if missing else ""
+    suffix += f", {len(empty)} suite(s) ran no tests" if empty else ""
+    suffix += f", {len(fixtures)} fixture failure(s) outside tests" if fixtures else ""
     print(f"{RED}{BLD}✗ {fai} failed / {tot} total{suffix}{RST}")
     sys.exit(1)
 PY

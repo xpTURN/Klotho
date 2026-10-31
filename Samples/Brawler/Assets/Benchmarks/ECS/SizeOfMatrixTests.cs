@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using NUnit.Framework;
 using xpTURN.Klotho.ECS;
 using xpTURN.Klotho.Deterministic.Navigation;
@@ -57,16 +56,16 @@ namespace xpTURN.Klotho.ECS.Benchmarks
         public void PrintSizes()
         {
             UnityEngine.Debug.Log("[SizeOfMatrix] === Unsafe.SizeOf measured values ===");
-            UnityEngine.Debug.Log($"  TransformComponent             = {Unsafe.SizeOf<TransformComponent>()}");
-            UnityEngine.Debug.Log($"  OwnerComponent                 = {Unsafe.SizeOf<OwnerComponent>()}");
-            UnityEngine.Debug.Log($"  ErrorCorrectionTargetComponent = {Unsafe.SizeOf<ErrorCorrectionTargetComponent>()}");
-            UnityEngine.Debug.Log($"  NavAgentComponent              = {Unsafe.SizeOf<NavAgentComponent>()}");
-            UnityEngine.Debug.Log($"  HealthComponent                = {Unsafe.SizeOf<HealthComponent>()}");
-            UnityEngine.Debug.Log($"  CombatComponent                = {Unsafe.SizeOf<CombatComponent>()}");
-            UnityEngine.Debug.Log($"  MovementComponent              = {Unsafe.SizeOf<MovementComponent>()}");
-            UnityEngine.Debug.Log($"  VelocityComponent              = {Unsafe.SizeOf<VelocityComponent>()}");
-            UnityEngine.Debug.Log($"  CharacterComponent             = {Unsafe.SizeOf<CharacterComponent>()}");
-            UnityEngine.Debug.Log($"  SkillCooldownComponent         = {Unsafe.SizeOf<SkillCooldownComponent>()}");
+            UnityEngine.Debug.Log($"  TransformComponent             = {KUnsafe.SizeOf<TransformComponent>()}");
+            UnityEngine.Debug.Log($"  OwnerComponent                 = {KUnsafe.SizeOf<OwnerComponent>()}");
+            UnityEngine.Debug.Log($"  ErrorCorrectionTargetComponent = {KUnsafe.SizeOf<ErrorCorrectionTargetComponent>()}");
+            UnityEngine.Debug.Log($"  NavAgentComponent              = {KUnsafe.SizeOf<NavAgentComponent>()}");
+            UnityEngine.Debug.Log($"  HealthComponent                = {KUnsafe.SizeOf<HealthComponent>()}");
+            UnityEngine.Debug.Log($"  CombatComponent                = {KUnsafe.SizeOf<CombatComponent>()}");
+            UnityEngine.Debug.Log($"  MovementComponent              = {KUnsafe.SizeOf<MovementComponent>()}");
+            UnityEngine.Debug.Log($"  VelocityComponent              = {KUnsafe.SizeOf<VelocityComponent>()}");
+            UnityEngine.Debug.Log($"  CharacterComponent             = {KUnsafe.SizeOf<CharacterComponent>()}");
+            UnityEngine.Debug.Log($"  SkillCooldownComponent         = {KUnsafe.SizeOf<SkillCooldownComponent>()}");
 
             Assert.Pass("PrintSizes complete — reflect the values above into the Expected_* constants.");
         }
@@ -102,7 +101,7 @@ namespace xpTURN.Klotho.ECS.Benchmarks
                 Assert.Ignore("Expected value not set. Run PrintSizes in Editor(Mono) first.");
                 return;
             }
-            int actual = Unsafe.SizeOf<T>();
+            int actual = KUnsafe.SizeOf<T>();
             Assert.AreEqual(expected, actual,
                 $"{typeof(T).Name}: Unsafe.SizeOf={actual} differs from expected={expected}. " +
                 $"Runtime layout mismatch — check [StructLayout] Pack=4 and IL2CPP settings.");

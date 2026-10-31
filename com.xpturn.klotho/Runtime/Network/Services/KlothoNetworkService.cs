@@ -1110,15 +1110,32 @@ namespace xpTURN.Klotho.Network
             if (!IsHost) return;   // only the authority sequences reliable commands
 
             var cmdSpan = msg.CommandDataSpan;
-            if (cmdSpan.Length < 4) return;
-            var reader = new SpanReader(cmdSpan);
-            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+            if (cmdSpan.Length < 4)
             {
-                _logger?.KWarning($"[KlothoNetworkService] Malformed command payload (ReliableCommandSubmit) from peerId={fromPeerId} — disconnect");
+                _logger?.KWarning($"[KlothoNetworkService] Malformed command payload (ReliableCommandSubmit) from peerId={fromPeerId}: length {cmdSpan.Length} — disconnect");
                 if (fromPeerId != -1) _transport.DisconnectPeer(fromPeerId);
                 return;
             }
-            if (command == null) return;
+            var reader = new SpanReader(cmdSpan);
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command, out var error))
+            {
+                _logger?.KWarning($"[KlothoNetworkService] Malformed command payload (ReliableCommandSubmit) from peerId={fromPeerId}: {error.GetType().Name}: {error.Message} — disconnect");
+                if (fromPeerId != -1) _transport.DisconnectPeer(fromPeerId);
+                return;
+            }
+            if (command == null)
+            {
+                _logger?.KWarning($"[KlothoNetworkService] Malformed command payload (ReliableCommandSubmit) from peerId={fromPeerId}: unknown command type {System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(cmdSpan)} — disconnect");
+                if (fromPeerId != -1) _transport.DisconnectPeer(fromPeerId);
+                return;
+            }
+            if (command is ISystemCommand && !(command is IReliableCommand))
+            {
+                _logger?.KWarning($"[KlothoNetworkService] Authority-only command (ReliableCommandSubmit) from peerId={fromPeerId}: {command.GetType().Name} — disconnect");
+                CommandPool.Return(command);
+                if (fromPeerId != -1) _transport.DisconnectPeer(fromPeerId);
+                return;
+            }
 
             // Dormant: a host would do commit-tick placement + (playerId, sequence) dedup +
             // tick-confirmed re-broadcast here. Until then, drop (unreachable in peer-to-peer — see
@@ -1513,17 +1530,18 @@ namespace xpTURN.Klotho.Network
             if (cmdSpan.Length < 4)
             {
                 _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] Command data too short: length={cmdSpan.Length}, playerId={msg.PlayerId}, tick={msg.Tick}");
+                if (IsHost && fromPeerId != -1)
+                    _transport.DisconnectPeer(fromPeerId);
                 return;
             }
 
             // Decode before anything else so a malformed payload is neither relayed nor executed.
-            // Only a throw is a failure: a null command (unknown type) is relayed as before and
-            // dropped below. The authority disconnects the sender, as it does for any malformed
-            // message; a guest only logs.
+            // The authority disconnects a sender whose payload yields no command (too short, a throw,
+            // or an unknown type), as it does for any malformed message; a guest only logs.
             var reader = new SpanReader(cmdSpan);
-            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command))
+            if (!_commandFactory.TryDeserializeCommandRaw(ref reader, out var command, out var error))
             {
-                _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] Malformed command payload from peerId={fromPeerId} (dataLen={cmdSpan.Length})");
+                _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] Malformed command payload from peerId={fromPeerId} (dataLen={cmdSpan.Length}): {error.GetType().Name}: {error.Message}");
                 if (IsHost && fromPeerId != -1)
                     _transport.DisconnectPeer(fromPeerId);
                 return;
@@ -1532,6 +1550,39 @@ namespace xpTURN.Klotho.Network
             // Guest >> Host >> other guests
             if (IsHost && fromPeerId != -1)
             {
+                if (command == null)
+                {
+                    _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] Malformed command payload from peerId={fromPeerId}: unknown command type {System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(cmdSpan)} — disconnect");
+                    _transport.DisconnectPeer(fromPeerId);
+                    return;
+                }
+
+                // The host's peer↔player binding is authoritative. A guest sends only its own player's
+                // commands, with the header copied from the command (SendCommand), so a sender without a
+                // binding, a header naming another player, or a payload that disagrees with its header is
+                // forged. The relay forwards the payload bytes as received, so the command cannot be
+                // corrected here — the sender is disconnected, as for a malformed payload.
+                if (!_peerToPlayer.TryGetValue(fromPeerId, out int senderPlayerId)
+                    || msg.PlayerId != senderPlayerId
+                    || (command != null && (command.PlayerId != msg.PlayerId || command.Tick != msg.Tick)))
+                {
+                    _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] Command not from the player it names: peerId={fromPeerId}, header=(tick={msg.Tick}, playerId={msg.PlayerId}), payload=(tick={(command != null ? command.Tick : -1)}, playerId={(command != null ? command.PlayerId : -1)})");
+                    if (command != null) CommandPool.Return(command);
+                    _transport.DisconnectPeer(fromPeerId);
+                    return;
+                }
+
+                // A framework system command (PlayerJoin) is authored by the host only, so one from a guest is
+                // forged. A ghost join would put a player whose input never comes into every roster and stall
+                // every node's verified chain. A reliable command is a system command a guest does send.
+                if (command is ISystemCommand && !(command is IReliableCommand))
+                {
+                    _logger?.KWarning($"[KlothoNetworkService][HandleCommandMessage] Authority-only command from peerId={fromPeerId}: {command.GetType().Name} — disconnect");
+                    CommandPool.Return(command);
+                    _transport.DisconnectPeer(fromPeerId);
+                    return;
+                }
+
                 // If the (tick, playerId) slot is sealed locally (host has already filled with
                 // an empty placeholder and chain advanced past it), suppress relay so other peers
                 // keep the same empty placeholder. Without this guard, a late real packet from

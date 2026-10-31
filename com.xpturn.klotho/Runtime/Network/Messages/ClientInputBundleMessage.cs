@@ -61,6 +61,8 @@ namespace xpTURN.Klotho.Network
             {
                 Entries[i].Tick = reader.ReadInt32();
                 int len = reader.ReadInt32();
+                if (len < 0)
+                    throw new System.IO.InvalidDataException($"ClientInputBundle: entry {i} has a negative length {len}");
                 Entries[i].CommandDataLength = len;
                 Entries[i].CommandData = len > 0 ? reader.ReadRawBytes(len).ToArray() : null;
             }

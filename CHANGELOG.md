@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.15.1] - 2026-10-31
+
+### Security — the authority no longer takes a command on the word of the peer that sent it
+
+- **What was wrong.** A follow-up review of 0.15.0 found that the receive paths trusted what a command said
+  about itself, and accepted any kind of command.
+  - A server-driven server kept the player id and tick written inside a client's command payload. A client
+    could name another player, steering that player's character, or another tick, which the server ignored
+    but every client filed the command under — sending all of them into a desync and a full-state resync.
+  - A peer-to-peer host stored and relayed a guest's command without checking that it came from the player
+    it named. A guest could send commands as the host or as another guest, get past the host's seal on an
+    input slot it had already closed, or send from a peer bound to no player at all.
+  - Nothing checked a command's kind. `PlayerJoinCommand`, which only the authority creates, was accepted
+    from any client. In peer-to-peer, one such command from a guest put a player who does not exist into
+    every node's roster, and every node's verified tick stopped for good, waiting for that player's input
+    (reproduced; nobody was disconnected). In server-driven mode it added the ghost participant on the
+    server and every client, and could overwrite the join entitlement a replay plays back.
+  - A server-driven client could send a reliable command (`IReliableCommand`) in its per-tick input
+    instead of `ReliableCommandSubmit`, skipping the server's in-match entitlement gate and its sequence
+    dedup.
+  - A command payload shorter than its 4-byte type, or of a type the receiver does not register, was
+    dropped silently by the server-driven server, and a peer-to-peer host relayed an unknown type to every
+    guest — while a payload that failed to decode disconnected its sender.
+- **What changed.**
+  - The server-driven server stamps its input slot's player id and tick over the payload's.
+  - The peer-to-peer host disconnects a guest whose command header names a player other than the guest's
+    own, whose payload disagrees with its header, or that is bound to no player.
+  - The authority disconnects the sender of a framework system command — an `ISystemCommand` that is not
+    an `IReliableCommand`, today only `PlayerJoinCommand` — on every receive path. The server-driven
+    per-tick input path (`ClientInput`, `ClientInputBundle`) also refuses reliable commands; they come
+    through `ReliableCommandSubmit`. A guest's reliable commands on the peer-to-peer slot path are
+    unaffected.
+  - A payload that yields no command — too short, of an unknown type, or failing to decode — disconnects
+    its sender on the authority; a guest still logs and drops it. The warning says which, and for a failed
+    decode names the exception type and message.
+- **Compatibility.** The wire format does not change, and peers of the same build never send what is now
+  refused — every honest send path was checked. What behaves differently is that a peer that does is
+  disconnected rather than ignored. That includes a client built with command types the receiver does not
+  register (a build mismatch), game code on a server-driven client that sends a reliable command through
+  `InputCommand` instead of `IssueOnce`, and a client that sends a game-defined `ISystemCommand` that is not
+  an `IReliableCommand`.
+
+### Fixed
+
+- **Replays.** A replay whose tick table points outside its command stream is refused on load
+  (`InvalidDataException`) instead of failing during playback. The Brawler sample's `--verify` reports a
+  playback that throws as verdict 20 (`playbackFailed=<type>:<message>`) instead of ending the process on
+  an unhandled exception (exit 134 on macOS) and leaving the rest of the batch unverified.
+- `CommandFactory.DeserializeCommands` returns the commands it already decoded to the pool when a later
+  one in the array fails.
+- `ClientInputBundle` refuses a negative entry length, and the four zero-copy messages check their length
+  the same way whether they are read from an array or a span (latent — no receive path reads them from a
+  span).
+- `DataAssetReader`'s collection loaders check the entry count against the bytes left before sizing the
+  list. A corrupt count in a local file throws `InvalidDataException` instead of allocating for it first
+  (381 MiB for one 12-byte file).
+
+### Added
+
+- **`TryDeserializeCommandRaw(…, out ICommand command, out Exception error)`** — the same decode as the
+  three-argument form, which is unchanged, that also hands back what the decode threw (null when it did
+  not).
+
+### Tests
+
+- **Each fix is under test.** There are 53 new dotnet tests, and one more scenario in the Brawler server
+  suite (a replay whose playback throws). Five of them run a server-driven server and two real clients end
+  to end, through the handshake: a forged join or a reliable command sent as per-tick input disconnects its
+  sender and never reaches the other client, while an honest reliable command still runs and still passes
+  through the entitlement gate. 41 of the 53 fail on 0.15.0. The other twelve are controls that must hold
+  either way — an honest command is still accepted, a guest's or client's reliable command still goes
+  through, a zero-length bundle entry still decodes, data assets still round-trip — or exercise the new
+  overload. The reflection test that keeps the count-bomb list complete now selects members by the
+  generator's own rule (fields and properties, any accessibility, `[KlothoOrder]` without `[KlothoIgnore]`).
+- **Verified.** Each guard was checked to fail when the rule it guards is undone, with one known gap: a
+  single-type data asset collection cannot be built to sit exactly at the bound, so that loader's bound is
+  held only by a round trip. The dotnet suites pass in Debug and Release with no failures, the EditMode
+  suites pass on Unity 2022.3.62f3, 6000.3.27f2 and 6000.6.7f1 with the package recompiled, and the Godot
+  samples, built against the rebuilt addon, play a headless match over a real UDP transport — a dedicated
+  server with two server-driven clients, and a peer-to-peer host with a guest.
+
 ## [0.15.0] - 2026-10-25
 
 ### Security — a malformed or hostile payload can no longer make a peer allocate, read stale bytes, or throw past the serializer

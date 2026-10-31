@@ -64,6 +64,9 @@ namespace xpTURN.Klotho.ECS
             var reader = new SpanReader(data, 0, data.Length);
             ValidateHeader(ref reader);
             int count = reader.ReadInt32();
+            // Each entry is at least its 4-byte size, so a count the bytes left cannot hold is refused before it sizes the list.
+            if (count < 0 || count > reader.Remaining / 4)
+                throw new System.IO.InvalidDataException($"DataAsset collection count {count} does not fit the {reader.Remaining} bytes left");
             var result = new List<T>(count);
             for (int i = 0; i < count; i++)
             {
@@ -98,6 +101,9 @@ namespace xpTURN.Klotho.ECS
             var reader = new SpanReader(buffer);
             ValidateHeader(ref reader);
             int count = reader.ReadInt32();
+            // Each entry is at least its type id and size (8 bytes), so a count the bytes left cannot hold is refused before it sizes the list.
+            if (count < 0 || count > reader.Remaining / 8)
+                throw new System.IO.InvalidDataException($"DataAsset collection count {count} does not fit the {reader.Remaining} bytes left");
             var result = new List<IDataAsset>(count);
             for (int i = 0; i < count; i++)
             {

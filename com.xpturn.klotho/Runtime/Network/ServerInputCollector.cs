@@ -236,6 +236,16 @@ namespace xpTURN.Klotho.Network
                 return true;
             }
 
+            // The slot is authoritative: stamp the peer-validated playerId and the (possibly redirected)
+            // tick over the payload's untrusted values. The server executes the collected command as is,
+            // but an SD client files the broadcast command under its own (Tick, PlayerId) — a payload that
+            // disagrees with its slot would steer another player's character or desync every client.
+            if (command is CommandBase cb)
+            {
+                cb.PlayerId = playerId;
+                cb.Tick = tick;
+            }
+
             tickInputs[playerId] = command;
             if (!overwrite)
                 _acceptedCount++;

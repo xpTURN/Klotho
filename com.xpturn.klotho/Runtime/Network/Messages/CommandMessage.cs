@@ -81,6 +81,9 @@ namespace xpTURN.Klotho.Network
             SenderAdvantage = reader.ReadInt32();
             TimingFlags = reader.ReadByte();
             int len = reader.ReadInt32();
+            // One bound for both branches: without it the copying branch reads a negative length as no data.
+            if (len < 0 || len > reader.Remaining)
+                throw new System.IO.InvalidDataException($"Command: length {len} does not fit the {reader.Remaining} remaining bytes");
             _sourceBuffer = reader.SourceBuffer;
             if (_sourceBuffer != null)
             {

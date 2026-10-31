@@ -663,6 +663,10 @@ namespace xpTURN.Klotho.Replay
                 int tick = reader.ReadInt32();
                 int offset = reader.ReadInt32();
                 int length = reader.ReadInt32();
+                // Every recorded blob starts with its 4-byte command count and lies inside the stream. The
+                // buffer can be longer than the stream, so an entry outside it would read bytes this file never wrote.
+                if (offset < 0 || length < 4 || offset > bufferSize - length)
+                    throw new InvalidDataException($"Replay tick {tick} entry (offset {offset}, length {length}) lies outside the {bufferSize}-byte command stream");
                 _tickOffsets[tick] = (offset, length);
             }
         }
