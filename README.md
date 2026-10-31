@@ -3,10 +3,9 @@
 [![Godot 4.4+ (.NET)](https://img.shields.io/badge/godot-4.4%2B%20(.NET)-478cbf.svg)](https://godotengine.org/download)
 [![License: Apache License Version 2.0](https://img.shields.io/badge/License-Apache-brightgreen.svg)](https://github.com/xpTURN/Klotho/blob/main/LICENSE)
 
-**Deterministic Multiplayer Simulation Framework for Unity and Godot**
+**English** | [한국어](README.ko-KR.md) | [日本語](README.ja-JP.md) | [简体中文](README.zh-CN.md)
 
-> ⚠️ **Experimental Release**
-> This project is under active development and has not yet reached a stable stage. Public APIs, serialization formats, and network protocols may change without notice. Production use is not recommended.
+**Deterministic Multiplayer Simulation Framework for Unity and Godot**
 
 A deterministic-simulation framework supporting Client-Side Prediction (CSP), Rollback, Frame Synchronization, Server-Driven mode, and Replay. The simulation core is engine-agnostic pure C# with **Unity** and **Godot (.NET)** adapters on top. By excluding floating-point and building the simulation solely on 32.32 fixed-point (`FP64`) and a deterministic RNG (Xorshift128+), it guarantees full reproducibility across platforms and compilers.
 
