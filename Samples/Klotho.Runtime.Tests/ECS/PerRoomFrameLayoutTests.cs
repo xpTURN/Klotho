@@ -204,5 +204,72 @@ namespace xpTURN.Klotho.ECS.Tests
             Assert.IsTrue(foundA, "Unpruned component A must appear with its room-specific SlotCapacity.");
             Assert.IsFalse(foundB, "Pruned component B must not appear in this room's memory report.");
         }
+
+        [Test]
+        public void SnapshotFrame_And_CopyFrom_PreserveScopedStateHash()
+        {
+            int typeA = ComponentStorageRegistry.GetTypeId<PruneGameAComponent>();
+            int typeB = ComponentStorageRegistry.GetTypeId<PruneGameBComponent>();
+
+            var sim = new EcsSimulation(64, 4, 25);
+            sim.Initialize();
+            sim.Frame.SetStateHashComponentTypes(typeA);
+            var e = sim.Frame.CreateEntity();
+            sim.Frame.Add(e, new PruneGameAComponent { Value = 7 });
+            sim.Frame.Add(e, new PruneGameBComponent { Value = 42 });
+
+            sim.SaveSnapshot();
+            Assert.IsTrue(sim.TryGetSnapshotFrame(0, out var snap));
+            Assert.AreEqual(sim.Frame.CalculateHash(), snap.CalculateHash(),
+                "Saved snapshot must preserve scoped state-hash policy and match live Frame.CalculateHash().");
+            Assert.AreNotEqual(snap.CalculateFullHash(), snap.CalculateHash());
+
+            var copy = sim.CreateCompatibleFrame();
+            copy.CopyFrom(sim.Frame);
+            Assert.AreEqual(sim.Frame.CalculateHash(), copy.CalculateHash());
+        }
+
+        [Test]
+        public void ReadyHandshake_DetectsDifferentStateHashScopes_WithIdenticalFrameLayout()
+        {
+            int typeA = ComponentStorageRegistry.GetTypeId<PruneGameAComponent>();
+            int typeB = ComponentStorageRegistry.GetTypeId<PruneGameBComponent>();
+
+            var sim1 = new EcsSimulation(64, 4, 25);
+            var sim2 = new EcsSimulation(64, 4, 25);
+            sim1.Frame.SetStateHashComponentTypes(typeA);
+            sim2.Frame.SetStateHashComponentTypes(typeA, typeB);
+
+            var cfg = new SimulationConfig { MaxEntities = 64, TickIntervalMs = 25, MaxRollbackTicks = 4, SyncCheckInterval = 2 };
+            var engine1 = new KlothoEngine(cfg, new SessionConfig { MaxPlayers = 2, MinPlayers = 1 });
+            var engine2 = new KlothoEngine(cfg, new SessionConfig { MaxPlayers = 2, MinPlayers = 1 });
+            engine1.Initialize(sim1, new KlothoNetworkService(), null, null);
+            engine2.Initialize(sim2, new KlothoNetworkService(), null, null);
+
+            Assert.AreEqual(sim1.Layout.LayoutFingerprint, sim2.Layout.LayoutFingerprint);
+            Assert.AreNotEqual(engine1.GetLocalLayoutFingerprint(), engine2.GetLocalLayoutFingerprint());
+            Assert.AreEqual(
+                ReadyFingerprintVerdict.LayoutMismatch,
+                engine1.CheckReadyFingerprints(2, engine2.GetLocalLayoutFingerprint(), 0, compareEnvironment: false));
+        }
+
+        [Test]
+        public void LegacyFrameCtor_MatchesActiveOverriddenLayoutForCaptureStateTo()
+        {
+            int typeA = ComponentStorageRegistry.GetTypeId<PruneGameAComponent>();
+            var sim = new EcsSimulation(
+                maxEntities: 96,
+                maxRollbackTicks: 4,
+                deltaTimeMs: 25,
+                maxCountOverrides: new Dictionary<int, int> { { typeA, 12 } });
+            sim.Initialize();
+            var e = sim.Frame.CreateEntity();
+            sim.Frame.Add(e, new PruneGameAComponent { Value = 55 });
+
+            var legacyHelper = new Frame(96, null);
+            byte[] sysBuf = null;
+            Assert.DoesNotThrow(() => sim.CaptureStateTo(legacyHelper, ref sysBuf));
+            Assert.AreEqual(55, legacyHelper.GetReadOnly<PruneGameAComponent>(e).Value);
+        }
     }
 }

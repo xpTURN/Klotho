@@ -563,6 +563,13 @@ namespace xpTURN.Klotho.ECS
 
         // Match-local policy, not rollback state. Full serialization still includes all types.
         private int[] _stateHashComponentTypes;
+        private long _stateHashScopeFingerprint;
+
+        /// <summary>
+        /// Deterministic fingerprint of the configured scoped state-hash component set, or 0 when unconfigured (full hash).
+        /// Folded into <see cref="Core.KlothoEngine.GetLocalLayoutFingerprint"/> so Ready handshakes catch hash-scope mismatches.
+        /// </summary>
+        public long StateHashScopeFingerprint => _stateHashScopeFingerprint;
 
         public void SetStateHashComponentTypes(params int[] typeIds)
         {
@@ -575,6 +582,10 @@ namespace xpTURN.Klotho.ECS
                 if ((i > 0 && sorted[i] == sorted[i - 1]) || registered.BinarySearch(sorted[i]) < 0)
                     throw new ArgumentException("Hash scope must contain distinct registered component types.", nameof(typeIds));
             _stateHashComponentTypes = sorted;
+            ulong h = FPHash.Hash(FPHash.FNV_OFFSET, sorted.Length);
+            for (int i = 0; i < sorted.Length; i++)
+                h = FPHash.Hash(h, sorted[i]);
+            _stateHashScopeFingerprint = h == 0 ? 1L : (long)h;
         }
 
         private bool IncludesStateHashType(int typeId)
@@ -696,6 +707,8 @@ namespace xpTURN.Klotho.ECS
             Tick = source.Tick;
             DeltaTimeMs = source.DeltaTimeMs;
             AssetRegistry = source.AssetRegistry;
+            _stateHashComponentTypes = source._stateHashComponentTypes;
+            _stateHashScopeFingerprint = source._stateHashScopeFingerprint;
             Entities.CopyFrom(source.Entities);
             // No sparse re-initialization — source's sparse (-1 or valid) is duplicated via BlockCopy
             Buffer.BlockCopy(source._heap, 0, _heap, 0, _heapSize);   // single memcpy

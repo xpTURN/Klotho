@@ -50,6 +50,7 @@ namespace xpTURN.Klotho.ECS
         // === Layout + freeze state ===
         private static readonly object _layoutLock = new object();
         private static readonly Dictionary<LayoutKey, FrameLayout> _layoutCache = new Dictionary<LayoutKey, FrameLayout>();
+        private static readonly Dictionary<int, FrameLayout> _lastLayoutByMaxEntities = new Dictionary<int, FrameLayout>();
         // Set once any layout has been computed; guards Register<T> from adding types post-layout.
         private static bool _typesFrozen = false;
         // Legacy process-global default layout (populated by explicit EnsureLayoutComputed calls, or
@@ -395,6 +396,7 @@ namespace xpTURN.Klotho.ECS
                 var key = LayoutKey.Create(maxEntities, maxCountOverrides, effectivePruned);
                 if (_layoutCache.TryGetValue(key, out var cached))
                 {
+                    _lastLayoutByMaxEntities[maxEntities] = cached;
                     if (_defaultLayout == null) _defaultLayout = cached;
                     return cached;
                 }
@@ -434,6 +436,7 @@ namespace xpTURN.Klotho.ECS
                     registeredSorted, cleanupClear, cleanupDestroy);
 
                 _layoutCache[key] = frameLayout;
+                _lastLayoutByMaxEntities[maxEntities] = frameLayout;
                 _typesFrozen = true;
                 if (_defaultLayout == null) _defaultLayout = frameLayout;
 
@@ -455,6 +458,8 @@ namespace xpTURN.Klotho.ECS
             {
                 if (_frozen && _defaultLayout != null && _defaultLayout.MaxEntities == maxEntities)
                     return _defaultLayout;
+                if (_lastLayoutByMaxEntities.TryGetValue(maxEntities, out var existing))
+                    return existing;
             }
             var layout = ComputeLayout(maxEntities);
             if (AllowLayoutRecompute)
@@ -640,6 +645,7 @@ namespace xpTURN.Klotho.ECS
                 _typesFrozen = false;
                 _defaultLayout = null;
                 _layoutCache.Clear();
+                _lastLayoutByMaxEntities.Clear();
                 _maxCountOverrides = null;   // next EnsureLayoutComputed re-supplies; prevents cross-fixture leak
                 _prunedComponentTypeIds = null;   // next EnsureLayoutComputed re-supplies (same reason)
                 _prunedSet = null;

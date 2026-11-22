@@ -26,6 +26,9 @@ namespace xpTURN.Klotho.ECS
 
         public FrameLayout Layout => _layout;
 
+        /// <summary>Creates a standalone <see cref="Frame"/> sharing this simulation's immutable <see cref="FrameLayout"/> (e.g. for <see cref="CaptureStateTo"/>).</summary>
+        public Frame CreateCompatibleFrame() => new Frame(_layout, _logger);
+
         // Desync-diagnostic hash history. _breakdown is the reusable layered-hash scratch that
         // GetStateHash fills when history is enabled; _hashHistory is the numeric ring, built lazily once
         // the participant set is stable. All inert (no cost / no allocation) when _hashHistoryCapacity==0.

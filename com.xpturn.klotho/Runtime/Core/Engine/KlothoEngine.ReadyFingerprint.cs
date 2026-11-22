@@ -44,11 +44,17 @@ namespace xpTURN.Klotho.Core
 
         /// <summary>
         /// Component-registry layout fingerprint for this session's <see cref="xpTURN.Klotho.ECS.FrameLayout"/>
-        /// (falls back to the registry default when running a non-ECS simulation). Comparable at any point
-        /// in a session; 0 before any layout exists.
+        /// (falls back to the registry default when running a non-ECS simulation), folded with the Frame's
+        /// scoped state-hash component set when configured. Comparable at any point in a session; 0 before any layout exists.
         /// </summary>
         public long GetLocalLayoutFingerprint()
-            => GetActiveFrameLayout()?.LayoutFingerprint ?? xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
+        {
+            long baseFp = GetActiveFrameLayout()?.LayoutFingerprint ?? xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
+            long scopeFp = (_simulation as xpTURN.Klotho.ECS.EcsSimulation)?.Frame?.StateHashScopeFingerprint ?? 0;
+            if (scopeFp == 0) return baseFp;
+            ulong folded = xpTURN.Klotho.Deterministic.FPHash.Hash((ulong)baseFp, (ulong)scopeFp);
+            return folded == 0 ? 1L : (long)folded;
+        }
 
         /// <summary>
         /// Environment-only fingerprint (static colliders XOR navmesh XOR the game's slot), registry
