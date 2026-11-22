@@ -561,6 +561,42 @@ namespace xpTURN.Klotho.ECS
             }
         }
 
+        // Match-local policy, not rollback state. Full serialization still includes all types.
+        private int[] _stateHashComponentTypes;
+
+        public void SetStateHashComponentTypes(params int[] typeIds)
+        {
+            if (Tick != 0) throw new InvalidOperationException("Configure the hash scope before ticking.");
+            if (typeIds == null || typeIds.Length == 0) throw new ArgumentException("Empty hash scope.", nameof(typeIds));
+            var sorted = (int[])typeIds.Clone();
+            Array.Sort(sorted);
+            var registered = _layout.RegisteredTypeIdsSorted;
+            for (int i = 0; i < sorted.Length; i++)
+                if ((i > 0 && sorted[i] == sorted[i - 1]) || registered.BinarySearch(sorted[i]) < 0)
+                    throw new ArgumentException("Hash scope must contain distinct registered component types.", nameof(typeIds));
+            _stateHashComponentTypes = sorted;
+        }
+
+        private bool IncludesStateHashType(int typeId)
+            => _stateHashComponentTypes == null || Array.BinarySearch(_stateHashComponentTypes, typeId) >= 0;
+
+        private ulong BeginStateHash(bool includeAll = false)
+        {
+            ulong hash = FPHash.Hash(FPHash.FNV_OFFSET, Tick);
+            if (includeAll || _stateHashComponentTypes == null) return FPHash.Hash(hash, Entities.Count);
+            // Excluded entities must not leak into the hash through Entities.Count.
+            // Include scope identity and each selected storage's count instead.
+            hash = FPHash.Hash(hash, -1);
+            hash = FPHash.Hash(hash, _stateHashComponentTypes.Length);
+            foreach (int typeId in _stateHashComponentTypes)
+            {
+                hash = FPHash.Hash(hash, typeId);
+                hash = FPHash.Hash(hash, GetLiveCount(typeId));
+            }
+            return hash;
+        }
+
+        public ulong CalculateFullHash() => CalculateHash(null, true);
         public ulong CalculateHash() => CalculateHash(null);
 
         // Layered fold. Each component type is hashed from a fresh FNV seed so its per-type value is
@@ -584,11 +620,11 @@ namespace xpTURN.Klotho.ECS
         // RegisteredTypeIdsSorted and so leaves this fold). ComponentStorageRegistry.LayoutFingerprint
         // exists to make that mismatch legible: it is logged at boot on every peer and compared at join,
         // so compare it before reading the per-component breakdown below.
-        public ulong CalculateHash(StateHashBreakdown breakdown)
+        public ulong CalculateHash(StateHashBreakdown breakdown) => CalculateHash(breakdown, false);
+
+        private ulong CalculateHash(StateHashBreakdown breakdown, bool includeAll)
         {
-            ulong frameHash = FPHash.FNV_OFFSET;
-            frameHash = FPHash.Hash(frameHash, Tick);
-            frameHash = FPHash.Hash(frameHash, Entities.Count);
+            ulong frameHash = BeginStateHash(includeAll);
 
             var typeIds = _layout.RegisteredTypeIdsSorted;
             breakdown?.EnsureComponentCapacity(typeIds.Length);
@@ -597,6 +633,15 @@ namespace xpTURN.Klotho.ECS
                 int typeId = typeIds[i];
                 ref readonly var layout = ref _layout.GetLayout(typeId);
 
+                if (!includeAll && !IncludesStateHashType(typeId))
+                {
+                    if (breakdown != null)
+                    {
+                        breakdown.ComponentHashes[i] = 0;
+                        breakdown.ComponentCounts[i] = 0;
+                    }
+                    continue;
+                }
                 ulong h = FPHash.FNV_OFFSET;
                 ComponentStorageRegistry.GetHashDispatch(typeId)(_heap, in layout, Entities, ref h);
                 frameHash = FPHash.Hash(frameHash, h);
@@ -829,9 +874,7 @@ namespace xpTURN.Klotho.ECS
             // the registered type set is hash input, so a peer with extra empty types cannot verify a
             // FullState from a peer without them — applying the authoritative state does not reconcile
             // it, because the difference is in the fold set rather than in the values.
-            ulong frameHash = FPHash.FNV_OFFSET;
-            frameHash = FPHash.Hash(frameHash, Tick);
-            frameHash = FPHash.Hash(frameHash, Entities.Count);
+            ulong frameHash = BeginStateHash();
 
             Entities.Serialize(ref writer);
             var typeIds = _layout.RegisteredTypeIdsSorted;
@@ -843,6 +886,11 @@ namespace xpTURN.Klotho.ECS
                 ref readonly var layout = ref _layout.GetLayout(typeId);
 
                 writer.WriteInt32(typeId);
+                if (!IncludesStateHashType(typeId))
+                {
+                    ComponentStorageRegistry.GetSerializeDispatch(typeId)(_heap, in layout, ref writer);
+                    continue;
+                }
                 ulong h = FPHash.FNV_OFFSET;
                 ComponentStorageRegistry.GetSerializeAndHashDispatch(typeId)(
                     _heap, in layout, Entities, ref writer, ref h);
