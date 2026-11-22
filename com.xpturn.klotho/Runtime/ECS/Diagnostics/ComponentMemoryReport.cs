@@ -177,11 +177,12 @@ namespace xpTURN.Klotho.ECS.Diagnostics
 
             report.Reset(frame.MaxEntities, ringHeaps);
 
-            ReadOnlySpan<int> typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var frameLayout = frame.Layout;
+            ReadOnlySpan<int> typeIds = frameLayout.RegisteredTypeIdsSorted;
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref frameLayout.GetLayout(typeId);
 
                 int memSize = layout.ComponentSize;
                 int slot = layout.SlotCapacity;

@@ -1269,9 +1269,9 @@ namespace xpTURN.Klotho.Core
             // hash mismatch shows up. Editor vs player build is the classic case: Editor-only test
             // assemblies contribute components a player build does not have.
             _logger?.KInformation(
-                $"[KlothoEngine][Registry] boot: types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount} " +
-                $"cleanup={xpTURN.Klotho.ECS.ComponentStorageRegistry.CleanupTypeCount} " +
-                $"fp=0x{xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint:X16}");
+                $"[KlothoEngine][Registry] boot: types={GetLocalLayoutTypeCount()} " +
+                $"cleanup={GetLocalCleanupTypeCount()} " +
+                $"fp=0x{GetLocalLayoutFingerprint():X16}");
 
             SaveSnapshot(0);
 

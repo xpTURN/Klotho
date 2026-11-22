@@ -670,7 +670,7 @@ namespace xpTURN.Klotho.Core
                 if (episode.ComponentHashes[baseIndex + c] == remoteComponents[c]) continue;
 
                 layer = DesyncLayer.Component;
-                typeIdOrIdx = xpTURN.Klotho.ECS.EcsSimulation.ComponentTypeIdAt(c);
+                typeIdOrIdx = _diagHistorySim?.GetComponentTypeIdAt(c) ?? xpTURN.Klotho.ECS.EcsSimulation.ComponentTypeIdAt(c);
                 string name = xpTURN.Klotho.ECS.EcsSimulation.ComponentTypeName(typeIdOrIdx) ?? "?";
                 _logger?.KError(
                     $"[Desync][Diag] layer=Component type={name}({typeIdOrIdx}) " +

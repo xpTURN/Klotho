@@ -256,7 +256,7 @@ namespace xpTURN.Klotho.ECS
             // Cleanup is the tail-end mirror of SaveAllPreviousTransforms: same builtin treatment, same
             // hard gate. The two modes get separate slots because their cost profiles are unrelated —
             // clear is O(sparse) per type, destroy is entities × RemoveAllComponents.
-            if (ComponentStorageRegistry.CleanupClearTypeIds.Length > 0)
+            if (frame.Layout.CleanupClearTypeIds.Length > 0)
             {
                 long cm0 = GC.GetAllocatedBytesForCurrentThread();
                 long ct0 = Stopwatch.GetTimestamp();
@@ -266,7 +266,7 @@ namespace xpTURN.Klotho.ECS
                     ct1 - ct0, GC.GetAllocatedBytesForCurrentThread() - cm0);
             }
 
-            if (ComponentStorageRegistry.CleanupDestroyTypeIds.Length > 0)
+            if (frame.Layout.CleanupDestroyTypeIds.Length > 0)
             {
                 long dm0 = GC.GetAllocatedBytesForCurrentThread();
                 long dt0 = Stopwatch.GetTimestamp();
@@ -278,13 +278,13 @@ namespace xpTURN.Klotho.ECS
         }
 
         // Built-in tick-end passes. Skipped entirely when nothing declares [KlothoCleanup], so a game
-        // that does not use the feature pays nothing (the arrays are empty at freeze).
+        // that does not use the feature pays nothing (the arrays are empty on the FrameLayout).
         private void RunCleanupPasses(ref Frame frame)
         {
-            if (ComponentStorageRegistry.CleanupClearTypeIds.Length > 0)
+            if (frame.Layout.CleanupClearTypeIds.Length > 0)
                 frame.RunCleanupClear();
 
-            if (ComponentStorageRegistry.CleanupDestroyTypeIds.Length > 0)
+            if (frame.Layout.CleanupDestroyTypeIds.Length > 0)
                 frame.RunCleanupDestroy(EnsureCleanupDestroyBuffer(ref frame));
         }
 

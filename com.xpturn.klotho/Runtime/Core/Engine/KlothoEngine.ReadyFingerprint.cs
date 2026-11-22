@@ -33,12 +33,22 @@ namespace xpTURN.Klotho.Core
         private readonly HashSet<int> _readyLayoutMismatchLogged = new HashSet<int>();
         private readonly HashSet<int> _readyEnvMismatchLogged = new HashSet<int>();
 
+        private xpTURN.Klotho.ECS.FrameLayout GetActiveFrameLayout()
+            => (_simulation as xpTURN.Klotho.ECS.EcsSimulation)?.Layout;
+
+        private int GetLocalLayoutTypeCount()
+            => GetActiveFrameLayout()?.LayoutTypeCount ?? xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount;
+
+        private int GetLocalCleanupTypeCount()
+            => GetActiveFrameLayout()?.CleanupTypeCount ?? xpTURN.Klotho.ECS.ComponentStorageRegistry.CleanupTypeCount;
+
         /// <summary>
-        /// Component-registry layout fingerprint of this process. Stage- and rebake-invariant (it folds
-        /// maxEntities, the sorted type id set, type names, slot capacity and component size, once at
-        /// layout freeze), so it is comparable at any point in a session. 0 before the layout is frozen.
+        /// Component-registry layout fingerprint for this session's <see cref="xpTURN.Klotho.ECS.FrameLayout"/>
+        /// (falls back to the registry default when running a non-ECS simulation). Comparable at any point
+        /// in a session; 0 before any layout exists.
         /// </summary>
-        public long GetLocalLayoutFingerprint() => xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
+        public long GetLocalLayoutFingerprint()
+            => GetActiveFrameLayout()?.LayoutFingerprint ?? xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
 
         /// <summary>
         /// Environment-only fingerprint (static colliders XOR navmesh XOR the game's slot), registry
@@ -74,8 +84,8 @@ namespace xpTURN.Klotho.Core
                 {
                     _logger?.KError(
                         $"[KlothoEngine] Component layout mismatch with playerId={playerId}: " +
-                        $"local(types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount}, " +
-                        $"cleanup={xpTURN.Klotho.ECS.ComponentStorageRegistry.CleanupTypeCount})=0x{localLayout:X16} " +
+                        $"local(types={GetLocalLayoutTypeCount()}, " +
+                        $"cleanup={GetLocalCleanupTypeCount()})=0x{localLayout:X16} " +
                         $"remote=0x{remoteLayoutFingerprint:X16}. The registered component-type set is state-hash " +
                         $"input, so these peers would diverge from tick 0. Fix by loading the same assembly set on " +
                         $"both sides (a common cause is a Unity Editor session registering Editor-only test " +

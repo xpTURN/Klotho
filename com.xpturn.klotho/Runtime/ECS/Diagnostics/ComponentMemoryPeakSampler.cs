@@ -27,7 +27,7 @@ namespace xpTURN.Klotho.ECS.Diagnostics
 
         // Auto-subscribe mode: samples on the engine's verified-frame event.
         public ComponentMemoryPeakSampler(IKlothoEngine engine, EcsSimulation simulation)
-            : this(ComponentStorageRegistry.MaxTypeId)
+            : this(simulation?.Layout?.MaxTypeId ?? ComponentStorageRegistry.MaxTypeId)
         {
             _engine = engine ?? throw new ArgumentNullException(nameof(engine));
             _simulation = simulation ?? throw new ArgumentNullException(nameof(simulation));
@@ -43,10 +43,11 @@ namespace xpTURN.Klotho.ECS.Diagnostics
         public void Sample(Frame frame)
         {
             if (frame == null) return;
-            ReadOnlySpan<int> typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            ReadOnlySpan<int> typeIds = frame.Layout.RegisteredTypeIdsSorted;
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
+                if ((uint)typeId >= (uint)_peakCount.Length) continue;
                 int live = frame.GetLiveCount(typeId);
                 if (live > _peakCount[typeId]) _peakCount[typeId] = live;
             }

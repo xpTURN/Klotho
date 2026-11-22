@@ -273,24 +273,9 @@ namespace xpTURN.Klotho.Network
                 }
             }
 
-            // maxEntities / maxCount overrides / prune-set are PROCESS-global layout inputs, not
-            // per-room ones — but the config that carries them is per-room (the match factory is
-            // free to return a different one per stage). Ask before constructing: handing a
-            // disagreeing set to the registry recomputes the layout in editor/test builds — pulling
-            // _layouts and the type-id cache out from under rooms already ticking on workers — and
-            // throws in release, where nothing between here and ServerLoop.Run catches it, so one
-            // mismatched room would take the whole process and every healthy room with it.
-            // Refusing here costs this room only: the peer gets RoomNotFound, the server lives.
-            if (ComponentStorageRegistry.LayoutInputsConflict(
-                    simConfig.MaxEntities, simConfig.ComponentMaxCountOverrides,
-                    simConfig.PrunedComponentTypeIds, out string layoutConflict))
-            {
-                _logger?.KError(
-                    $"[RoomManager] Room {roomId} refused — per-room simulation config disagrees with the " +
-                    $"process layout. {layoutConflict} Source these three from one place at bootstrap.");
-                return null;
-            }
-
+            // Each room computes and owns its own immutable FrameLayout (cached by layout inputs in
+            // ComponentStorageRegistry.ComputeLayout), so concurrent rooms may safely run different
+            // MaxEntities / ComponentMaxCountOverrides / PrunedComponentTypeIds without colliding.
             var sim = new EcsSimulation(
                 maxEntities: simConfig.MaxEntities,
                 maxRollbackTicks: _config.SimulationMaxRollbackTicks,
