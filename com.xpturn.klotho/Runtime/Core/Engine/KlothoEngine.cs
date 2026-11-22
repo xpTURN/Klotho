@@ -684,9 +684,9 @@ namespace xpTURN.Klotho.Core
 
             if (_simulation is not ECS.EcsSimulation ecsSim) return;
 
-            // Lazy-allocate after maxEntities is determined on the first Update entry.
+            // Lazy-allocate using the simulation's immutable FrameLayout on the first Update entry.
             if (_puPFrame == null)
-                _puPFrame = new ECS.Frame(ecsSim.Frame.MaxEntities, _logger);
+                _puPFrame = new ECS.Frame(ecsSim.Layout, _logger);
 
             _puPFrame.CopyFrom(ecsSim.Frame);
             _previousUpdateTick = CurrentTick;
