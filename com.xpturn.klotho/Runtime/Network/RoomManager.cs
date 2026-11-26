@@ -390,6 +390,7 @@ namespace xpTURN.Klotho.Network
                 _router.UnregisterRoom(room.RoomId);
                 _router.RemoveRoomPeers(room.RoomId);
                 room.Dispose();
+                System.Threading.Interlocked.CompareExchange(ref _rooms[i], null, room);
                 _activeRoomCount--;
 
                 _logger?.KInformation($"[RoomManager] Room {room.RoomId} disposed (active={_activeRoomCount}, drain_phase={room.DrainPhase}, lifetime_ms={lifetimeMs})");
@@ -479,9 +480,28 @@ namespace xpTURN.Klotho.Network
                 _router.UnregisterRoom(room.RoomId);
                 _router.RemoveRoomPeers(room.RoomId);
                 room.State = RoomState.Empty;
+                System.Threading.Interlocked.CompareExchange(ref _rooms[i], null, room);
             }
 
             _activeRoomCount = 0;
+        }
+
+        /// <summary>
+        /// Releases any room slots whose <see cref="Room.State"/> is <see cref="RoomState.Empty"/>
+        /// (for example if <see cref="Room.Dispose"/> was called outside <see cref="CleanupDisposingRooms"/>)
+        /// so the <see cref="Room"/> and its simulation heap can be reclaimed by the GC immediately.
+        /// </summary>
+        public int ReleaseDisposedRooms()
+        {
+            int released = 0;
+            for (int i = 0; i < _rooms.Length; i++)
+            {
+                var room = _rooms[i];
+                if (room == null || room.State != RoomState.Empty) continue;
+                if (ReferenceEquals(System.Threading.Interlocked.CompareExchange(ref _rooms[i], null, room), room))
+                    released++;
+            }
+            return released;
         }
 
         private int FindEmptySlot()

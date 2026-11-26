@@ -70,5 +70,47 @@ namespace xpTURN.Klotho.ECS.Tests
 
             Assert.Throws<InvalidOperationException>(() => HFSMRoot.Register(MakeRoot(RootId)));
         }
+
+        [Test]
+        public void BuildIsolated_AndExplicitRootLifecycle_DoNotPolluteGlobalRegistry()
+        {
+            var rootA = new HFSMBuilder(RootId)
+                .Default(0)
+                .State(0).To(1, new AlwaysTrueDecision(), priority: 1)
+                .State(1)
+                .BuildIsolated(strict: true);
+
+            var rootB = new HFSMBuilder(RootId)
+                .Default(0)
+                .State(0)
+                .BuildIsolated(strict: true);
+
+            Assert.IsFalse(HFSMRoot.Has(RootId));
+            Assert.AreNotSame(rootA, rootB);
+
+            var frame = new Frame(16, null, null);
+            var entityA = frame.CreateEntity();
+            var entityB = frame.CreateEntity();
+
+            HFSMManager.Init(ref frame, entityA, rootA);
+            HFSMManager.Init(ref frame, entityB, rootB);
+            Assert.AreEqual(0, HFSMManager.GetLeafStateId(ref frame, entityA));
+            Assert.AreEqual(0, HFSMManager.GetLeafStateId(ref frame, entityB));
+
+            HFSMManager.Update(ref frame, entityA, rootA);
+            HFSMManager.Update(ref frame, entityB, rootB);
+            Assert.AreEqual(1, HFSMManager.GetLeafStateId(ref frame, entityA));
+            Assert.AreEqual(0, HFSMManager.GetLeafStateId(ref frame, entityB));
+
+            HFSMManager.Deinit(ref frame, entityA, rootA);
+            HFSMManager.Deinit(ref frame, entityB, rootB);
+            Assert.AreEqual(-1, HFSMManager.GetLeafStateId(ref frame, entityA));
+            Assert.IsFalse(HFSMRoot.Has(RootId));
+        }
+
+        private sealed class AlwaysTrueDecision : HFSMDecision
+        {
+            public override bool Decide(ref AIContext context) => true;
+        }
     }
 }

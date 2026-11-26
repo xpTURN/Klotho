@@ -80,6 +80,11 @@ namespace xpTURN.Klotho.ECS.FSM
             return root;
         }
 
+        /// <summary>Validates and assembles the graph without registering it in the global static
+        /// <see cref="HFSMRoot"/> registry. Use with the <see cref="HFSMManager"/> overloads that take an
+        /// explicit <see cref="HFSMRoot"/> instance for per-room / per-map isolated AI lifecycles.</summary>
+        public HFSMRoot BuildIsolated(bool strict = false) => BuildRoot(strict);
+
         private HFSMRoot BuildRoot(bool strict)
         {
             if (!_defaultSet)
@@ -415,6 +420,9 @@ namespace xpTURN.Klotho.ECS.FSM
 
             /// <summary>Validates, sorts, and registers the graph.</summary>
             public HFSMRoot Build(bool strict = false) => _builder.Build(strict);
+
+            /// <summary>Validates and assembles the graph without global registration.</summary>
+            public HFSMRoot BuildIsolated(bool strict = false) => _builder.BuildIsolated(strict);
         }
     }
 }
