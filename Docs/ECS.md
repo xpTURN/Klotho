@@ -40,6 +40,7 @@ com.xpturn.klotho/Runtime/ECS/
 │   ├── IComponent.cs             # component marker interface (source-gen fills the body)
 │   ├── ComponentStorageFlat.cs   # sparse-set view over a heap slice (Add/Remove/Has/Get)
 │   ├── ComponentStorageRegistry.cs  # assembly-scan registration + heap layout + layout fingerprint
+│   ├── FrameLayout.cs            # one simulation's immutable heap layout (per-type offsets + fingerprint)
 │   ├── StorageLayout.cs          # per-type offsets into the heap
 │   ├── IEntityPrototype.cs / EntityPrototypeRegistry.cs  # data-driven spawn templates
 │   ├── StateHashBreakdown.cs / StateHashRing.cs          # per-type hash split + rolling history (§12)
@@ -676,6 +677,8 @@ sim.LockAssetRegistry();   // manual wiring only — see the note below
 You normally hand this `sim` to `KlothoEngine` / the session driver rather than calling `Tick` yourself; see [QuickStart.Unity.md](QuickStart.Unity.md) / [QuickStart.Godot.md](QuickStart.Godot.md) for the full session wiring. `sim.Frame` exposes the live frame for tests and debugging.
 
 > `maxEntities` is a **fixed capacity** — the heap and all storages are sized once at construction (`EntityManager` and every `ComponentStorageFlat<T>` throw on overflow). Size it for your worst case; it cannot grow at runtime.
+
+> **Each simulation owns its layout.** The constructor computes an immutable `FrameLayout` from `maxEntities`, `maxCountOverrides` and `prunedComponentTypeIds` (`sim.Layout`; `frame.Layout` on any of its frames), shared by the live frame and the rollback ring. Simulations with different inputs coexist in one process — rooms on one server may differ. An extra frame for the same simulation (a `CaptureStateTo` target, a scratch copy) comes from `sim.CreateCompatibleFrame()`; `Frame.CopyFrom` refuses a frame of another layout. The `ComponentStorageRegistry` static readers (`GetLayout`, `LayoutFingerprint`, …) describe only a default layout fixed explicitly with `EnsureLayoutComputed`, for single-simulation tools.
 
 ---
 

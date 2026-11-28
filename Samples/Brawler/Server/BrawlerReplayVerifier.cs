@@ -139,10 +139,8 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
             }
 
             // N files in one process. The saving is the process itself — a run costs ~0.6s of start-up before
-            // it simulates anything, which is around 40% of a short match's verification. What it does NOT buy
-            // is a mixed queue: the component layout freezes process-wide on the first file, so every file
-            // here must share one (a different one comes back as `layoutFrozenDifferently`, loudly). Batch
-            // callers should group by build/content revision — that grouping is forced, not advisory.
+            // it simulates anything, which is around 40% of a short match's verification. Each file builds its
+            // simulation from its own layout inputs, so one batch may mix layouts.
             //
             // The exit code is the WORST verdict seen, so a batch cannot bury one bad file among good ones.
             // Every file still prints its own line: the codes are ordered (0 < 10 < 20 < 30) but the reasons
@@ -205,30 +203,13 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer
                 return Line(ExitUnverifiable, path, "tick0hash=absent", attribution);
 
             // ── layout, before any simulation exists ───────────────────────
-            // The component layout freezes process-wide, so it has to be built from the file's inputs
-            // before anything constructs a simulation. ToSimulationConfig deliberately does NOT restore
-            // these two — they are recorded so a VERIFIER can boot with them, and assigning them to a
-            // config after the freeze would only look like a restore. This is that boot.
+            // ToSimulationConfig restores the file's layout inputs, and the session's simulation builds its
+            // layout from this config. The same inputs give the layout fingerprint here, before anything is
+            // constructed: if it differs from the recorded one, nothing derived from the run would mean
+            // anything.
             var simConfig = meta.ToSimulationConfig();
-            var pruned = new int[meta.PrunedComponentTypeIds.Count];
-            for (int i = 0; i < pruned.Length; i++) pruned[i] = meta.PrunedComponentTypeIds[i];
-            simConfig.SetRuntimePrunedComponentTypeIds(pruned);
-            for (int i = 0; i < meta.ComponentMaxCountTypeIds.Count; i++)
-                simConfig.ComponentMaxCountOverrides[meta.ComponentMaxCountTypeIds[i]] = meta.ComponentMaxCountValues[i];
-
-            try
-            {
-                ComponentStorageRegistry.EnsureLayoutComputed(
-                    simConfig.MaxEntities, simConfig.ComponentMaxCountOverrides, simConfig.PrunedComponentTypeIds);
-            }
-            catch (Exception e)
-            {
-                // The layout is already frozen with different inputs — this process has verified another
-                // replay whose build differs. Loud, not silent, and a batch runner should group by layout.
-                return Line(ExitUnverifiable, path, $"layoutFrozenDifferently={Sanitize(e.Message)}", attribution);
-            }
-
-            long localLayout = ComponentStorageRegistry.LayoutFingerprint;
+            long localLayout = ComponentStorageRegistry.ComputeLayout(
+                simConfig.MaxEntities, simConfig.ComponentMaxCountOverrides, simConfig.PrunedComponentTypeIds).LayoutFingerprint;
 
             // Environment anchors that are all zero mean the file claims to know nothing about the world it
             // ran in. Treating that as "nothing to compare, therefore fine" would hand an attacker a

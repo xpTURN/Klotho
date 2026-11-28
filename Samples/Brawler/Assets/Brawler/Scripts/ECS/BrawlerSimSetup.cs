@@ -230,7 +230,7 @@ namespace Brawler
             // The seam, not a system: it answers the driver's callbacks (placement table, destroy,
             // install, reseed) and owns the command path's validator over that same table. The
             // DRIVER is what gets registered.
-            var navMeshPlacementSeam = new NavMeshEffectiveTickSystem();
+            var navMeshPlacementSeam = new NavMeshEffectiveTickSystem(simulation.Layout);
             navMeshPlacementSeam.SetContext(rebakeContext, botFSMSystem);
 
             var platformerCommandSystem = new PlatformerCommandSystem(events);

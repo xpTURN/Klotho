@@ -43,7 +43,7 @@ namespace xpTURN.Klotho.ECS.Diagnostics
         public void Sample(Frame frame)
         {
             if (frame == null) return;
-            ReadOnlySpan<int> typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            ReadOnlySpan<int> typeIds = frame.Layout.RegisteredTypeIdsSorted;
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];

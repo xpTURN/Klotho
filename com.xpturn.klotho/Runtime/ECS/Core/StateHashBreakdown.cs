@@ -12,7 +12,7 @@ namespace xpTURN.Klotho.ECS
     /// <para>Array indices are positional, NOT raw typeIds:
     /// <list type="bullet">
     /// <item><c>ComponentHashes[i]</c> / <c>ComponentCounts[i]</c> ↔
-    /// <c>ComponentStorageRegistry.RegisteredTypeIdsSorted[i]</c></item>
+    /// the simulation's <c>FrameLayout.RegisteredTypeIdsSorted[i]</c></item>
     /// <item><c>SystemHashes[i]</c> ↔ the i-th registered <c>ISnapshotParticipant</c></item>
     /// </list>
     /// Both orderings are build-stable, so index <c>i</c> maps to the same entity on every peer of a

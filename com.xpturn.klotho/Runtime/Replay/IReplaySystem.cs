@@ -124,22 +124,21 @@ namespace xpTURN.Klotho.Replay
         /// <see cref="InitialRoster"/>; a disagreeing count is a corrupted file.</summary>
         IReadOnlyList<int> InitialEntitlementLengths { get; }
 
-        /// <summary>Reservation-pruning denylist the recording ran with, sorted. RECORDED ONLY: the layout is
-        /// frozen process-wide before a replay loads, so <see cref="ToSimulationConfig"/> does not restore it.
-        /// A verifier reads this to BOOT with the same layout.</summary>
+        /// <summary>Reservation-pruning denylist the recording ran with, sorted. <see cref="ToSimulationConfig"/>
+        /// restores it, so playback builds the recorded layout.</summary>
         IReadOnlyList<int> PrunedComponentTypeIds { get; }
 
         /// <summary>Per-component maxCount override type ids, sorted; parallel to
-        /// <see cref="ComponentMaxCountValues"/>. Recorded only, same reason as
+        /// <see cref="ComponentMaxCountValues"/>. Restored with
         /// <see cref="PrunedComponentTypeIds"/>.</summary>
         IReadOnlyList<int> ComponentMaxCountTypeIds { get; }
 
         /// <summary>Per-component maxCount override values, parallel to
-        /// <see cref="ComponentMaxCountTypeIds"/>. Recorded only.</summary>
+        /// <see cref="ComponentMaxCountTypeIds"/>.</summary>
         IReadOnlyList<int> ComponentMaxCountValues { get; }
 
-        /// <summary>Restores the replayable SimulationConfig fields from the metadata. The layout-determining
-        /// inputs above are deliberately NOT restored.</summary>
+        /// <summary>Restores the replayable SimulationConfig fields from the metadata, including the
+        /// layout-determining inputs above.</summary>
         SimulationConfig ToSimulationConfig();
     }
 

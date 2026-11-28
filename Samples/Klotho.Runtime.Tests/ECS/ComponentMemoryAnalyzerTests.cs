@@ -44,7 +44,7 @@ namespace xpTURN.Klotho.ECS.Tests
         public void T1_Capture_VariableBytes_IncludeDense()
         {
             SpawnOwners(5);
-            ref readonly var layout = ref ComponentStorageRegistry.GetLayout(_ownerTid);
+            ref readonly var layout = ref _frame.Layout.GetLayout(_ownerTid);
             int mem = layout.ComponentSize;
 
             var stat = Find(ComponentMemoryAnalyzer.Capture(_frame, 1, null), _ownerTid);

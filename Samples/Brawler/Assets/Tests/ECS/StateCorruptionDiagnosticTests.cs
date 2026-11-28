@@ -52,10 +52,10 @@ namespace xpTURN.Klotho.ECS.Tests
             t.Position = Sentinel;
         }
 
-        private static int BreakdownIndexOf<T>() where T : unmanaged, IComponent
+        private static int BreakdownIndexOf<T>(EcsSimulation sim) where T : unmanaged, IComponent
         {
             int typeId = ComponentStorageRegistry.GetTypeId<T>();
-            var sorted = ComponentStorageRegistry.RegisteredTypeIdsSorted;   // internal, visible to tests
+            var sorted = sim.Layout.RegisteredTypeIdsSorted;
             for (int i = 0; i < sorted.Length; i++)
                 if (sorted[i] == typeId) return i;
             return -1;
@@ -89,8 +89,8 @@ namespace xpTURN.Klotho.ECS.Tests
 
             Assert.AreNotEqual(bdClean.Total, bdDirty.Total, "Total must diverge after the corruption");
 
-            int transformIdx = BreakdownIndexOf<TransformComponent>();
-            int healthIdx = BreakdownIndexOf<HealthComponent>();
+            int transformIdx = BreakdownIndexOf<TransformComponent>(clean);
+            int healthIdx = BreakdownIndexOf<HealthComponent>(clean);
             Assert.GreaterOrEqual(transformIdx, 0, "TransformComponent must be registered");
             Assert.GreaterOrEqual(healthIdx, 0, "HealthComponent must be registered");
 

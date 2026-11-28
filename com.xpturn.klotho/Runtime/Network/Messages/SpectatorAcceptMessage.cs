@@ -92,6 +92,13 @@ namespace xpTURN.Klotho.Network
         [KlothoOrder] public int EndGraceMs;
         [KlothoOrder] public int ClientShutdownGraceMs;
 
+        // --- SimulationConfig layout inputs (appended after SessionConfig — parallel arrays, the same
+        //     form as SimulationConfigMessage, so a spectator builds the room's layout) ---
+
+        [KlothoOrder] public List<int> MaxCountOverrideTypeIds = new List<int>();
+        [KlothoOrder] public List<int> MaxCountOverrideValues = new List<int>();
+        [KlothoOrder] public List<int> PrunedComponentTypeIds = new List<int>();
+
         /// <summary>
         /// Populate the SimulationConfig fields from an ISimulationConfig.
         /// </summary>
@@ -129,6 +136,22 @@ namespace xpTURN.Klotho.Network
             TickDriftWarnMultiplier = config.TickDriftWarnMultiplier;
             StageId = config.StageId;
             MatchConfigData = config.MatchConfigData;
+
+            MaxCountOverrideTypeIds.Clear();
+            MaxCountOverrideValues.Clear();
+            if (config.ComponentMaxCountOverrides != null)
+            {
+                foreach (var kv in config.ComponentMaxCountOverrides)
+                {
+                    MaxCountOverrideTypeIds.Add(kv.Key);
+                    MaxCountOverrideValues.Add(kv.Value);
+                }
+            }
+
+            PrunedComponentTypeIds.Clear();
+            if (config.PrunedComponentTypeIds != null)
+                foreach (var id in config.PrunedComponentTypeIds)
+                    PrunedComponentTypeIds.Add(id);
         }
 
         /// <summary>
@@ -136,7 +159,7 @@ namespace xpTURN.Klotho.Network
         /// </summary>
         public Core.SimulationConfig ToSimulationConfig()
         {
-            return new Core.SimulationConfig
+            var config = new Core.SimulationConfig
             {
                 TickIntervalMs = TickIntervalMs,
                 MaxEntities = MaxEntities,
@@ -171,6 +194,15 @@ namespace xpTURN.Klotho.Network
                 StageId = StageId,
                 MatchConfigData = MatchConfigData,
             };
+
+            int n = System.Math.Min(MaxCountOverrideTypeIds?.Count ?? 0, MaxCountOverrideValues?.Count ?? 0);
+            for (int i = 0; i < n; i++)
+                config.ComponentMaxCountOverrides[MaxCountOverrideTypeIds[i]] = MaxCountOverrideValues[i];
+
+            if (PrunedComponentTypeIds != null)
+                config.PrunedComponentTypeIds.AddRange(PrunedComponentTypeIds);
+
+            return config;
         }
 
         /// <summary>

@@ -72,7 +72,7 @@ namespace xpTURN.Klotho.Core
             _failedChecks = 0;
             _consecutiveFails = 0;
 
-            _forwardFrame = new Frame(_simulation.Frame.MaxEntities, null);
+            _forwardFrame = new Frame(_simulation.Layout, null);
         }
 
         // Tracks the tick from which validation should resume after an external rollback

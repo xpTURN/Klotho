@@ -103,7 +103,7 @@ Klotho 의 결정론적 시뮬레이션 기능에서 가장 큰 이득을 얻는
 - **C# 언어 수준** — Unity 는 **C# 8.0** 을 대상으로 하며, C# 11 에 필요한 런타임 특성의 대체 구현은 `xpTURN.Polyfill` 패키지가 공급합니다. Godot 어댑터는 **net8.0 / `LangVersion latest`** 라 폴리필이 필요 없습니다(네이티브 `init` / `required`).
 - **UniTask** — Unity 에서만 쓰는 비동기(Cysharp). **Godot 어댑터는 표준 라이브러리 `Task`** 를 씁니다 — UniTask 의존 없음.
 - **xpTURN.Klotho.Logging (IKLogger)** — 자체 구조화 로깅(외부 로깅 의존 없음). `Plugins~/Logging.Mel` 샘플 어댑터로 MEL 과 선택적으로 연동할 수 있습니다(`Microsoft.Extensions.Logging.Abstractions` DLL 은 사용하는 쪽이 제공).
-- **LiteNetLib** — UDP 전송의 기본 참조 구현(MIT, 순수 C#). Unity 에서는 `Runtime/ThirdParty/LiteNetLib.v2.1.4` 아래에 **소스로 포함**되고, Godot 에서는 **NuGet 패키지 `LiteNetLib 2.1.4`** 로 들어옵니다. 전송 계층은 `INetworkTransport` 로 추상화되어 있어 바꿀 수 있습니다.
+- **LiteNetLib** — UDP 전송의 기본 참조 구현(MIT, 순수 C#). Unity 에서는 `Runtime/ThirdParty/LiteNetLib.v2.1.5` 아래에 **소스로 포함**되고, Godot 에서는 **NuGet 패키지 `LiteNetLib 2.1.5`** 로 들어옵니다. 전송 계층은 `INetworkTransport` 로 추상화되어 있어 바꿀 수 있습니다.
 - **Newtonsoft.Json** — DataAsset JSON 직렬화(Unity: `com.unity.nuget.newtonsoft-json` · Godot: NuGet `Newtonsoft.Json 13.0.3`)
 
 자세히: [Docs/BaseLibraries.md](Docs/BaseLibraries.md)

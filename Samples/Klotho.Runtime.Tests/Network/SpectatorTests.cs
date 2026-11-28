@@ -1569,5 +1569,87 @@ namespace xpTURN.Klotho.Network.Tests
         }
 
         #endregion
+
+        #region Layout inputs reach the spectator
+
+        private static SimulationConfig PrunedAndCappedConfig()
+        {
+            var config = new SimulationConfig();
+            config.PrunedComponentTypeIds.Add(xpTURN.Klotho.ECS.ComponentStorageRegistry.GetTypeId<xpTURN.Klotho.ECS.Tests.PruneGameBComponent>());
+            config.ComponentMaxCountOverrides[xpTURN.Klotho.ECS.ComponentStorageRegistry.GetTypeId<xpTURN.Klotho.ECS.Tests.PruneGameAComponent>()] = 8;
+            return config;
+        }
+
+        private static long LayoutOf(ISimulationConfig config)
+            => xpTURN.Klotho.ECS.ComponentStorageRegistry.ComputeLayout(
+                config.MaxEntities, config.ComponentMaxCountOverrides, config.PrunedComponentTypeIds).LayoutFingerprint;
+
+        private ISimulationConfig AcceptedConfig(Action pumpAuthority)
+        {
+            var spectatorTransport = new TestTransport();
+            var spectatorService = new SpectatorService();
+            spectatorService.Initialize(spectatorTransport, _commandFactory, new MockKlothoEngine(), _logger);
+            ISimulationConfig received = null;
+            spectatorService.OnSimulationConfigReceived += c => received = c;
+            spectatorService.Connect("localhost", 7777);
+            for (int i = 0; i < 3 && received == null; i++)
+            {
+                pumpAuthority();
+                spectatorService.Update();
+            }
+            return received;
+        }
+
+        private static void AssertSameLayoutInputs(ISimulationConfig authority, ISimulationConfig received)
+        {
+            Assert.IsNotNull(received, "the spectator was never accepted");
+            CollectionAssert.AreEquivalent(authority.PrunedComponentTypeIds, received.PrunedComponentTypeIds);
+            CollectionAssert.AreEquivalent(authority.ComponentMaxCountOverrides, received.ComponentMaxCountOverrides);
+            Assert.AreEqual(LayoutOf(authority), LayoutOf(received),
+                "a different layout fails the Ready check the spectator runs on every relayed PlayerReady");
+        }
+
+        /// <summary>
+        /// A P2P host's spectator builds the room's layout: the prune-set and the maxCount overrides arrive
+        /// in the accept message.
+        /// </summary>
+        [Test]
+        public void P2pHost_SpectatorReceivesTheRoomsLayoutInputs()
+        {
+            var hostConfig = PrunedAndCappedConfig();
+            var hostTransport = new TestTransport();
+            var hostService = new KlothoNetworkService();
+            hostService.Initialize(hostTransport, _commandFactory, _logger);
+            hostTransport.Listen("localhost", 7777, 4);
+            hostService.CreateRoom("test", 4);
+            hostService.SubscribeEngine(new MockKlothoEngine { SimulationConfig = hostConfig });
+
+            AssertSameLayoutInputs(hostConfig, AcceptedConfig(() => hostService.Update()));
+        }
+
+        /// <summary>
+        /// The same through a dedicated server. <c>ServerNetworkService.Update</c> does not poll its
+        /// transport (the server loop does), so the test polls it.
+        /// </summary>
+        [Test]
+        public void Server_SpectatorReceivesTheRoomsLayoutInputs()
+        {
+            var serverConfig = PrunedAndCappedConfig();
+            var serverTransport = new TestTransport();
+            serverTransport.Listen("localhost", 7777, 4);
+            var server = new ServerNetworkService();
+            server.Initialize(serverTransport, _commandFactory, _logger);
+            server.CreateRoom("test", 4);
+            server.MaxSpectatorsPerRoom = 4;
+            server.SubscribeEngine(new MockKlothoEngine { SimulationConfig = serverConfig });
+
+            AssertSameLayoutInputs(serverConfig, AcceptedConfig(() =>
+            {
+                serverTransport.PollEvents();
+                server.Update();
+            }));
+        }
+
+        #endregion
     }
 }

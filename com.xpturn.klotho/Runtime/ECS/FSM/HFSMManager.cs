@@ -31,11 +31,36 @@ namespace xpTURN.Klotho.ECS.FSM
             if (!HFSMRoot.Has(rootId))
                 throw new ArgumentException($"[HFSMManager] Unknown rootId: {rootId}. Call HFSMRoot.Register() before Init().");
 
+            InitCore<TComp>(ref frame, entity, HFSMRoot.Get(rootId), ref context);
+        }
+
+        // Explicit-root entry points: the root is supplied by the caller instead of looked up in the
+        // HFSMRoot registry, so a root built with HFSMBuilder.BuildIsolated (per room, per map) works.
+        // The entity stores root.RootId; Update/Deinit with a root of another id throw.
+        public static unsafe void Init<TComp>(ref Frame frame, EntityRef entity, HFSMRoot root)
+            where TComp : unmanaged, IComponent, IHFSMHost
+        {
+            var context = new AIContext { Frame = frame, Entity = entity };
+            Init<TComp>(ref frame, entity, root, ref context);
+        }
+
+        public static unsafe void Init<TComp>(ref Frame frame, EntityRef entity, HFSMRoot root, ref AIContext context)
+            where TComp : unmanaged, IComponent, IHFSMHost
+        {
+            if (root == null) throw new ArgumentNullException(nameof(root));
+            if (frame.Has<TComp>(entity))
+                throw new InvalidOperationException($"[HFSMManager] Entity {entity} already has {typeof(TComp).Name}. Init() must not be called twice.");
+
+            InitCore<TComp>(ref frame, entity, root, ref context);
+        }
+
+        private static unsafe void InitCore<TComp>(ref Frame frame, EntityRef entity, HFSMRoot root, ref AIContext context)
+            where TComp : unmanaged, IComponent, IHFSMHost
+        {
             frame.Add(entity, default(TComp));
 
-            var root = HFSMRoot.Get(rootId);
             ref HFSMState fsm = ref StateOf<TComp>(ref frame, entity);
-            fsm.RootId = rootId;
+            fsm.RootId = root.RootId;
             for (int i = 0; i < HFSMState.MaxDepth; i++) fsm.ActiveStateIds[i] = -1;
 
             EnterChain(ref fsm, root, root.DefaultStateId, ref context);
@@ -62,6 +87,26 @@ namespace xpTURN.Klotho.ECS.FSM
             frame.Remove<TComp>(entity);
         }
 
+        public static unsafe void Deinit<TComp>(ref Frame frame, EntityRef entity, HFSMRoot root)
+            where TComp : unmanaged, IComponent, IHFSMHost
+        {
+            var context = new AIContext { Frame = frame, Entity = entity };
+            Deinit<TComp>(ref frame, entity, root, ref context);
+        }
+
+        public static unsafe void Deinit<TComp>(ref Frame frame, EntityRef entity, HFSMRoot root, ref AIContext context)
+            where TComp : unmanaged, IComponent, IHFSMHost
+        {
+            if (root == null) throw new ArgumentNullException(nameof(root));
+            if (!frame.Has<TComp>(entity))
+                return;
+
+            ref HFSMState fsm = ref StateOf<TComp>(ref frame, entity);
+            CheckRoot(ref fsm, root, entity);
+            ExitChain(ref fsm, root, fsm.ActiveDepth, 0, ref context);
+            frame.Remove<TComp>(entity);
+        }
+
         public static unsafe void Update<TComp>(ref Frame frame, EntityRef entity)
             where TComp : unmanaged, IComponent, IHFSMHost
         {
@@ -76,8 +121,38 @@ namespace xpTURN.Klotho.ECS.FSM
                 throw new InvalidOperationException($"[HFSMManager] Entity {entity} does not have {typeof(TComp).Name}. Call Init() first.");
 
             ref HFSMState fsm = ref StateOf<TComp>(ref frame, entity);
-            var root = HFSMRoot.Get(fsm.RootId);
+            UpdateCore(ref fsm, HFSMRoot.Get(fsm.RootId), ref context);
+        }
 
+        public static unsafe void Update<TComp>(ref Frame frame, EntityRef entity, HFSMRoot root)
+            where TComp : unmanaged, IComponent, IHFSMHost
+        {
+            var context = new AIContext { Frame = frame, Entity = entity };
+            Update<TComp>(ref frame, entity, root, ref context);
+        }
+
+        public static unsafe void Update<TComp>(ref Frame frame, EntityRef entity, HFSMRoot root, ref AIContext context)
+            where TComp : unmanaged, IComponent, IHFSMHost
+        {
+            if (root == null) throw new ArgumentNullException(nameof(root));
+            if (!frame.Has<TComp>(entity))
+                throw new InvalidOperationException($"[HFSMManager] Entity {entity} does not have {typeof(TComp).Name}. Call Init() first.");
+
+            ref HFSMState fsm = ref StateOf<TComp>(ref frame, entity);
+            CheckRoot(ref fsm, root, entity);
+            UpdateCore(ref fsm, root, ref context);
+        }
+
+        // A root of another id would run that graph's state ids against this entity's chain.
+        private static void CheckRoot(ref HFSMState fsm, HFSMRoot root, EntityRef entity)
+        {
+            if (fsm.RootId != root.RootId)
+                throw new InvalidOperationException(
+                    $"[HFSMManager] Entity {entity} was initialized with root {fsm.RootId}, but root {root.RootId} was passed.");
+        }
+
+        private static unsafe void UpdateCore(ref HFSMState fsm, HFSMRoot root, ref AIContext context)
+        {
             // OnUpdate — run the whole active chain root→leaf (parent before child).
             for (int d = 0; d < fsm.ActiveDepth; d++)
                 ExecuteActions(root.States[fsm.ActiveStateIds[d]].OnUpdateActions, ref context);
@@ -174,14 +249,26 @@ namespace xpTURN.Klotho.ECS.FSM
             => Init<HFSMComponent>(ref frame, entity, rootId);
         public static void Init(ref Frame frame, EntityRef entity, int rootId, ref AIContext context)
             => Init<HFSMComponent>(ref frame, entity, rootId, ref context);
+        public static void Init(ref Frame frame, EntityRef entity, HFSMRoot root)
+            => Init<HFSMComponent>(ref frame, entity, root);
+        public static void Init(ref Frame frame, EntityRef entity, HFSMRoot root, ref AIContext context)
+            => Init<HFSMComponent>(ref frame, entity, root, ref context);
         public static void Deinit(ref Frame frame, EntityRef entity)
             => Deinit<HFSMComponent>(ref frame, entity);
         public static void Deinit(ref Frame frame, EntityRef entity, ref AIContext context)
             => Deinit<HFSMComponent>(ref frame, entity, ref context);
+        public static void Deinit(ref Frame frame, EntityRef entity, HFSMRoot root)
+            => Deinit<HFSMComponent>(ref frame, entity, root);
+        public static void Deinit(ref Frame frame, EntityRef entity, HFSMRoot root, ref AIContext context)
+            => Deinit<HFSMComponent>(ref frame, entity, root, ref context);
         public static void Update(ref Frame frame, EntityRef entity)
             => Update<HFSMComponent>(ref frame, entity);
         public static void Update(ref Frame frame, EntityRef entity, ref AIContext context)
             => Update<HFSMComponent>(ref frame, entity, ref context);
+        public static void Update(ref Frame frame, EntityRef entity, HFSMRoot root)
+            => Update<HFSMComponent>(ref frame, entity, root);
+        public static void Update(ref Frame frame, EntityRef entity, HFSMRoot root, ref AIContext context)
+            => Update<HFSMComponent>(ref frame, entity, root, ref context);
         public static int GetLeafStateId(ref Frame frame, EntityRef entity)
             => GetLeafStateId<HFSMComponent>(ref frame, entity);
         public static bool TriggerEvent(ref Frame frame, EntityRef entity, int eventId)

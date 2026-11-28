@@ -217,9 +217,9 @@ namespace xpTURN.Klotho.Core
 
         /// <summary>
         /// Reports what this replay was recorded against, so a divergence can be attributed rather than
-        /// merely observed. The layout inputs are printed, not applied — the component layout is frozen
-        /// process-wide long before a replay loads, so a mismatch here means "boot a process built this
-        /// way", not "this run will fix itself".
+        /// merely observed. Warns when this playback's component layout is not the recorded one: the
+        /// playback config restores the recorded layout inputs, so a different layout fingerprint means
+        /// this build registers components differently, or the config passed in changed those inputs.
         /// </summary>
         private void LogReplayReproductionContext(IReplayMetadata meta)
         {
@@ -234,13 +234,22 @@ namespace xpTURN.Klotho.Core
                     $"(Only SD clients that received their initial FullState mid-match produce this.)");
             }
 
+            long localLayout = GetLocalLayoutFingerprint();
+            if (meta.LayoutFingerprint != 0 && localLayout != 0 && localLayout != meta.LayoutFingerprint)
+            {
+                _logger.KWarning(
+                    $"[KlothoEngine][Replay] layout fingerprint differs (recorded=0x{meta.LayoutFingerprint:X16} " +
+                    $"local=0x{localLayout:X16}). This playback's component layout is not the one the match ran " +
+                    $"with — this build registers components differently, or the config passed in changed the " +
+                    $"layout inputs — so the replay will not reproduce its recording.");
+            }
+
             _logger.KInformation(
                 $"[KlothoEngine][Replay] recorded against: layout=0x{meta.LayoutFingerprint:X16} " +
                 $"colliders=0x{meta.StaticColliderFingerprint:X16} nav=0x{meta.NavFingerprint:X16} " +
                 $"game=0x{meta.GameFingerprint:X16} (0 = not provided); snapshotHash=0x{meta.InitialStateHash:X16} " +
                 $"tick={meta.InitialStateTick}; endReason={meta.EndReason}; " +
-                $"prunedTypes={meta.PrunedComponentTypeIds.Count} maxCountOverrides={meta.ComponentMaxCountTypeIds.Count} " +
-                $"(layout inputs are reported, NOT applied — the layout is already frozen)");
+                $"prunedTypes={meta.PrunedComponentTypeIds.Count} maxCountOverrides={meta.ComponentMaxCountTypeIds.Count}");
 
             if (meta.EndReason == ReplayEndReason.Unspecified)
             {

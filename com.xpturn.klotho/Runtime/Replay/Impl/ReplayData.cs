@@ -152,9 +152,8 @@ namespace xpTURN.Klotho.Replay
             StageId = config.StageId;
             MatchConfigData = config.MatchConfigData;
 
-            // Layout-determining inputs. Recorded so a verifier can be BOOTED with them; deliberately
-            // not restored on playback (ToSimulationConfig) — the layout is frozen process-wide long
-            // before a replay loads, so assigning them there would only look like a restore.
+            // Layout-determining inputs. Restored on playback (ToSimulationConfig), so the playback
+            // simulation builds the recorded layout.
             // Sorted by typeId, unlike the wire codec: the wire's receiver rebuilds a dict so order is
             // irrelevant there, but this file is read for comparison and diffing.
             PrunedComponentTypeIds.Clear();
@@ -182,7 +181,7 @@ namespace xpTURN.Klotho.Replay
         /// </summary>
         public Core.SimulationConfig ToSimulationConfig()
         {
-            return new Core.SimulationConfig
+            var config = new Core.SimulationConfig
             {
                 TickIntervalMs = TickIntervalMs,
                 InputDelayTicks = InputDelayTicks,
@@ -199,12 +198,14 @@ namespace xpTURN.Klotho.Replay
                 TickDriftWarnMultiplier = TickDriftWarnMultiplier,
                 StageId = StageId,
                 MatchConfigData = MatchConfigData,
-                // PrunedComponentTypeIds / ComponentMaxCount* are deliberately NOT restored. They are
-                // process-global layout inputs, frozen before any replay is loaded, so assigning them
-                // here would change nothing while signalling "restored" — the resulting run would
-                // reproduce under a different layout and only the fingerprint mismatch would say so.
-                // They are metadata for booting a verifier, not config for this process.
             };
+
+            config.PrunedComponentTypeIds.AddRange(PrunedComponentTypeIds);
+            int n = Math.Min(ComponentMaxCountTypeIds.Count, ComponentMaxCountValues.Count);
+            for (int i = 0; i < n; i++)
+                config.ComponentMaxCountOverrides[ComponentMaxCountTypeIds[i]] = ComponentMaxCountValues[i];
+
+            return config;
         }
 
         public int GetSerializedSize()
@@ -300,7 +301,7 @@ namespace xpTURN.Klotho.Replay
             if (entLen > 0)
                 writer.WriteRawBytes(InitialEntitlementData);
 
-            // Layout-determining config (recorded only)
+            // Layout-determining config (restored on playback)
             writer.WriteInt32(PrunedComponentTypeIds.Count);
             for (int i = 0; i < PrunedComponentTypeIds.Count; i++)
                 writer.WriteInt32(PrunedComponentTypeIds[i]);
@@ -510,7 +511,7 @@ namespace xpTURN.Klotho.Replay
         public void Initialize(int playerCount, ISimulationConfig simConfig, int randomSeed)
         {
             _metadata.PlayerCount = playerCount;
-            _metadata.CopySimulationConfigFrom(simConfig);  // 15 fields restored on playback + 2 layout inputs recorded only
+            _metadata.CopySimulationConfigFrom(simConfig);  // 15 fields + 2 layout inputs, all restored on playback
             _metadata.RandomSeed = randomSeed;
             _metadata.RecordedAt = DateTime.UtcNow.Ticks;
             _tickOffsets.Clear();

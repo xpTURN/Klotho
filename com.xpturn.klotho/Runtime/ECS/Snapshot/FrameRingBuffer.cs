@@ -20,7 +20,15 @@ namespace xpTURN.Klotho.ECS
 
         public int Capacity => _capacity;
 
+        // Slots on the layout the legacy Frame(int, ...) constructor resolves for maxEntities.
         public FrameRingBuffer(int capacity, int maxEntities, IKLogger logger)
+            : this(capacity, ComponentStorageRegistry.ResolveLegacyLayout(maxEntities), logger)
+        {
+        }
+
+        // Every slot shares the given layout (EcsSimulation passes its own), so SaveFrame/RestoreFrame
+        // copies take CopyFrom's same-instance path.
+        public FrameRingBuffer(int capacity, FrameLayout layout, IKLogger logger)
         {
             if (capacity <= 0)
                 throw new ArgumentOutOfRangeException(nameof(capacity));
@@ -32,7 +40,7 @@ namespace xpTURN.Klotho.ECS
             _systemStateLengths = new int[capacity];
 
             for (int i = 0; i < capacity; i++)
-                _frames[i] = new Frame(maxEntities, logger);
+                _frames[i] = new Frame(layout, logger);
         }
 
         public void SaveFrame(int tick, Frame source)

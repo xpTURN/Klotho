@@ -103,7 +103,7 @@
 - **C# 语言版本**——Unity 面向 **C# 8.0**，C# 11 所需的运行时特性替代实现由 `xpTURN.Polyfill` 包提供；Godot 适配层为 **net8.0 / `LangVersion latest`**，无需 polyfill（原生 `init` / `required`）。
 - **UniTask**——仅在 Unity 上使用的异步库（Cysharp）。**Godot 适配层使用标准库 `Task`**——不依赖 UniTask。
 - **xpTURN.Klotho.Logging (IKLogger)**——自研的结构化日志（无外部日志依赖）。可通过 `Plugins~/Logging.Mel` 示例适配器选择性地对接 MEL（`Microsoft.Extensions.Logging.Abstractions` DLL 由使用方提供）。
-- **LiteNetLib**——UDP 传输的默认参考实现（MIT，纯 C#）。在 Unity 上以**源码形式内置**于 `Runtime/ThirdParty/LiteNetLib.v2.1.4`；在 Godot 上以 **NuGet 包 `LiteNetLib 2.1.4`** 引入。传输层通过 `INetworkTransport` 抽象，可替换。
+- **LiteNetLib**——UDP 传输的默认参考实现（MIT，纯 C#）。在 Unity 上以**源码形式内置**于 `Runtime/ThirdParty/LiteNetLib.v2.1.5`；在 Godot 上以 **NuGet 包 `LiteNetLib 2.1.5`** 引入。传输层通过 `INetworkTransport` 抽象，可替换。
 - **Newtonsoft.Json**——DataAsset 的 JSON 序列化（Unity：`com.unity.nuget.newtonsoft-json` · Godot：NuGet `Newtonsoft.Json 13.0.3`）
 
 详情：[Docs/BaseLibraries.md](Docs/BaseLibraries.md)

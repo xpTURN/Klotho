@@ -1,5 +1,122 @@
 # Changelog
 
+## [0.16.0] - 2026-11-28
+
+### Changed — each simulation owns its component layout, so rooms in one process may differ
+
+- **What was limiting.** The component heap layout — `maxEntities`, the per-component maxCount overrides
+  and the reservation-prune set — was one process-wide value, fixed by the first simulation built.
+  - A dedicated server could not give two rooms different values: the second room was refused and its
+    peer got `RoomNotFound`.
+  - A client process that joined a second match with different values threw while building that
+    match's simulation in a release build.
+  - In editor, debug and test builds the second simulation recomputed the shared layout under the first
+    one instead. The first simulation's components then read as absent and its state hash changed, or
+    every access threw `ArgumentOutOfRangeException` (reproduced with 128 → 64 and 64 → 128 entities).
+- **What changed.** `EcsSimulation` computes an immutable `FrameLayout` from its own inputs when it is
+  built, and shares it with its live frame and its rollback ring (`EcsSimulation.Layout`, `Frame.Layout`).
+  Building a simulation changes no process-wide state, so simulations with different inputs run side by
+  side, and `RoomManager` no longer refuses a room whose inputs differ from another room's. A room's players
+  still receive its values in `SimulationConfigMessage` and its spectators in `SpectatorAcceptMessage`, and
+  the Ready exchange still compares the layout fingerprint. For the same inputs the layout, its fingerprint
+  and the state hash are unchanged.
+- **Breaking.**
+  - `ComponentStorageRegistry.TypeIdCache<T>.Layout` is removed. `Frame.GetStorage<T>` reads the frame's
+    own layout.
+  - The static layout readers on `ComponentStorageRegistry` (`GetLayout`, `LayoutFingerprint`,
+    `LayoutTypeCount`, `CleanupTypeCount`, `GetHeapSize`) describe only the default layout set explicitly
+    with `EnsureLayoutComputed` — for single-simulation tools such as a memory report or a replay verifier.
+    Building a simulation no longer sets it. Without one, `GetLayout` throws and the fingerprint and counts
+    read 0. Code that reads them for a running simulation should read `frame.Layout` or
+    `EcsSimulation.Layout`.
+  - The static `EcsSimulation.ComponentTypeIdAt(int)` reads the same default layout, so without one it returns
+    -1 for every index. The type id at a position of a running simulation's layout comes from the instance
+    `GetComponentTypeIdAt(int)`.
+  - `new Frame(maxEntities, …)` and `new FrameRingBuffer(capacity, maxEntities, …)` no longer fix a
+    layout. They use the default layout when its `maxEntities` matches, otherwise a layout from
+    `maxEntities` alone (no overrides, no pruning). A frame that must match a simulation comes from
+    `EcsSimulation.CreateCompatibleFrame()`. `Frame.CopyFrom` throws on a frame of another layout instead
+    of copying bytes into offsets that mean something else.
+  - Brawler sample: `PlatformerCommandSystem.BuildingSlotCapacity` takes the simulation's `FrameLayout`,
+    and so does `NavMeshEffectiveTickSystem`'s constructor.
+- **Cost.** A component access reads the frame's layout instead of a per-type static, one more load. In a
+  dotnet benchmark (200 entities, two systems that touch components per entity) the system phase of a tick
+  took 3.4% longer and the tick with its state hash 2.6% longer; the rollback snapshot is unchanged.
+- Contributed by @CHUNG-HAO-CHIA in [#15](https://github.com/xpTURN/Klotho/pull/15).
+
+### Changed — LiteNetLib 2.1.5
+
+- Updated LiteNetLib to [2.1.5](https://github.com/RevenantX/LiteNetLib/releases/tag/2.1.5): vendored as
+  source under `Runtime/ThirdParty/LiteNetLib.v2.1.5/` on Unity (byte-identical to the tag's sources), and the
+  NuGet package `LiteNetLib 2.1.5` on Godot. The release adds `ReadOnlySpan<byte>` overloads of `Reject`,
+  `DisconnectPeer`, `DisconnectAll` and `Disconnect` (the `byte[]` ones remain and forward to them),
+  bounds-checks the `NetDataReader` peek methods, fixes `NetDataReader` reads on ARMv7 Android, adds macOS
+  support to the native socket and returns 0 from `GetPacketsCountInReliableQueue` when there are no
+  channels. Klotho's transport calls only the overloads that remain, so nothing changes on its side.
+
+### Added
+
+- **`FrameLayout`** (`MaxEntities`, `HeapSize`, `LayoutFingerprint`, `RegisteredTypeIdsSorted`, `GetLayout`,
+  `HasLayout`), `ComponentStorageRegistry.ComputeLayout(maxEntities, maxCountOverrides,
+  prunedComponentTypeIds)`, `Frame(FrameLayout, …)`, `Frame.Layout` / `Frame.HeapSize`,
+  `EcsSimulation.Layout` / `CreateCompatibleFrame()` / `GetComponentTypeIdAt(int)` and
+  `FrameRingBuffer(int, FrameLayout, …)`.
+- **Isolated HFSM roots.** `HFSMBuilder.BuildIsolated()` validates and assembles a graph without
+  registering it in the process-wide `HFSMRoot` registry, and `HFSMManager.Init` / `Update` / `Deinit` take
+  the root itself. `Update` and `Deinit` throw when the root passed has a different id from the one the
+  entity was initialized with. Contributed by @CHUNG-HAO-CHIA in [#15](https://github.com/xpTURN/Klotho/pull/15).
+
+### Fixed
+
+- A spectator built its simulation without the room's maxCount overrides and reservation-prune set, because
+  `SpectatorAcceptMessage` did not carry them. Spectating a room that pruned or capped a component — the
+  Brawler dedicated server always prunes — ended at the first relayed `PlayerReady` with
+  `AbortReason.LayoutMismatch`. The message now carries both, appended after its existing fields
+  (`MaxCountOverrideTypeIds`, `MaxCountOverrideValues`, `PrunedComponentTypeIds`). Servers, hosts and
+  spectators must run matching builds: a spectator of this build that joins an older one drops the shorter
+  accept as malformed and waits until its cancellation token or a disconnect ends the attempt. Games that
+  isolate builds by transport connection key should bump it.
+- Replay playback built its simulation without the recording's maxCount overrides and reservation-prune
+  set: `IReplayMetadata.ToSimulationConfig()` left them out. A replay of a match that pruned or capped a
+  component — every Brawler match prunes — played under another layout, so its tick-0 hash did not match
+  `InitialStateHash` and nothing louder than an Information line said so. `ToSimulationConfig()` now
+  restores both, and playback logs a warning when its layout fingerprint still differs from the recorded
+  one. Code that took that config to play a replay under its own layout now gets the recorded one; to play
+  under another, change the two inputs on the returned config before passing it on.
+- Brawler sample: the replay verifier fixed the process default layout from each file's inputs, so in a
+  release build the second file of a `--verify` batch with different layout inputs came back unverifiable
+  (`layoutFrozenDifferently`). It now computes each file's expected layout fingerprint from that file's
+  inputs, and the verdict `layoutFrozenDifferently` no longer exists; a batch may mix layouts. A file whose
+  recorded fingerprint differs is still `anchors=mismatch:layout`.
+- `Frame.TryGetReflectableStorage` returned a view for a reservation-pruned type, reading offsets 0 at
+  the head of the heap. It now returns false, as for an unregistered type. Only the editor's entity
+  component window uses it.
+- `RoomManager` kept a disposed or shut-down room in its slot until the slot was reused, which held the
+  room's simulation heaps (frame × rollback ring) alive. The slot is now released. Contributed by
+  @CHUNG-HAO-CHIA in [#15](https://github.com/xpTURN/Klotho/pull/15).
+
+### Tests
+
+- **Each change is under test.** There are 21 new dotnet tests, and fourteen assertions in three Brawler
+  server scenarios. Six of the dotnet tests fail on 0.15.1: a second simulation with different layout inputs
+  is built and keeps its own layout (three cases), a simulation built in recompute mode leaves a live one
+  intact (two cases), and a pruned type has no reflectable storage. The server scenario that asserted the
+  refusal of a room with a different `MaxEntities` now asserts that both rooms run; the other two cover the
+  released room slot and the building storage bound read from each room's layout. The rest cover the new
+  API — the legacy `Frame(int)` constructor as a function of `maxEntities` and the default layout alone
+  (with recompute on and off), `CopyFrom` across layouts, the engine's fingerprint, the memory report, the
+  cleanup pass, positional type ids and isolated HFSM roots.
+- **Verified.** Each guard was checked to fail when the rule it guards is undone (thirteen mutations). For
+  the same inputs, the layout fingerprint, the state hash and the full-state bytes are identical to 0.15.1
+  in Debug and Release. The dotnet suites pass in Debug and Release, the Brawler server suite passes, the
+  EditMode suites pass on Unity 6000.3.28f1 and 6000.6.8f1 (the 2022.3 line was not run), and the Godot
+  samples build against the rebuilt addon.
+- **Tooling.** `Tools/run-all-tests.sh` now also runs Brawler's LiteNetLib integration tests — host and three
+  clients over real UDP on loopback: handshake, countdown, commands, ping and disconnect. That test assembly
+  targets every platform, so the Unity Test Runner files it under PlayMode and the EditMode run had never
+  picked it up. It is a separate PlayMode run limited to that assembly (`brawler-playmode` in the summary,
+  `--no-playmode` to skip).
+
 ## [0.15.1] - 2026-10-31
 
 ### Security — the authority no longer takes a command on the word of the peer that sent it

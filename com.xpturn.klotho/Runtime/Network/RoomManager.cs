@@ -273,24 +273,9 @@ namespace xpTURN.Klotho.Network
                 }
             }
 
-            // maxEntities / maxCount overrides / prune-set are PROCESS-global layout inputs, not
-            // per-room ones — but the config that carries them is per-room (the match factory is
-            // free to return a different one per stage). Ask before constructing: handing a
-            // disagreeing set to the registry recomputes the layout in editor/test builds — pulling
-            // _layouts and the type-id cache out from under rooms already ticking on workers — and
-            // throws in release, where nothing between here and ServerLoop.Run catches it, so one
-            // mismatched room would take the whole process and every healthy room with it.
-            // Refusing here costs this room only: the peer gets RoomNotFound, the server lives.
-            if (ComponentStorageRegistry.LayoutInputsConflict(
-                    simConfig.MaxEntities, simConfig.ComponentMaxCountOverrides,
-                    simConfig.PrunedComponentTypeIds, out string layoutConflict))
-            {
-                _logger?.KError(
-                    $"[RoomManager] Room {roomId} refused — per-room simulation config disagrees with the " +
-                    $"process layout. {layoutConflict} Source these three from one place at bootstrap.");
-                return null;
-            }
-
+            // maxEntities / maxCount overrides / prune-set may differ per room: the simulation computes
+            // its own FrameLayout from them and touches no process-wide layout state, so rooms already
+            // ticking on workers are unaffected.
             var sim = new EcsSimulation(
                 maxEntities: simConfig.MaxEntities,
                 maxRollbackTicks: _config.SimulationMaxRollbackTicks,
@@ -405,6 +390,9 @@ namespace xpTURN.Klotho.Network
                 _router.UnregisterRoom(room.RoomId);
                 _router.RemoveRoomPeers(room.RoomId);
                 room.Dispose();
+                // Release the slot so the Room and its simulation heaps can be collected now rather than
+                // when the slot is next reused. Cleanup runs on the server loop thread only.
+                _rooms[i] = null;
                 _activeRoomCount--;
 
                 _logger?.KInformation($"[RoomManager] Room {room.RoomId} disposed (active={_activeRoomCount}, drain_phase={room.DrainPhase}, lifetime_ms={lifetimeMs})");
@@ -494,6 +482,7 @@ namespace xpTURN.Klotho.Network
                 _router.UnregisterRoom(room.RoomId);
                 _router.RemoveRoomPeers(room.RoomId);
                 room.State = RoomState.Empty;
+                _rooms[i] = null;
             }
 
             _activeRoomCount = 0;

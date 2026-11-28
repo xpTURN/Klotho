@@ -57,9 +57,11 @@ Two length parameters matter, and it's important to tell them apart:
   usually starts here** (e.g. at most 2 bots, but NavAgent reserves 256 slots). A singleton component is by
   definition just one, so `slotCapacity = 1`.
 
-**freeze**: this layout is computed once when the first `Frame` is built and then **fixed** (process-wide). It
-never grows or shrinks at runtime — every peer must run on the **same memory layout** for determinism. So
-optimization values must be set **before the game starts (config/attribute)**.
+**freeze**: each simulation computes this layout once, when it is built, and it is then **fixed** for that
+simulation (`EcsSimulation.Layout`, a `FrameLayout` shared by its live frame and rollback ring). It never grows or
+shrinks at runtime — every peer of a match must run on the **same memory layout** for determinism. So
+optimization values must be set **before the match starts (config/attribute)**. Simulations in one process (rooms
+on one server) may use different layouts side by side.
 
 ### Why "× rollback ring" is scary (this is where memory balloons)
 
@@ -191,8 +193,8 @@ public partial struct NavAgentComponent : IComponent { ... }
 
 #### Method B — config override (`ISimulationConfig.ComponentMaxCountOverrides`)
 
-A `typeId → cap` map to **tune per session/deployment**. No rebuild — just change config; applied
-process-wide. **Set it only on the authority peer (SD = server / P2P = host)** and it is **auto-propagated to
+A `typeId → cap` map to **tune per session/deployment**. No rebuild — just change config; applied to
+that simulation's layout. **Set it only on the authority peer (SD = server / P2P = host)** and it is **auto-propagated to
 joining peers (SD = client / P2P = guest) via `SimulationConfigMessage`**, so both sides use the same cap
 (hence one side is enough).
 
@@ -290,7 +292,7 @@ tight** and exceeding the slot throws (capacity-overflow), so leave headroom ove
 ### Safety (guarantees preserved)
 
 - **Determinism**: `slotCapacity` is a layout input, so **every peer must use the same value**. A config
-  override is process-wide and propagated via `SimulationConfigMessage`, so **setting it only on the authority
+  override is part of the match's simulation config and propagated via `SimulationConfigMessage`, so **setting it only on the authority
   peer (SD = server / P2P = host)** makes joining peers (client/guest) match automatically — symmetry
   guaranteed.
 - **No regression**: no `maxCount` (0) = `maxEntities` (exactly the un-optimized behavior).
@@ -378,9 +380,9 @@ config.SetRuntimePrunedComponentTypeIds(new[] {
 
 ### Safety
 
-- **Process-wide freeze**: the prune-set is a process-level layout input, so **multiple rooms in one process
-  cannot have different prune-sets** (watch out on a server mixing several games in one process). For truly
-  per-match differences, each match needs a separate process.
+- **Per-simulation layout**: the prune-set is an input of each simulation's own layout, so **rooms in one
+  process may use different prune-sets** (and different `maxEntities` / maxCount overrides). Each room's peers
+  receive that room's values.
 - **Peer symmetry**: **set only on the authority peer (SD = server / P2P = host)** → propagated to joining
   peers (client/guest) via `SimulationConfigMessage` so both prune the same set. Verified deterministic under
   SD and P2P (prediction/rollback).

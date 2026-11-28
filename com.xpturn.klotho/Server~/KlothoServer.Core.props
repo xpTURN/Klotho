@@ -18,7 +18,7 @@
   <PropertyGroup>
     <KlothoRuntimeRoot>$(MSBuildThisFileDirectory)..\Runtime</KlothoRuntimeRoot>
     <KlothoLoggingRoot>$(MSBuildThisFileDirectory)..\Runtime\Logging</KlothoLoggingRoot>
-    <KlothoLiteNetLibRoot>$(MSBuildThisFileDirectory)..\Runtime\ThirdParty\LiteNetLib.v2.1.4</KlothoLiteNetLibRoot>
+    <KlothoLiteNetLibRoot>$(MSBuildThisFileDirectory)..\Runtime\ThirdParty\LiteNetLib.v2.1.5</KlothoLiteNetLibRoot>
     <KlothoTransportRoot>$(MSBuildThisFileDirectory)..\Runtime\LiteNetLib</KlothoTransportRoot>
     <KlothoGameplayRoot>$(MSBuildThisFileDirectory)..\Runtime\Gameplay</KlothoGameplayRoot>
   </PropertyGroup>

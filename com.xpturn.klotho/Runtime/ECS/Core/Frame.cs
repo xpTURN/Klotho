@@ -33,6 +33,9 @@ namespace xpTURN.Klotho.ECS
         public IDataAssetRegistry AssetRegistry { get; private set; }
 
         private readonly IKLogger _logger;
+        private readonly FrameLayout _layout;
+        // _layout.Layouts held directly: GetStorage<T> is on every component access, and this saves a load.
+        private readonly StorageLayout[] _layouts;
         private readonly int _maxEntities;
 
         private readonly byte[] _heap;
@@ -41,19 +44,29 @@ namespace xpTURN.Klotho.ECS
         private bool[] _deserializedTypeFlags;
 
         public IKLogger Logger => _logger;
+        public FrameLayout Layout => _layout;
         public int MaxEntities => _maxEntities;
+        public int HeapSize => _heapSize;
 
         // The assetRegistry parameter accepts any implementation that inherits IDataAssetRegistry.
+        // Uses the registry's default layout when its maxEntities matches, otherwise a layout computed from
+        // maxEntities alone (no maxCount overrides, no pruning). A frame that must match a simulation's
+        // layout is made with Frame(FrameLayout, ...) or EcsSimulation.CreateCompatibleFrame.
         public Frame(int maxEntities, IKLogger logger, IDataAssetRegistry assetRegistry = null)
+            : this(ComponentStorageRegistry.ResolveLegacyLayout(maxEntities), logger, assetRegistry)
         {
-            _logger = logger;
-            _maxEntities = maxEntities;
-            AssetRegistry = assetRegistry ?? new DataAssetRegistry();
-            Entities = new EntityManager(maxEntities);
+        }
 
-            // Determine heap size using the layout provided by the Registry. On the first call, the layout is frozen at this point.
-            ComponentStorageRegistry.EnsureLayoutComputed(maxEntities);
-            _heapSize = ComponentStorageRegistry.GetHeapSize(maxEntities);
+        public Frame(FrameLayout layout, IKLogger logger, IDataAssetRegistry assetRegistry = null)
+        {
+            _layout = layout ?? throw new ArgumentNullException(nameof(layout));
+            _layouts = layout.Layouts;
+            _logger = logger;
+            _maxEntities = layout.MaxEntities;
+            AssetRegistry = assetRegistry ?? new DataAssetRegistry();
+            Entities = new EntityManager(_maxEntities);
+
+            _heapSize = layout.HeapSize;
             _heap = new byte[_heapSize];
             // Initialize the sparse array to -1 so that entity 0 does not pass Has checks as a false positive.
             InitializeAllStorages();
@@ -91,9 +104,10 @@ namespace xpTURN.Klotho.ECS
         /// ring rotates frames: a view taken from one frame keeps pointing at THAT frame's heap. Re-acquire per
         /// tick, and after a rollback in particular.</para>
         ///
-        /// <para><b>Offsets are stable for the session.</b> They come from the process-global registry layout
-        /// (<c>maxEntities</c>, per-type <c>maxCount</c>, the reservation-prune set), which are determinism
-        /// inputs frozen before the first frame is built. Acquire after the world is built.</para>
+        /// <para><b>Offsets are stable for the session.</b> They come from this frame's <see cref="FrameLayout"/>
+        /// (<c>maxEntities</c>, per-type <c>maxCount</c>, the reservation-prune set — determinism inputs fixed
+        /// when its simulation is built). A frame of another simulation may have different offsets, so acquire
+        /// the view from the frame you access. Acquire after the world is built.</para>
         ///
         /// <para><b>Hoist the spans, not just this call, for a hot pass.</b> Every access to
         /// <c>ComponentsSpan</c> / <c>SparseSpan</c> / <c>DenseSpan</c> re-derives the span, and
@@ -121,16 +135,16 @@ namespace xpTURN.Klotho.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ComponentStorageFlat<T> GetStorage<T>() where T : unmanaged, IComponent
         {
-            // Pass TypeIdCache<T>.Layout directly as an in argument — avoids intermediate struct copy
-            ComponentStorageRegistry.GetTypeId<T>();   // Populate Id+Layout cache on first call
+            int typeId = ComponentStorageRegistry.GetTypeId<T>();   // Populate Id cache on first call
+            var layouts = _layouts;
             // Reservation-pruning guard: a pruned type has a default layout (TotalSize 0) whose
             // CountOffset 0 aliases heap[0] (the first reserved type's count) — reading it would be a silent
             // misread, not a clean crash. Fail fast at this single chokepoint (covers Add/Get/Has/GetSingleton/
             // Filter). Release-active: the aliasing hazard exists in release and the check is one int compare.
-            if (ComponentStorageRegistry.TypeIdCache<T>.Layout.TotalSize == 0)
+            if ((uint)typeId >= (uint)layouts.Length || layouts[typeId].TotalSize == 0)
                 ThrowPrunedComponent<T>();
-            return new ComponentStorageFlat<T>(_heap,
-                in ComponentStorageRegistry.TypeIdCache<T>.Layout);
+            // Pass the layout slot directly as an in argument — avoids intermediate struct copy
+            return new ComponentStorageFlat<T>(_heap, in layouts[typeId]);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -196,10 +210,10 @@ namespace xpTURN.Klotho.ECS
         // component-memory diagnostics to tally every type in a typeId loop. Read-only.
         public int GetLiveCount(int typeId)
         {
-            // GetLayout has no bounds check (=> ref _layouts[typeId]); guard out-of-range before it.
+            // GetLayout has no bounds check (=> ref Layouts[typeId]); guard out-of-range before it.
             // (uint) cast folds the negative case in. This guard must precede the TotalSize check.
-            if ((uint)typeId > (uint)ComponentStorageRegistry.MaxTypeId) return 0;
-            ref readonly var l = ref ComponentStorageRegistry.GetLayout(typeId);
+            if ((uint)typeId > (uint)_layout.MaxTypeId) return 0;
+            ref readonly var l = ref _layout.GetLayout(typeId);
             // In-range gap (unregistered slot) has a default layout whose CountOffset (0) aliases the
             // first registered type's count — must skip, not read.
             if (l.TotalSize == 0) return 0;
@@ -365,7 +379,7 @@ namespace xpTURN.Klotho.ECS
         /// </summary>
         /// <param name="componentType">The component type to look up</param>
         /// <param name="view">A valid view on success, <c>default</c> on failure</param>
-        /// <returns><c>true</c> if the type is registered in the Registry, otherwise <c>false</c></returns>
+        /// <returns><c>true</c> if the type is registered and this frame's layout reserves storage for it (not pruned), otherwise <c>false</c></returns>
         /// <remarks>
         /// Follows the TryGet convention — do not access out <paramref name="view"/> when the return value is <c>false</c>.
         /// Violating this causes a NullReferenceException because the internal reflector of <c>default(ReflectableView)</c> is <c>null</c>.
@@ -379,7 +393,13 @@ namespace xpTURN.Klotho.ECS
                 return false;
             }
             int typeId = ComponentStorageRegistry.GetTypeId(componentType);
-            view = new ReflectableView(_heap, ComponentStorageRegistry.GetLayout(typeId), reflector);
+            // A pruned type's default layout (offsets 0) would read the head of the heap.
+            if (!_layout.HasLayout(typeId))
+            {
+                view = default;
+                return false;
+            }
+            view = new ReflectableView(_heap, _layout.GetLayout(typeId), reflector);
             return true;
         }
 
@@ -471,14 +491,14 @@ namespace xpTURN.Klotho.ECS
         /// </summary>
         internal void RunCleanupClear()
         {
-            var typeIds = ComponentStorageRegistry.CleanupClearTypeIds;
+            var typeIds = _layout.CleanupClearTypeIds;
             var masks = SignalMasks;
             bool anyRemovedListener = masks != null && masks.Any;
 
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
 
                 // A listener on a one-tick component has to see it go, otherwise the most natural pairing
                 // in the engine ([KlothoCleanup] + a reaction to it) is the one that silently does
@@ -520,12 +540,12 @@ namespace xpTURN.Klotho.ECS
         /// </remarks>
         internal void RunCleanupDestroy(EntityRef[] buffer)
         {
-            var typeIds = ComponentStorageRegistry.CleanupDestroyTypeIds;
+            var typeIds = _layout.CleanupDestroyTypeIds;
             int count = 0;
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
                 var dense = MemoryMarshal.Cast<byte, int>(
                     _heap.AsSpan(layout.DenseOffset, layout.SlotCapacity * 4));
                 int liveCount = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
@@ -565,7 +585,7 @@ namespace xpTURN.Klotho.ECS
         // against a dedicated server that has none of them (8 extra empty types, every hash divergent
         // from tick 0). Peers must either load the same set or prune the difference
         // (ISimulationConfig.SetRuntimePrunedComponentTypeIds — a pruned type leaves
-        // RegisteredTypeIdsSorted and so leaves this fold). ComponentStorageRegistry.LayoutFingerprint
+        // RegisteredTypeIdsSorted and so leaves this fold). The layout fingerprint (FrameLayout.LayoutFingerprint)
         // exists to make that mismatch legible: it is logged at boot on every peer and compared at join,
         // so compare it before reading the per-component breakdown below.
         public ulong CalculateHash(StateHashBreakdown breakdown)
@@ -574,12 +594,12 @@ namespace xpTURN.Klotho.ECS
             frameHash = FPHash.Hash(frameHash, Tick);
             frameHash = FPHash.Hash(frameHash, Entities.Count);
 
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             breakdown?.EnsureComponentCapacity(typeIds.Length);
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
 
                 ulong h = FPHash.FNV_OFFSET;
                 ComponentStorageRegistry.GetHashDispatch(typeId)(_heap, in layout, Entities, ref h);
@@ -605,12 +625,12 @@ namespace xpTURN.Klotho.ECS
         {
             if (logger == null) return;
 
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             logger.KLog(logLevel, $"[CompHash][{label}] tick={Tick} entityCount={Entities.Count} ---");
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
                 int count = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
 
                 ulong hash = FPHash.FNV_OFFSET;
@@ -625,6 +645,17 @@ namespace xpTURN.Klotho.ECS
 
         public void CopyFrom(Frame source)
         {
+            // Ring slots and the live frame share one FrameLayout instance, so the common case is the
+            // reference check alone. A frame of another layout would be copied byte-for-byte into offsets
+            // that mean something else.
+            if (!ReferenceEquals(_layout, source._layout)
+                && (_layout.LayoutFingerprint != source._layout.LayoutFingerprint || _heapSize != source._heapSize))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot copy a Frame of a different layout: target(maxEntities={_maxEntities}, heapSize={_heapSize}, " +
+                    $"fp=0x{_layout.LayoutFingerprint:X16}) != source(maxEntities={source._maxEntities}, " +
+                    $"heapSize={source._heapSize}, fp=0x{source._layout.LayoutFingerprint:X16}).");
+            }
             Tick = source.Tick;
             DeltaTimeMs = source.DeltaTimeMs;
             AssetRegistry = source.AssetRegistry;
@@ -649,11 +680,11 @@ namespace xpTURN.Klotho.ECS
         // Calls each typeId's ClearDelegate to record count=0 + sparse=-1.
         private void InitializeAllStorages()
         {
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
                 ComponentStorageRegistry.GetClearDispatch(typeId)(_heap, in layout);
             }
         }
@@ -662,7 +693,7 @@ namespace xpTURN.Klotho.ECS
         // Performs swap-back at the heap byte level regardless of type (no T generic required).
         internal void RemoveAllComponents(EntityRef entity)
         {
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             var masks = SignalMasks;
             bool anyRemovedListener = masks != null && masks.Any;
 
@@ -680,7 +711,7 @@ namespace xpTURN.Klotho.ECS
                     ComponentStorageRegistry.GetRemovedSignalDispatch(typeId)?.Invoke(this, entity);
                 }
 
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
                 RemoveFromStorage(_heap, in layout, entity.Index);
             }
         }
@@ -724,11 +755,11 @@ namespace xpTURN.Klotho.ECS
             // Size of Tick(4) + DeltaTimeMs(4) + EntityManager + storageCount(4)
             int size = 4 + 4 + Entities.GetSerializedSize() + 4;
 
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
 
                 int count = MemoryMarshal.Cast<byte, int>(_heap.AsSpan(layout.CountOffset, 4))[0];
                 int perSize = ComponentStorageRegistry.PerComponentSize[typeId];
@@ -747,7 +778,7 @@ namespace xpTURN.Klotho.ECS
             {
                 var writer = new SpanWriter(pooledBuffer);
 
-                var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+                var typeIds = _layout.RegisteredTypeIdsSorted;
                 writer.WriteInt32(Tick);
                 writer.WriteInt32(DeltaTimeMs);
                 Entities.Serialize(ref writer);
@@ -756,7 +787,7 @@ namespace xpTURN.Klotho.ECS
                 for (int i = 0; i < typeIds.Length; i++)
                 {
                     int typeId = typeIds[i];
-                    ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                    ref readonly var layout = ref _layout.GetLayout(typeId);
 
                     writer.WriteInt32(typeId);
                     ComponentStorageRegistry.GetSerializeDispatch(typeId)(_heap, in layout, ref writer);
@@ -811,13 +842,13 @@ namespace xpTURN.Klotho.ECS
             frameHash = FPHash.Hash(frameHash, Entities.Count);
 
             Entities.Serialize(ref writer);
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             writer.WriteInt32(typeIds.Length);
 
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
 
                 writer.WriteInt32(typeId);
                 ulong h = FPHash.FNV_OFFSET;
@@ -839,7 +870,7 @@ namespace xpTURN.Klotho.ECS
 
             int storageCount = reader.ReadInt32();
 
-            int maxTypeId = ComponentStorageRegistry.MaxTypeId;
+            int maxTypeId = _layout.MaxTypeId;
             if (_deserializedTypeFlags == null || _deserializedTypeFlags.Length <= maxTypeId)
                 _deserializedTypeFlags = new bool[maxTypeId + 1];
             else
@@ -860,7 +891,7 @@ namespace xpTURN.Klotho.ECS
                     continue;
                 }
 
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
                 if (layout.TypeId == 0)
                 {
                     // Registration slot is empty (typeId exists in Registry but layout was not created) — skip the data
@@ -877,12 +908,12 @@ namespace xpTURN.Klotho.ECS
             }
 
             // Clear local storages not present in received data (rollback safety)
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             for (int i = 0; i < typeIds.Length; i++)
             {
                 int typeId = typeIds[i];
                 if (_deserializedTypeFlags[typeId]) continue;
-                ref readonly var layout = ref ComponentStorageRegistry.GetLayout(typeId);
+                ref readonly var layout = ref _layout.GetLayout(typeId);
                 ComponentStorageRegistry.GetClearDispatch(typeId)(_heap, in layout);
             }
         }

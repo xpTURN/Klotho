@@ -8,6 +8,9 @@
 # report. Three Unity projects are covered: Brawler on the primary editor,
 # Unity2022.Tests on the 2022.3 LTS line the package declares as its minimum, and
 # Unity6000.6.Tests on the newest editor line (each a separate editor install).
+# Brawler also gets one PlayMode run for its LiteNetLib integration tests (real UDP
+# over loopback): that test assembly targets every platform, so the Test Runner
+# files it under PlayMode and the EditMode run never picks it up.
 #
 # The server suite is not a `dotnet test` project — it is a mini-framework inside
 # the server binary (rooms, transports and threads that NUnit's host does not
@@ -18,9 +21,10 @@
 # Usage:
 #   Tools/run-all-tests.sh                  # run everything (.NET + both Unity projects)
 #   Tools/run-all-tests.sh --dotnet-only    # .NET tests only
-#   Tools/run-all-tests.sh --unity-only     # Unity EditMode tests only
+#   Tools/run-all-tests.sh --unity-only     # Unity tests only (EditMode + the Brawler PlayMode run)
 #   Tools/run-all-tests.sh --no-unity-2022  # skip the 2022.3 LTS project (editor not installed)
 #   Tools/run-all-tests.sh --no-unity-6000-6 # skip the 6000.6 project (editor not installed)
+#   Tools/run-all-tests.sh --no-playmode    # skip the Brawler PlayMode run (LiteNetLib integration tests)
 #   Tools/run-all-tests.sh --no-server-test # skip the Brawler server's own --test suite
 #   Tools/run-all-tests.sh --no-build       # pass --no-build to dotnet test (every configuration
 #                                           # below must already be built — checked up front)
@@ -30,13 +34,13 @@
 #   Tools/run-all-tests.sh -c <cfg>         # dotnet test with an arbitrary configuration name
 #   Tools/run-all-tests.sh -h | --help
 #
-# The configuration options apply to the .NET tests only; Unity EditMode runs are
+# The configuration options apply to the .NET tests only; Unity runs are
 # unaffected (the editor compiles the project with its own settings).
 #
 # Environment variables:
-#   UNITY_PATH        Override the Unity executable path (default: Hub 6000.3.27f2)
+#   UNITY_PATH        Override the Unity executable path (default: Hub 6000.3.28f1)
 #   UNITY_2022_PATH   Override the 2022.3 LTS editor path (default: Hub 2022.3.62f3)
-#   UNITY_6000_6_PATH Override the 6000.6 editor path (default: Hub 6000.6.7f1)
+#   UNITY_6000_6_PATH Override the 6000.6 editor path (default: Hub 6000.6.8f1)
 #   UNITY_TIMEOUT     Outer limit of each Unity run in seconds (default: 3600; 0 = none)
 #
 # Exit code: non-zero if anything fails (CI friendly). A suite that ran no tests fails, and so does a Unity fixture
@@ -52,9 +56,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RESULTS_DIR="${REPO_ROOT}/Logs/test-results"
 
 # Unity project & version
-UNITY_VERSION="6000.3.27f2"
+UNITY_VERSION="6000.3.28f1"
 UNITY_PROJECT="${REPO_ROOT}/Samples/Brawler"
 UNITY_PATH="${UNITY_PATH:-/Applications/Unity/Hub/Editor/${UNITY_VERSION}/Unity.app/Contents/MacOS/Unity}"
+# Brawler's PlayMode run is limited to these test assemblies (-assemblyNames, ';'-separated).
+UNITY_PLAYMODE_ASSEMBLIES="xpTURN.Klotho.LiteNetLib.Tests"
 
 # Unity 2022.3 LTS compatibility project. Runs on its own editor install by design —
 # the suite exists to validate the oldest editor the package supports (package.json
@@ -66,7 +72,7 @@ UNITY_2022_PATH="${UNITY_2022_PATH:-/Applications/Unity/Hub/Editor/${UNITY_2022_
 # Unity 6000.6 compatibility project — the newest editor line, where Object.GetInstanceID() is an
 # error and Unity's own analyzers (UAC*) run. Same shape as the 2022.3 project: a copy of the smoke
 # sources under its own asmdef name, on its own editor install.
-UNITY_6000_6_VERSION="6000.6.7f1"
+UNITY_6000_6_VERSION="6000.6.8f1"
 UNITY_6000_6_PROJECT="${REPO_ROOT}/Samples/Unity6000.6.Tests"
 UNITY_6000_6_PATH="${UNITY_6000_6_PATH:-/Applications/Unity/Hub/Editor/${UNITY_6000_6_VERSION}/Unity.app/Contents/MacOS/Unity}"
 
@@ -89,6 +95,7 @@ RUN_DOTNET=1
 RUN_UNITY=1
 RUN_UNITY_2022=1
 RUN_UNITY_6000_6=1
+RUN_UNITY_PLAYMODE=1
 RUN_SERVER_TEST=1
 DOTNET_NO_BUILD=0
 # Configurations passed to dotnet test, in run order. Debug alone matches the
@@ -108,6 +115,7 @@ while [[ $# -gt 0 ]]; do
     --unity-only)    RUN_DOTNET=0 ;;
     --no-unity-2022) RUN_UNITY_2022=0 ;;
     --no-unity-6000-6) RUN_UNITY_6000_6=0 ;;
+    --no-playmode)   RUN_UNITY_PLAYMODE=0 ;;
     --no-server-test) RUN_SERVER_TEST=0 ;;
     --no-build)      DOTNET_NO_BUILD=1 ;;
     --debug)         DOTNET_CONFIGS=("Debug") ;;
@@ -223,12 +231,13 @@ run_server_tests() {
   return ${overall}
 }
 
-# ── Unity EditMode tests ─────────────────────────────────────────────────────
-# run_unity_editmode <label> <editor-exe> <project-dir> <slug> <path-env-var>
+# ── Unity tests ──────────────────────────────────────────────────────────────
+# run_unity_suite <label> <editor-exe> <project-dir> <slug> <path-env-var> [<platform> [<assemblies>]]
+# <platform> is EditMode (default) or PlayMode; <assemblies> limits the run to those test assemblies.
 # The slug names both artifacts (unity-<slug>.xml / .log); the .xml name is what the
-# summary parser globs, so it must stay unique per project.
-run_unity_editmode() {
-  local label="$1" editor="$2" project="$3" slug="$4" path_var="$5"
+# summary parser globs, so it must stay unique per run.
+run_unity_suite() {
+  local label="$1" editor="$2" project="$3" slug="$4" path_var="$5" platform="${6:-EditMode}" assemblies="${7:-}"
 
   if [[ ! -x "${editor}" ]]; then
     echo "${C_RED}Unity executable not found:${C_RST} ${editor}" >&2
@@ -248,7 +257,8 @@ run_unity_editmode() {
     -batchmode \
     -nographics \
     -projectPath "${project}" \
-    -testPlatform EditMode \
+    -testPlatform "${platform}" \
+    ${assemblies:+-assemblyNames "${assemblies}"} \
     -testResults "${results_xml}" \
     -logFile "${unity_log}" \
     -buildTarget StandaloneOSX
@@ -265,21 +275,29 @@ run_unity_editmode() {
 }
 
 run_unity_tests() {
-  section "Unity Test Runner (EditMode, batch mode)"
+  section "Unity Test Runner (EditMode + PlayMode, batch mode)"
   local overall=0
 
-  run_unity_editmode "Brawler EditMode (${UNITY_VERSION})" \
+  run_unity_suite "Brawler EditMode (${UNITY_VERSION})" \
     "${UNITY_PATH}" "${UNITY_PROJECT}" "brawler-editmode" "UNITY_PATH" || overall=1
 
+  if [[ "${RUN_UNITY_PLAYMODE}" -eq 1 ]]; then
+    run_unity_suite "Brawler PlayMode — ${UNITY_PLAYMODE_ASSEMBLIES} (${UNITY_VERSION})" \
+      "${UNITY_PATH}" "${UNITY_PROJECT}" "brawler-playmode" "UNITY_PATH" \
+      "PlayMode" "${UNITY_PLAYMODE_ASSEMBLIES}" || overall=1
+  else
+    echo "${C_YEL}▶ Brawler PlayMode — skipped (--no-playmode)${C_RST}"
+  fi
+
   if [[ "${RUN_UNITY_2022}" -eq 1 ]]; then
-    run_unity_editmode "Unity2022.Tests EditMode (${UNITY_2022_VERSION})" \
+    run_unity_suite "Unity2022.Tests EditMode (${UNITY_2022_VERSION})" \
       "${UNITY_2022_PATH}" "${UNITY_2022_PROJECT}" "2022lts-editmode" "UNITY_2022_PATH" || overall=1
   else
     echo "${C_YEL}▶ Unity2022.Tests EditMode — skipped (--no-unity-2022)${C_RST}"
   fi
 
   if [[ "${RUN_UNITY_6000_6}" -eq 1 ]]; then
-    run_unity_editmode "Unity6000.6.Tests EditMode (${UNITY_6000_6_VERSION})" \
+    run_unity_suite "Unity6000.6.Tests EditMode (${UNITY_6000_6_VERSION})" \
       "${UNITY_6000_6_PATH}" "${UNITY_6000_6_PROJECT}" "6000_6-editmode" "UNITY_6000_6_PATH" || overall=1
   else
     echo "${C_YEL}▶ Unity6000.6.Tests EditMode — skipped (--no-unity-6000-6)${C_RST}"
@@ -340,6 +358,7 @@ print_summary() {
   fi
   if [[ "${RUN_UNITY}" -eq 1 ]]; then
     expected+=("Unity: brawler-editmode")
+    [[ "${RUN_UNITY_PLAYMODE}" -eq 1 ]] && expected+=("Unity: brawler-playmode")
     [[ "${RUN_UNITY_2022}" -eq 1 ]] && expected+=("Unity: 2022lts-editmode")
     [[ "${RUN_UNITY_6000_6}" -eq 1 ]] && expected+=("Unity: 6000_6-editmode")
   fi

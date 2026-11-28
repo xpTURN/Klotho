@@ -25,9 +25,9 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
     /// file. Synthetic metadata reaches only the verdicts below, which is exactly why the two runner bugs
     /// found in Phase A were found against a real file and not here.</para>
     ///
-    /// <para>The synthetic metadata deliberately uses <c>MaxEntities = 64</c> with no prune set and no
-    /// maxCount overrides — the same layout inputs the room suites in this binary freeze the process with,
-    /// so the layout call is idempotent rather than a conflict.</para>
+    /// <para>The synthetic metadata uses <c>MaxEntities = 64</c> with no prune set and no maxCount
+    /// overrides unless a gate needs other layout inputs; each file's layout fingerprint is the one its own
+    /// inputs build.</para>
     ///
     /// Run: dotnet run -- --test
     /// </summary>
@@ -56,6 +56,7 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
                 AnchorsReporting();
                 FileLevel(dir, logger);
                 MetadataGates(dir, logger);
+                MixedLayouts(dir, logger);
             }
             finally
             {
@@ -339,6 +340,48 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
                 $"code={BrawlerReplayVerifier.ExitUnverifiable}", StringComparison.Ordinal));
         }
 
+        // ── a batch may mix layouts ────────────────────────────────────────
+
+        static void MixedLayouts(string dir, IKLogger logger)
+        {
+            // Release semantics: the process default layout cannot be recomputed. Each file is judged against
+            // the layout its own inputs build, so in either order neither file may stop at the layout gate —
+            // and each must get past it, to the session setup these snapshot-less files cannot survive.
+            bool savedRecompute = ComponentStorageRegistry.AllowLayoutRecompute;
+            ComponentStorageRegistry.AllowLayoutRecompute = false;
+            try
+            {
+                int[] pruned = BrawlerPrunedComponents.ResolveTypeIds();
+                long prunedLayout = ComponentStorageRegistry.ComputeLayout(LayoutMaxEntities, null, pruned).LayoutFingerprint;
+                Assert("the two files have different layouts",
+                    pruned.Length > 0 && prunedLayout != ComponentStorageRegistry.ComputeLayout(LayoutMaxEntities).LayoutFingerprint);
+
+                string plain = Write(dir, "mixed-plain.rply", NewReplayBytes(m => { }));
+                string prunedFile = Write(dir, "mixed-pruned.rply", NewReplayBytes(m =>
+                {
+                    m.PrunedComponentTypeIds.AddRange(pruned);
+                    m.LayoutFingerprint = prunedLayout;
+                }));
+
+                foreach (var batch in new[] { new[] { plain, prunedFile }, new[] { prunedFile, plain } })
+                {
+                    string first = Path.GetFileNameWithoutExtension(batch[0]);
+                    for (int i = 0; i < batch.Length; i++)
+                    {
+                        var outcome = BrawlerReplayVerifier.Verify(batch[i], logger);
+                        Assert($"{first} first: {Path.GetFileNameWithoutExtension(batch[i])} gets past the layout gate",
+                            outcome.Line.Contains("sessionSetupFailed", StringComparison.Ordinal)
+                            && !outcome.Line.Contains("layoutFrozenDifferently", StringComparison.Ordinal)
+                            && !outcome.Line.Contains("mismatch:layout", StringComparison.Ordinal));
+                    }
+                }
+            }
+            finally
+            {
+                ComponentStorageRegistry.AllowLayoutRecompute = savedRecompute;
+            }
+        }
+
         // ── helpers ────────────────────────────────────────────────────────
 
         static BrawlerReplayVerifier.Outcome Run(string dir, IKLogger logger, string name, Action<ReplayMetadata> mutate)
@@ -358,10 +401,9 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             m.TotalTicks = 0;
             m.EndReason = ReplayEndReason.Normal;
             m.InitialStateTick = 0;
-            // Anchors that would pass: the layout term must be this process's, since a verifier compares it
-            // against a layout it builds from the file's own inputs.
-            ComponentStorageRegistry.EnsureLayoutComputed(LayoutMaxEntities, null, null);
-            m.LayoutFingerprint = ComponentStorageRegistry.LayoutFingerprint;
+            // Anchors that would pass: the layout term must be the one the file's own inputs build, since a
+            // verifier compares it against exactly that layout.
+            m.LayoutFingerprint = ComponentStorageRegistry.ComputeLayout(LayoutMaxEntities).LayoutFingerprint;
             m.StaticColliderFingerprint = 0x1111_2222_3333_4444L;
             m.NavFingerprint = 0x5555_6666_7777_8888L;
             m.GameFingerprint = unchecked((long)0x9999_AAAA_BBBB_CCCCUL);

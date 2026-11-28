@@ -103,7 +103,7 @@ Klotho の決定論的シミュレーション機能の恩恵を最も受ける�
 - **C# 言語レベル** — Unity は **C# 8.0** を対象とし、C# 11 に必要なランタイム属性の代替実装は `xpTURN.Polyfill` パッケージが提供します。Godot アダプターは **net8.0 / `LangVersion latest`** のためポリフィルは不要です（ネイティブの `init` / `required`）。
 - **UniTask** — Unity でのみ使う非同期（Cysharp）。**Godot アダプターは標準ライブラリの `Task`** を使います — UniTask への依存なし。
 - **xpTURN.Klotho.Logging (IKLogger)** — 自社製の構造化ロギング（外部のロギング依存なし）。`Plugins~/Logging.Mel` サンプルアダプターで MEL と任意に連携できます（`Microsoft.Extensions.Logging.Abstractions` DLL は利用側が用意）。
-- **LiteNetLib** — UDP 転送の既定の参照実装（MIT、純粋な C#）。Unity では `Runtime/ThirdParty/LiteNetLib.v2.1.4` 以下に**ソースとして同梱**され、Godot では **NuGet パッケージ `LiteNetLib 2.1.4`** として入ります。転送層は `INetworkTransport` で抽象化されており、置き換えられます。
+- **LiteNetLib** — UDP 転送の既定の参照実装（MIT、純粋な C#）。Unity では `Runtime/ThirdParty/LiteNetLib.v2.1.5` 以下に**ソースとして同梱**され、Godot では **NuGet パッケージ `LiteNetLib 2.1.5`** として入ります。転送層は `INetworkTransport` で抽象化されており、置き換えられます。
 - **Newtonsoft.Json** — DataAsset の JSON シリアライズ（Unity: `com.unity.nuget.newtonsoft-json` · Godot: NuGet `Newtonsoft.Json 13.0.3`）
 
 詳細: [Docs/BaseLibraries.md](Docs/BaseLibraries.md)

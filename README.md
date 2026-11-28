@@ -101,7 +101,7 @@ Three-layer separation:
 - **C# language level** — Unity targets **C# 8.0** with the `xpTURN.Polyfill` package supplying the runtime-attribute shims required by C# 11; the Godot adapter is **net8.0 / `LangVersion latest`** and needs no polyfill (native `init` / `required`).
 - **UniTask** — async on Unity only (Cysharp). The **Godot adapter uses the standard library `Task`** — no UniTask dependency.
 - **xpTURN.Klotho.Logging (IKLogger)** — in-house structured logging (no external logging dependency). Optional MEL interop via the `Plugins~/Logging.Mel` sample adapter (`Microsoft.Extensions.Logging.Abstractions` DLL is consumer-provided).
-- **LiteNetLib** — default reference implementation for UDP transport (MIT, pure C#). On Unity it is **vendored as source** under `Runtime/ThirdParty/LiteNetLib.v2.1.4`; on Godot it arrives as the **NuGet package `LiteNetLib 2.1.4`**. The transport layer is abstracted via `INetworkTransport` and is replaceable.
+- **LiteNetLib** — default reference implementation for UDP transport (MIT, pure C#). On Unity it is **vendored as source** under `Runtime/ThirdParty/LiteNetLib.v2.1.5`; on Godot it arrives as the **NuGet package `LiteNetLib 2.1.5`**. The transport layer is abstracted via `INetworkTransport` and is replaceable.
 - **Newtonsoft.Json** — DataAsset JSON serialization (Unity: `com.unity.nuget.newtonsoft-json` · Godot: NuGet `Newtonsoft.Json 13.0.3`)
 
 Details: [Docs/BaseLibraries.md](Docs/BaseLibraries.md)

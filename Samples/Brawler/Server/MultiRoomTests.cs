@@ -50,9 +50,11 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             Test16_MT1_NoDoubleDispose();
             Test17_MT2_FastRoomNotMarked();
             Test18_MT3_StragglerGuards();
-            Test19_MismatchedLayoutRefusesRoom();
+            Test19_DifferentLayoutRoomsBothRun();
             Test20_BudgetCollapseNotAttributed();
             Test21_StragglerWindowRecovers();
+            Test22_ReleasedRoomSlots();
+            Test23_BuildingCapacityPerRoomLayout();
 
             Console.WriteLine($"\n=== Results: {_passed} passed, {_failed} failed ===");
             _loggerFactory.Dispose();
@@ -441,32 +443,39 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             }
         }
 
-        // ── #19: a room whose layout inputs disagree is refused, not admitted ──
+        // ── #19: rooms whose layout inputs differ both run, each on its own layout ──
 
-        static void Test19_MismatchedLayoutRefusesRoom()
+        static void Test19_DifferentLayoutRoomsBothRun()
         {
-            // MaxEntities (with the maxCount overrides and the prune-set) defines the
-            // PROCESS-global component layout, frozen by the first room. The per-room config
-            // factory can nevertheless return a different one, and if that reaches the registry
-            // there is no good outcome: editor/test builds recompute — pulling the layout and the
-            // type-id cache out from under rooms already ticking on workers — and release throws
-            // on a stack whose nearest handler is outside ServerLoop.Run, so one bad room ends the
-            // process and every healthy room with it.
-            //
-            // So the room is refused before construction. Cheap to state, easy to regress: the
-            // guard sits in front of a `new` that looks unconditional.
+            // The per-room config factory may return a different MaxEntities (and maxCount overrides,
+            // prune-set) for each room. Each room's simulation computes its own FrameLayout, so the
+            // second room is admitted and the first, already live, keeps the layout it was built with.
             int call = 0;
             var env = CreateTestEnv(maxRooms: 2, maxPlayersPerRoom: 2, callbacksFactory: null,
                 maxEntitiesFactory: () => ++call == 1 ? 64 : 128);
 
             var room0 = env.RoomManager.CreateRoom(0);
-            int activeAfterFirst = env.RoomManager.ActiveRoomCount;
             var room1 = env.RoomManager.CreateRoom(1);
 
             Assert("#19a First room created", room0 != null && room0.State == RoomState.Active);
-            Assert("#19b Mismatched room refused", room1 == null);
-            Assert("#19c First room untouched", room0.State == RoomState.Active);
-            Assert("#19d ActiveRoomCount unchanged", env.RoomManager.ActiveRoomCount == activeAfterFirst);
+            Assert("#19b Room with other layout inputs created", room1 != null && room1.State == RoomState.Active);
+            Assert("#19c ActiveRoomCount 2", env.RoomManager.ActiveRoomCount == 2);
+            var layout0 = ((EcsSimulation)room0.Simulation).Layout;
+            var layout1 = ((EcsSimulation)room1.Simulation).Layout;
+            Assert("#19d Each room on its own maxEntities", layout0.MaxEntities == 64 && layout1.MaxEntities == 128);
+            Assert("#19e Layout fingerprints differ", layout0.LayoutFingerprint != layout1.LayoutFingerprint);
+
+            SimulatePeerJoin(env, peerId: 190, roomId: 0);
+            SimulatePeerJoin(env, peerId: 191, roomId: 1);
+            for (int i = 0; i < 3; i++)
+            {
+                room0.Update(0.025f);
+                room1.Update(0.025f);
+            }
+            Assert("#19f Both rooms still Active after updates",
+                room0.State == RoomState.Active && room1.State == RoomState.Active);
+            Assert("#19g First room's layout unchanged", ((EcsSimulation)room0.Simulation).Layout == layout0
+                && room0.Simulation is EcsSimulation s0 && s0.Frame.MaxEntities == 64);
 
             env.Dispose();
         }
@@ -604,12 +613,69 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
             return env;
         }
 
+        // ── #22: a disposed or shut-down room no longer occupies its slot ──
+
+        static void Test22_ReleasedRoomSlots()
+        {
+            var slots = typeof(RoomManager).GetField("_rooms",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+            {
+                var env = CreateTestEnv(maxRooms: 2, maxPlayersPerRoom: 2);
+                var room0 = env.RoomManager.CreateRoom(0);
+                room0.State = RoomState.Disposing;
+                env.RoomManager.CleanupDisposingRooms();
+                var rooms = (Room[])slots.GetValue(env.RoomManager);
+                Assert("#22a Disposed room Empty", room0.State == RoomState.Empty);
+                Assert("#22b Its slot released", rooms[0] == null);
+                Assert("#22c GetRoom null", env.RoomManager.GetRoom(0) == null);
+                var again = env.RoomManager.CreateRoom(0);
+                Assert("#22d Slot reused by a new room", again != null && again != room0 && rooms[0] == again);
+                env.Dispose();
+            }
+
+            {
+                var env = CreateTestEnv(maxRooms: 2, maxPlayersPerRoom: 2);
+                env.RoomManager.CreateRoom(0);
+                env.RoomManager.CreateRoom(1);
+                env.Router.StopAccepting();
+                env.RoomManager.ShutdownAllRooms();
+                var rooms = (Room[])slots.GetValue(env.RoomManager);
+                Assert("#22e Shutdown releases every slot", rooms[0] == null && rooms[1] == null);
+                env.Dispose();
+            }
+        }
+
+        // ── #23: the building storage bound is read from each room's own layout ──
+
+        static void Test23_BuildingCapacityPerRoomLayout()
+        {
+            int buildingId = ComponentStorageRegistry.GetTypeId<Brawler.BuildingComponent>();
+            int call = 0;
+            var env = CreateTestEnv(maxRooms: 2, maxPlayersPerRoom: 2, callbacksFactory: null,
+                configure: cfg => cfg.ComponentMaxCountOverrides[buildingId] = ++call == 1 ? 12 : 24);
+
+            var room0 = env.RoomManager.CreateRoom(0);
+            var room1 = env.RoomManager.CreateRoom(1);
+            var layout0 = ((EcsSimulation)room0.Simulation).Layout;
+            var layout1 = ((EcsSimulation)room1.Simulation).Layout;
+
+            Assert("#23a Each room's slot capacity", Brawler.PlatformerCommandSystem.BuildingSlotCapacity(layout0) == 12
+                && Brawler.PlatformerCommandSystem.BuildingSlotCapacity(layout1) == 24);
+            Assert("#23b Placement seam sized from its room's layout",
+                new Brawler.NavMeshEffectiveTickSystem(layout0).Capacity == 12
+                && new Brawler.NavMeshEffectiveTickSystem(layout1).Capacity == 24);
+
+            env.Dispose();
+        }
+
         static TestEnvironment CreateTestEnv(int maxRooms, int maxPlayersPerRoom)
             => CreateTestEnv(maxRooms, maxPlayersPerRoom, null);
 
         static TestEnvironment CreateTestEnv(int maxRooms, int maxPlayersPerRoom,
             Func<IKLogger, ISimulationCallbacks> callbacksFactory,
-            Func<int> maxEntitiesFactory = null)
+            Func<int> maxEntitiesFactory = null,
+            Action<SimulationConfig> configure = null)
         {
             EnsureSharedTestData();
 
@@ -624,18 +690,21 @@ namespace xpTURN.Klotho.BrawlerDedicatedServer.Tests
                 ?? ((roomLogger) => new BrawlerServerCallbacks(roomLogger, staticColliders, navMesh, maxPlayersPerRoom, 0));
             var roomManagerConfig = new RoomManagerConfigBuilder(factory)
                 .WithRoomLimits(maxRooms, maxPlayersPerRoom)
-                .WithSimulationConfig(() => new SimulationConfig
+                .WithSimulationConfig(() =>
                 {
-                    Mode = NetworkMode.ServerDriven,
-                    TickIntervalMs = tickIntervalMs,
-                    // Per ROOM by construction, process-global by contract — which is the whole
-                    // point of #19: a factory is free to vary this, and nothing but RoomManager's
-                    // refusal stands between that freedom and a recompute under live rooms.
-                    MaxEntities = maxEntitiesFactory?.Invoke() ?? 64,
-                    MaxRollbackTicks = 1,
-                    SyncCheckInterval = 1,
-                    UsePrediction = false,
-                    InputDelayTicks = 1,
+                    var cfg = new SimulationConfig
+                    {
+                        Mode = NetworkMode.ServerDriven,
+                        TickIntervalMs = tickIntervalMs,
+                        // Per room: #19 varies it, and each room's simulation builds its own layout.
+                        MaxEntities = maxEntitiesFactory?.Invoke() ?? 64,
+                        MaxRollbackTicks = 1,
+                        SyncCheckInterval = 1,
+                        UsePrediction = false,
+                        InputDelayTicks = 1,
+                    };
+                    configure?.Invoke(cfg);
+                    return cfg;
                 })
                 .WithSessionConfig(() => new SessionConfig
                 {

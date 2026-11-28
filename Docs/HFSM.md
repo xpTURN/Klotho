@@ -139,6 +139,17 @@ A composite state declares its parent/default-child via the `State` overload:
 
 `Build()` returns the registered `HFSMRoot`. The builder constructs and registers it for you via `HFSMRoot.Register` — you normally never construct `HFSMRoot`/`HFSMStateNode` arrays by hand.
 
+**Isolated roots.** `BuildIsolated()` validates and assembles the graph exactly like `Build()` but does not register it. Hold the returned `HFSMRoot` yourself — per room, per map — and drive it with the `HFSMManager` overloads that take the root instead of an id:
+
+```csharp
+var root = new HFSMBuilder(BotHFSMRoot.Id) /* ... */ .BuildIsolated();
+HFSMManager.Init(ref frame, entity, root);      // also (…, root, ref context)
+HFSMManager.Update(ref frame, entity, root);
+HFSMManager.Deinit(ref frame, entity, root);
+```
+
+The static registry is one dictionary for the whole process; an isolated root never touches it, so rooms on one server can build their own graphs (for example from stage-specific assets) while other rooms tick. The entity still stores `root.RootId`, and `Update` / `Deinit` throw when the root passed has a different id. Rooms may build the same graph under the same id, as above; passing each entity its own room's root is then up to you, because roots that share an id cannot be told apart. Do not mix the two styles on one entity: the id-only overloads look the id up in the registry.
+
 ### Reusing a transition set across states
 
 There is no first-class "transition set" type — reuse is a build-time concern, and a plain helper method covers it.

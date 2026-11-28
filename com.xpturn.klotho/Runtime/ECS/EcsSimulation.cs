@@ -16,12 +16,19 @@ namespace xpTURN.Klotho.ECS
     public class EcsSimulation : ISimulation
     {
         private IKLogger _logger;
+        private readonly FrameLayout _layout;
         private Frame _frame;
         private readonly SystemRunner _systemRunner;
         private readonly FrameRingBuffer _ringBuffer;
         private readonly int _deltaTimeMs;
         private byte[] _hashBuffer = Array.Empty<byte>();
         private IDataAssetRegistryBuilder _registryBuilder;
+
+        /// <summary>This simulation's immutable component layout, shared by its live frame and rollback ring.</summary>
+        public FrameLayout Layout => _layout;
+
+        /// <summary>A standalone <see cref="Frame"/> on this simulation's layout (e.g. a <see cref="CaptureStateTo"/> target).</summary>
+        public Frame CreateCompatibleFrame() => new Frame(_layout, _logger);
 
         // Desync-diagnostic hash history. _breakdown is the reusable layered-hash scratch that
         // GetStateHash fills when history is enabled; _hashHistory is the numeric ring, built lazily once
@@ -106,24 +113,23 @@ namespace xpTURN.Klotho.ECS
             if (assetRegistry != null && registryBuilder != null)
                 throw new ArgumentException("Cannot specify both assetRegistry and registryBuilder.");
 
-            // Freeze the component layout with the config maxCount overrides + reservation-pruning denylist
-            // before any Frame is built (the Frame ctor's no-arg EnsureLayoutComputed is then idempotent).
-            // Single seam for the process-global layout inputs.
-            ComponentStorageRegistry.EnsureLayoutComputed(maxEntities, maxCountOverrides, prunedComponentTypeIds);
+            // This simulation's own layout from its config inputs (maxCount overrides + reservation-pruning
+            // denylist). Fixed for its lifetime and independent of other simulations in the process.
+            _layout = ComponentStorageRegistry.ComputeLayout(maxEntities, maxCountOverrides, prunedComponentTypeIds);
 
             _logger = logger;
             if (assetRegistry != null)
             {
                 _registryBuilder = null;
-                _frame = new Frame(maxEntities, _logger, assetRegistry);
+                _frame = new Frame(_layout, _logger, assetRegistry);
             }
             else
             {
                 _registryBuilder = registryBuilder ?? new DataAssetRegistry();
-                _frame = new Frame(maxEntities, _logger, _registryBuilder);
+                _frame = new Frame(_layout, _logger, _registryBuilder);
             }
             _systemRunner = new SystemRunner();
-            _ringBuffer = new FrameRingBuffer(maxRollbackTicks, maxEntities, _logger);
+            _ringBuffer = new FrameRingBuffer(maxRollbackTicks, _layout, _logger);
             _deltaTimeMs = deltaTimeMs;
         }
 
@@ -368,7 +374,7 @@ namespace xpTURN.Klotho.ECS
         // and sizes the reusable breakdown so GetStateHash fills it allocation-free.
         private void EnsureHashRing()
         {
-            int typeCount = ComponentStorageRegistry.RegisteredTypeIdsSorted.Length;
+            int typeCount = _layout.RegisteredTypeIdsSorted.Length;
             int pc = _snapshotParticipants.Count;
             if (_hashHistory == null || _hashHistory.TypeCount != typeCount || _hashHistory.ParticipantCount != pc)
             {
@@ -450,7 +456,7 @@ namespace xpTURN.Klotho.ECS
             _lastFlushedDumpTick = dumpTick;
 
             logger.KInformation($"[Desync][Diag][History] dumpTick={dumpTick} depth={n}");
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             var sb = new System.Text.StringBuilder(256);
             for (int i = 0; i < n; i++)
             {
@@ -531,9 +537,20 @@ namespace xpTURN.Klotho.ECS
         }
 
         /// <summary>
+        /// typeId for a positional index into this simulation's breakdown component arrays, or -1 when out
+        /// of range. Positions are only meaningful against the layout that produced them.
+        /// </summary>
+        public int GetComponentTypeIdAt(int index)
+        {
+            var typeIds = _layout.RegisteredTypeIdsSorted;
+            return (uint)index < (uint)typeIds.Length ? typeIds[index] : -1;
+        }
+
+        /// <summary>
         /// Registry typeId for a positional index into a breakdown's component arrays, or -1 when out of
         /// range. The wire carries typeIds, not positions: a position is only meaningful against the
-        /// exact registry that produced it.
+        /// exact registry that produced it. Reads the registry's default layout; a simulation's own
+        /// positions are <see cref="GetComponentTypeIdAt"/>.
         /// </summary>
         public static int ComponentTypeIdAt(int index)
         {
@@ -563,7 +580,7 @@ namespace xpTURN.Klotho.ECS
 
             GetStateHash(_breakdown);   // fills + sizes _breakdown
 
-            var typeIds = ComponentStorageRegistry.RegisteredTypeIdsSorted;
+            var typeIds = _layout.RegisteredTypeIdsSorted;
             logger.KLog(logLevel, $"[Desync][Diag][{label}] tick={_frame.Tick} total=0x{_breakdown.Total:X16} frame=0x{_breakdown.FrameHash:X16} components={typeIds.Length} systems={_snapshotParticipants.Count}");
             for (int i = 0; i < typeIds.Length; i++)
             {

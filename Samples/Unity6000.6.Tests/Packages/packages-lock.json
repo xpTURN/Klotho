@@ -8,7 +8,7 @@
       "hash": "ceac8d6946b1125fe782cd171fbcb245b567dbf9"
     },
     "com.unity.ai.navigation": {
-      "version": "2.0.16",
+      "version": "2.0.17",
       "depth": 0,
       "source": "registry",
       "dependencies": {
@@ -23,7 +23,7 @@
       "dependencies": {}
     },
     "com.unity.collab-proxy": {
-      "version": "2.13.6",
+      "version": "2.14.0",
       "depth": 0,
       "source": "registry",
       "dependencies": {},
@@ -53,7 +53,7 @@
       "dependencies": {}
     },
     "com.unity.ide.rider": {
-      "version": "3.1.0",
+      "version": "3.1.1",
       "depth": 0,
       "source": "registry",
       "dependencies": {},

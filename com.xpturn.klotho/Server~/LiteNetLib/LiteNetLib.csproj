@@ -1,6 +1,6 @@
 <!--
   LiteNetLib (ThirdParty transport library) — server mirror of the
-  Runtime/ThirdParty/LiteNetLib.v2.1.4 asmdef. Leaf assembly, no Klotho deps.
+  Runtime/ThirdParty/LiteNetLib.v2.1.5 asmdef. Leaf assembly, no Klotho deps.
 -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -13,7 +13,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="$(MSBuildThisFileDirectory)..\..\Runtime\ThirdParty\LiteNetLib.v2.1.4\**\*.cs"
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\Runtime\ThirdParty\LiteNetLib.v2.1.5\**\*.cs"
              Link="ThirdParty\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

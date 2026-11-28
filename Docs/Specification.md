@@ -176,7 +176,7 @@ The lobby→session credential handoff that crosses this boundary (ticket carria
 │   │   │                   Random/ (DeterministicRandom) · Curve/ (FPAnimationCurve)
 │   │   ├── LiteNetLib/     LiteNetLibTransport — INetworkTransport implementation
 │   │   │                   (xpTURN.Klotho.LiteNetLib, noEngineReferences)
-│   │   └── ThirdParty/     vendored: LiteNetLib.v2.1.4 (UDP networking)
+│   │   └── ThirdParty/     vendored: LiteNetLib.v2.1.5 (UDP networking)
 │   ├── Unity/              Unity adapter — USimulationConfig, USessionConfig, EcsDebugBridge,
 │   │                       KlothoSessionDriver, KlothoSessionFlowAsync, KlothoConnectionAsync,
 │   │                       KlothoAutoReconnect, PlayerPrefsReconnectCredentialsStore,
@@ -1589,7 +1589,7 @@ offset table is the index into it — that is what makes seeking a lookup rather
 │   int    m · int InitialEntitlementLengths[m]                           │
 │   blob   InitialEntitlementData                concatenated, sliced by  │
 │                                                the lengths above       │
-│   ── layout inputs: recorded, NOT restored ──────────────────────────   │
+│   ── layout inputs: restored on playback ────────────────────────────   │
 │   int    p · int PrunedComponentTypeIds[p]                              │
 │   int    q · int ComponentMaxCountTypeIds[q]                            │
 │           int ComponentMaxCountValues[q]                                │

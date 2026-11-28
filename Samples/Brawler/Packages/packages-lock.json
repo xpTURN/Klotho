@@ -8,7 +8,7 @@
       "hash": "a9e27c03d411d2fca01cc7410c24c97cd77cb539"
     },
     "com.unity.ai.navigation": {
-      "version": "2.0.16",
+      "version": "2.0.17",
       "depth": 0,
       "source": "registry",
       "dependencies": {
@@ -27,7 +27,7 @@
       "url": "https://packages.unity.com"
     },
     "com.unity.cinemachine": {
-      "version": "3.1.7",
+      "version": "3.1.8",
       "depth": 0,
       "source": "registry",
       "dependencies": {
@@ -37,7 +37,7 @@
       "url": "https://packages.unity.com"
     },
     "com.unity.collab-proxy": {
-      "version": "2.13.6",
+      "version": "2.14.0",
       "depth": 0,
       "source": "registry",
       "dependencies": {},
@@ -70,7 +70,7 @@
       "dependencies": {}
     },
     "com.unity.ide.rider": {
-      "version": "3.1.0",
+      "version": "3.1.1",
       "depth": 0,
       "source": "registry",
       "dependencies": {},
@@ -100,14 +100,14 @@
       "url": "https://packages.unity.com"
     },
     "com.unity.memoryprofiler": {
-      "version": "1.1.12",
+      "version": "1.2.1",
       "depth": 0,
       "source": "registry",
       "dependencies": {
-        "com.unity.burst": "1.8.0",
-        "com.unity.collections": "1.2.3",
-        "com.unity.mathematics": "1.2.1",
-        "com.unity.profiling.core": "1.0.0",
+        "com.unity.burst": "1.8.29",
+        "com.unity.collections": "1.2.4",
+        "com.unity.mathematics": "1.2.6",
+        "com.unity.profiling.core": "1.0.2",
         "com.unity.editorcoroutines": "1.0.0"
       },
       "url": "https://packages.unity.com"

@@ -90,7 +90,7 @@ Third-party libraries shipped as source under [`com.xpturn.klotho/Runtime/ThirdP
 | ---- | ---- |
 | Purpose | Lightweight UDP networking library |
 | GitHub | <https://github.com/RevenantX/LiteNetLib> |
-| Version | 2.1.4 (vendored as [`Runtime/ThirdParty/LiteNetLib.v2.1.4/`](../com.xpturn.klotho/Runtime/ThirdParty/LiteNetLib.v2.1.4/)) |
+| Version | 2.1.5 (vendored as [`Runtime/ThirdParty/LiteNetLib.v2.1.5/`](../com.xpturn.klotho/Runtime/ThirdParty/LiteNetLib.v2.1.5/)) |
 | License | MIT |
 | Assembly | `LiteNetLib` |
 
@@ -137,10 +137,10 @@ The Godot distribution wires its runtime dependencies as **NuGet `PackageReferen
 | Dependency | Version | Note |
 | ---- | ---- | ---- |
 | `Newtonsoft.Json` | 13.0.3 | DataAsset JSON (vs Unity's `com.unity.nuget.newtonsoft-json`) |
-| `LiteNetLib` | 2.1.4 | UDP transport (vendored as source on Unity) |
+| `LiteNetLib` | 2.1.5 | UDP transport (vendored as source on Unity) |
 | `GodotSharp` | (project's) | Adapter compiles against the consumer's own GodotSharp (source-only) |
 
-> On Unity, `LiteNetLib` ships as **vendored source** under `Runtime/ThirdParty/` (§C); on Godot it arrives as a NuGet package. The Godot core DLL is built with the vendored LiteNetLib excluded so the NuGet `2.1.4` swaps in cleanly.
+> On Unity, `LiteNetLib` ships as **vendored source** under `Runtime/ThirdParty/` (§C); on Godot it arrives as a NuGet package. The Godot core DLL is built with the vendored LiteNetLib excluded so the NuGet `2.1.5` swaps in cleanly.
 
 ---
 

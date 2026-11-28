@@ -35,6 +35,7 @@ namespace Brawler
     {
         private BotFSMSystem _botFSM;
         private readonly EntityRef[] _due;
+        private readonly int _capacity;
 
         /// <summary>
         /// Work units per frame. Measured by
@@ -83,9 +84,10 @@ namespace Brawler
         /// </summary>
         public FPNavMeshPlacementValidator Validator { get; }
 
-        public NavMeshEffectiveTickSystem()
+        public NavMeshEffectiveTickSystem(FrameLayout layout)
         {
-            _due = new EntityRef[PlatformerCommandSystem.BuildingSlotCapacity];
+            _capacity = PlatformerCommandSystem.BuildingSlotCapacity(layout);
+            _due = new EntityRef[_capacity];
             Driver = new FPNavMeshRebakeDriver(
                 this, this, PlatformerCommandSystem.PlacementRules, SliceBudgetUnits);
             Validator = new FPNavMeshPlacementValidator(
@@ -118,7 +120,7 @@ namespace Brawler
         /// rebake input is the quietest failure in this pipeline: the dropped buildings are missing
         /// from the mesh while the state hash still matches on every peer.</para>
         /// </summary>
-        public int Capacity => PlatformerCommandSystem.BuildingSlotCapacity;
+        public int Capacity => _capacity;
 
         /// <summary>
         /// Every building the frame holds, tick windows included and no tick filtering — the driver

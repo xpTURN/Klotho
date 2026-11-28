@@ -147,8 +147,8 @@ namespace xpTURN.Klotho.ECS.Tests
             int singletonId    = ComponentStorageRegistry.GetTypeId<DummySingletonComponent>();
             int nonSingletonId = ComponentStorageRegistry.GetTypeId<DummyNonSingletonComponent>();
 
-            ref readonly var singletonLayout    = ref ComponentStorageRegistry.GetLayout(singletonId);
-            ref readonly var nonSingletonLayout = ref ComponentStorageRegistry.GetLayout(nonSingletonId);
+            ref readonly var singletonLayout    = ref _frame.Layout.GetLayout(singletonId);
+            ref readonly var nonSingletonLayout = ref _frame.Layout.GetLayout(nonSingletonId);
 
             Assert.AreEqual(1, singletonLayout.SlotCapacity);
             Assert.AreEqual(_frame.MaxEntities, singletonLayout.Capacity);

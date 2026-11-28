@@ -380,6 +380,40 @@ namespace xpTURN.Klotho.Core.Tests
             replaySession.Stop(saveReplay: false);
         }
 
+        /// <summary>
+        /// A match that pruned a type and capped another replays under the layout it was recorded with:
+        /// the playback simulation's fingerprint and its tick-0 hash equal the recording's, in both ways
+        /// of obtaining tick 0.
+        /// </summary>
+        [TestCase(KlothoEngine.ReplayInitialState.RestoreSnapshot)]
+        [TestCase(KlothoEngine.ReplayInitialState.Reconstruct)]
+        public void StartLocal_ReplayOfAPrunedMatch_BuildsTheRecordedLayout(KlothoEngine.ReplayInitialState initialState)
+        {
+            int capped = ComponentStorageRegistry.GetTypeId<xpTURN.Klotho.ECS.Tests.PruneGameAComponent>();
+            int pruned = ComponentStorageRegistry.GetTypeId<xpTURN.Klotho.ECS.Tests.PruneGameBComponent>();
+            var simConfig = new SimulationConfig();
+            simConfig.PrunedComponentTypeIds.Add(pruned);
+            simConfig.ComponentMaxCountOverrides[capped] = 8;
+
+            var session = new KlothoSessionFlow(NewSetup(_logger, new NullTransport(_logger)))
+                .StartLocal(simConfig, SoloSessionConfig());
+            PumpUntilRunning(session);
+            for (int i = 0; i < 20; i++) session.Update(0.025f);
+            long liveLayout = session.Simulation.Layout.LayoutFingerprint;
+            session.Stop(saveReplay: false);
+
+            var recorded = session.Engine.GetCurrentReplayData();
+            Assert.AreEqual(liveLayout, recorded.Metadata.LayoutFingerprint, "fixture: the recording carries the live layout");
+            Assert.AreNotEqual(ComponentStorageRegistry.ComputeLayout(simConfig.MaxEntities).LayoutFingerprint, liveLayout,
+                "fixture: the inputs must change the layout, or the comparison below proves nothing");
+
+            var replay = new KlothoSessionFlow(NewSetup(_logger, new NullTransport(_logger)))
+                .StartReplay(recorded, recorded.Metadata.ToSimulationConfig(), initialState);
+            Assert.AreEqual(recorded.Metadata.LayoutFingerprint, replay.Simulation.Layout.LayoutFingerprint);
+            Assert.AreEqual(recorded.Metadata.InitialStateHash, replay.Engine.ReplayTick0Hash);
+            replay.Stop(saveReplay: false);
+        }
+
         // ── Test doubles used above ──────────────────────────────────────────
 
         private sealed class RecordingObserver : IKlothoSessionObserver

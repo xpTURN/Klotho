@@ -51,5 +51,25 @@ namespace xpTURN.Klotho.Core.Tests
 
             Assert.IsEmpty(restored.ComponentMaxCountOverrides);
         }
+
+        [Test] // The spectator builds its simulation from this message alone, so the two layout inputs
+               // must cross it, or its layout differs from the room's and the Ready check ends the spectate.
+        public void SpectatorAccept_CarriesTheLayoutInputs()
+        {
+            var config = new SimulationConfig
+            {
+                ComponentMaxCountOverrides = new Dictionary<int, int> { { 9, 90 }, { 2, 20 } },
+                PrunedComponentTypeIds = new List<int> { 7, 3 },
+            };
+
+            var msg = new SpectatorAcceptMessage();
+            msg.CopySimulationConfigFrom(config);
+            var restored = RoundTrip(msg).ToSimulationConfig();
+
+            CollectionAssert.AreEquivalent(new[] { 7, 3 }, restored.PrunedComponentTypeIds);
+            Assert.AreEqual(2, restored.ComponentMaxCountOverrides.Count);
+            Assert.AreEqual(90, restored.ComponentMaxCountOverrides[9]);
+            Assert.AreEqual(20, restored.ComponentMaxCountOverrides[2]);
+        }
     }
 }

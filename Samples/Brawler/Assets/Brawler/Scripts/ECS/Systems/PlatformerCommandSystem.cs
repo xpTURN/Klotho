@@ -475,14 +475,14 @@ namespace Brawler
         public const int BuildDelayTicks = 60;
 
         /// <summary>
-        /// Engine storage bound for <see cref="BuildingComponent"/>, read from the frozen layout
+        /// Engine storage bound for <see cref="BuildingComponent"/>, read from the simulation's layout
         /// rather than transcribed from the attribute. Reading it means a buffer sized off this
         /// cannot fall out of step with a raised MaxCount — which is exactly how the join path used
-        /// to end up rebaking a strict subset while everyone else rebaked the whole set.
+        /// to end up rebaking a strict subset while everyone else rebaked the whole set. Per
+        /// simulation: rooms in one server may carry different MaxCount overrides.
         /// </summary>
-        public static int BuildingSlotCapacity =>
-            ComponentStorageRegistry.GetLayout(
-                ComponentStorageRegistry.GetTypeId<BuildingComponent>()).SlotCapacity;
+        public static int BuildingSlotCapacity(FrameLayout layout) =>
+            layout.GetLayout(ComponentStorageRegistry.GetTypeId<BuildingComponent>()).SlotCapacity;
 
         /// <summary>
         /// Brawler lets players pack buildings wall-to-wall (shared edge / shared corner); only

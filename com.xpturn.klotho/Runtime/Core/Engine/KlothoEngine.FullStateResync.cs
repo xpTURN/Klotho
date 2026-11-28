@@ -363,8 +363,8 @@ namespace xpTURN.Klotho.Core
                 // test framework showed — fails any test that deliberately provokes a mismatch and
                 // expects exactly one error. Same level as the component/static diagnostics below.
                 _logger?.KInformation(
-                    $"[KlothoEngine][Registry] local: types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount} " +
-                    $"fp=0x{xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint:X16} " +
+                    $"[KlothoEngine][Registry] local: types={GetLocalLayoutTypeCount()} " +
+                    $"fp=0x{GetLocalLayoutFingerprint():X16} " +
                     $"— compare with the peer's [Registry] line; a mismatch means different builds (e.g. Unity Editor vs player build)");
 
                 // Diagnostic — per-component hash to identify which component(s) diverged.
@@ -604,7 +604,7 @@ namespace xpTURN.Klotho.Core
             // from tick 0; an environment difference is not part of the state hash). This value
             // stays bit-identical to the pre-split fold: the environment half is raw and the
             // 0 -> 1 sentinel normalization still happens here and only here.
-            long fp = xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint
+            long fp = GetLocalLayoutFingerprint()
                     ^ ComputeLocalEnvironmentFingerprintRaw();
 
             if (fp == 0)
@@ -649,7 +649,7 @@ namespace xpTURN.Klotho.Core
 
         private FingerprintBreakdown GetFingerprintBreakdown()
         {
-            long layout = xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutFingerprint;
+            long layout = GetLocalLayoutFingerprint();
 
             if (_simulation is not xpTURN.Klotho.ECS.EcsSimulation ecs)
                 return new FingerprintBreakdown(layout, 0, 0, 0);
@@ -763,7 +763,7 @@ namespace xpTURN.Klotho.Core
             var fp = GetFingerprintBreakdown();
             _logger?.KError(
                 $"[KlothoEngine] Static environment mismatch: server=0x{serverStaticFingerprint:X16} local=0x{localFp:X16} " +
-                $"— local sources: registry(types={xpTURN.Klotho.ECS.ComponentStorageRegistry.LayoutTypeCount})=0x{fp.Layout:X16} " +
+                $"— local sources: registry(types={GetLocalLayoutTypeCount()})=0x{fp.Layout:X16} " +
                 $"colliders=0x{fp.StaticCollider:X16} nav=0x{fp.Nav:X16} " +
                 $"game=0x{fp.Game:X16}. " +
                 $"Compare each against the peer's: a registry difference means different builds (e.g. Unity Editor vs player build); " +

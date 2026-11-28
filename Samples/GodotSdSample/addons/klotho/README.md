@@ -33,7 +33,7 @@ addons/klotho/
 ```
 
 The core is a prebuilt DLL; the adapter is shipped as **source** so it builds against your project's own
-GodotSharp version. Runtime deps (`Newtonsoft.Json 13.0.3`, `LiteNetLib 2.1.4`)
+GodotSharp version. Runtime deps (`Newtonsoft.Json 13.0.3`, `LiteNetLib 2.1.5`)
 are declared by `Klotho.props` as NuGet `PackageReference`s.
 
 ---

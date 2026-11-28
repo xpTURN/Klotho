@@ -187,6 +187,35 @@ namespace xpTURN.Klotho.Core.Tests
                 "and the reader must be told why it was not checked");
         }
 
+        /// <summary>
+        /// Playback builds the recorded layout from the file's inputs, so a different layout fingerprint
+        /// means this build registers components differently. Said out loud, not refused; a file that
+        /// carries no layout fingerprint (0) has nothing to compare.
+        /// </summary>
+        [Test]
+        public void LayoutFingerprintMismatch_IsWarnedAbout()
+        {
+            var differs = Recorded(out _);
+            ((ReplayMetadata)differs.Metadata).LayoutFingerprint ^= 0x0F0F;
+            var engine = NewPlaybackEngine(NavFp, out var log);
+            Assert.DoesNotThrow(() => engine.StartReplay(differs));
+            Assert.IsTrue(log.Contains(KLogLevel.Warning, "layout fingerprint differs"),
+                "a playback that cannot reproduce its recording must say so");
+
+            var same = Recorded(out _);
+            var sameEngine = NewPlaybackEngine(NavFp, out var sameLog);
+            sameEngine.StartReplay(same);
+            Assert.IsFalse(sameLog.Contains(KLogLevel.Warning, "layout fingerprint differs"),
+                "the matching layout must not warn");
+
+            var absent = Recorded(out _);
+            ((ReplayMetadata)absent.Metadata).LayoutFingerprint = 0;
+            var absentEngine = NewPlaybackEngine(NavFp, out var absentLog);
+            absentEngine.StartReplay(absent);
+            Assert.IsFalse(absentLog.Contains(KLogLevel.Warning, "layout fingerprint differs"),
+                "0 is \"not provided\", not a mismatch");
+        }
+
         #endregion
 
         private static KlothoEngine NewRecordingEngine(
@@ -367,11 +396,9 @@ namespace xpTURN.Klotho.Core.Tests
 
         // ── V-8: layout inputs are recorded, never restored ────────────────
 
-        [Test] // Both are process-global layout inputs, frozen long before a replay loads. Recording them lets
-               // a verifier BOOT correctly; restoring them into the playback config would change nothing while
-               // signalling that it had — the run would reproduce under a different layout and only the
-               // fingerprint mismatch would ever say so.
-        public void LayoutInputs_AreRecordedSorted_AndNotRestored()
+        [Test] // A simulation builds its layout from the config it is given, so playback reproduces the
+               // recorded layout only if the config carries both inputs back.
+        public void LayoutInputs_AreRecordedSorted_AndRestored()
         {
             var cfg = new SimulationConfig();
             cfg.PrunedComponentTypeIds.Add(7);
@@ -390,9 +417,10 @@ namespace xpTURN.Klotho.Core.Tests
                 "values must stay parallel to the sorted ids");
 
             var restored = meta.ToSimulationConfig();
-            CollectionAssert.IsEmpty(restored.PrunedComponentTypeIds,
-                "restoring would be a no-op that looks like a restore");
-            CollectionAssert.IsEmpty(restored.ComponentMaxCountOverrides);
+            CollectionAssert.AreEqual(new[] { 3, 7 }, restored.PrunedComponentTypeIds);
+            Assert.AreEqual(2, restored.ComponentMaxCountOverrides.Count);
+            Assert.AreEqual(20, restored.ComponentMaxCountOverrides[2]);
+            Assert.AreEqual(90, restored.ComponentMaxCountOverrides[9]);
         }
 
         // ── V-2: round trip ────────────────────────────────────────────────

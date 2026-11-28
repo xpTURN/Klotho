@@ -80,6 +80,14 @@ namespace xpTURN.Klotho.ECS.FSM
             return root;
         }
 
+        /// <summary>Validates and assembles the graph like <see cref="Build"/>, without registering it in the
+        /// global <see cref="HFSMRoot"/> registry. Drive it with the <see cref="HFSMManager"/> overloads that
+        /// take an <see cref="HFSMRoot"/> — a per-room or per-map graph that never touches the shared registry.
+        /// The entity stores <see cref="HFSMRoot.RootId"/>, and the root-taking overloads reject a root of another
+        /// id. Rooms may build the same graph under the same id; passing each entity its own room's root is then
+        /// the caller's part, since roots that share an id cannot be told apart.</summary>
+        public HFSMRoot BuildIsolated(bool strict = false) => BuildRoot(strict);
+
         private HFSMRoot BuildRoot(bool strict)
         {
             if (!_defaultSet)
@@ -415,6 +423,9 @@ namespace xpTURN.Klotho.ECS.FSM
 
             /// <summary>Validates, sorts, and registers the graph.</summary>
             public HFSMRoot Build(bool strict = false) => _builder.Build(strict);
+
+            /// <summary>Validates and assembles the graph without global registration.</summary>
+            public HFSMRoot BuildIsolated(bool strict = false) => _builder.BuildIsolated(strict);
         }
     }
 }

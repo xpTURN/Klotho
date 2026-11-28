@@ -48,21 +48,25 @@ namespace xpTURN.Klotho.ECS
             _fixedArrayReaders = new Dictionary<(Type, string), Func<object, int[]>>();
 
         // === Layout + freeze state ===
-        private static StorageLayout[] _layouts;
-        private static int _heapSize;
-        private static long _layoutFingerprint;
+        // Process default layout: set only by an explicit EnsureLayoutComputed (single-simulation tools,
+        // tests). A simulation computes and owns its own FrameLayout (ComputeLayout) and neither sets nor
+        // reads this one, so concurrent simulations with different layout inputs never touch it.
+        private static FrameLayout _defaultLayout;
         private static int _computedMaxEntities = -1;
         private static bool _frozen = false;
-        // Config-supplied per-type slot-cap overrides (typeId→maxCount). Process-global layout input:
-        // must be uniform across all concurrent sessions/rooms in the process (same as maxEntities).
+        // Set by the first layout computation of any kind (default or per-simulation): a type registered
+        // after that would be missing from layouts already handed out. A plain flag — Register<T> runs
+        // inside module constructors under ModuleInitializerHelper's lock and must not take another lock.
+        private static bool _typesFrozen = false;
+        // Config-supplied per-type slot-cap overrides (typeId→maxCount) of the default layout.
         // null/empty = fall back to each type's attribute-declared cap.
         private static IReadOnlyDictionary<int, int> _maxCountOverrides;
 
         // === Reservation pruning ===
-        // Raw config denylist (typeIds to skip reserving); process-global layout input like
-        // _maxCountOverrides. null/empty = no pruning (all registered types reserved = current behavior).
+        // Raw config denylist (typeIds to skip reserving) of the default layout. null/empty = no pruning
+        // (all registered types reserved = current behavior).
         private static IReadOnlyCollection<int> _prunedComponentTypeIds;
-        // Effective prune-set = (denylist − core base-set), computed at freeze. null = no pruning.
+        // Effective prune-set = (denylist − core base-set) of the default layout. null = no pruning.
         // The layout loop skips typeIds in this set; subtracting core guarantees [KlothoCoreComponent]
         // types are never pruned even if a game denylist lists them.
         private static HashSet<int> _prunedSet;
@@ -72,19 +76,14 @@ namespace xpTURN.Klotho.ECS
 
         private static readonly Dictionary<Type, int> _componentSizes = new Dictionary<Type, int>();
 
-        // Used to accelerate Frame's per-tick hash/serialize/deserialize loops. Built once at freeze time.
-        // Uses a sorted array so only registered typeIds are iterated, even if MaxTypeId is large.
-        private static int[] _registeredTypeIdsSorted = Array.Empty<int>();
-        internal static ReadOnlySpan<int> RegisteredTypeIdsSorted => _registeredTypeIdsSorted;
-
-        // Cleanup targets, split by mode and built at freeze from _registeredTypeIdsSorted (ascending,
-        // pruned types already absent). DERIVED, so unlike _cleanupMode these are cleared by
-        // ResetForRecompute — keeping a stale list would let the pass touch a typeId with no layout.
-        // Empty array = no cleanup work, which the tick pass checks before doing anything.
-        private static int[] _cleanupClearTypeIds   = Array.Empty<int>();
-        private static int[] _cleanupDestroyTypeIds = Array.Empty<int>();
-        internal static ReadOnlySpan<int> CleanupClearTypeIds   => _cleanupClearTypeIds;
-        internal static ReadOnlySpan<int> CleanupDestroyTypeIds => _cleanupDestroyTypeIds;
+        // The default layout's sorted typeIds and cleanup targets (empty without a default layout).
+        // A simulation reads its own: Frame.Layout / EcsSimulation.Layout.
+        internal static ReadOnlySpan<int> RegisteredTypeIdsSorted
+            => _defaultLayout != null ? _defaultLayout.RegisteredTypeIdsSorted : ReadOnlySpan<int>.Empty;
+        internal static ReadOnlySpan<int> CleanupClearTypeIds
+            => _defaultLayout != null ? _defaultLayout.CleanupClearTypeIds : ReadOnlySpan<int>.Empty;
+        internal static ReadOnlySpan<int> CleanupDestroyTypeIds
+            => _defaultLayout != null ? _defaultLayout.CleanupDestroyTypeIds : ReadOnlySpan<int>.Empty;
 
         // === Dispatch tables (statically initialized at MAX_COMPONENT_TYPES size) ===
         private static readonly HashDelegate[]             _hashDispatch             = new HashDelegate[MAX_COMPONENT_TYPES];
@@ -111,7 +110,6 @@ namespace xpTURN.Klotho.ECS
         public static class TypeIdCache<T> where T : unmanaged, IComponent
         {
             public static int Id;
-            public static StorageLayout Layout;
             public static bool IsSingleton;
             public static int CachedGeneration = -1;   // -1 : not yet populated
         }
@@ -132,7 +130,7 @@ namespace xpTURN.Klotho.ECS
 
         public static bool Register<T>(int typeId, bool isSingleton = false, int maxCount = 0, bool core = false, CleanupMode cleanup = CleanupMode.None) where T : unmanaged, IComponent
         {
-            if (_frozen)
+            if (_typesFrozen)
                 throw new InvalidOperationException(
                     $"ComponentStorageRegistry frozen. Cannot register {typeof(T).Name} " +
                     $"(typeId={typeId}) post-freeze.");
@@ -312,8 +310,9 @@ namespace xpTURN.Klotho.ECS
         // valid only within one generation (see TypeIdCache<T>.CachedGeneration).
         internal static int Generation => _generation;
 
-        // Generic static-cache path. Populates Id/Layout on the first call; subsequent calls are O(1).
-        // When ResetForTesting bumps _generation, the CachedGeneration mismatch forces re-population.
+        // Generic static-cache path. Populates Id/IsSingleton on the first call; subsequent calls are O(1).
+        // Storage offsets are per simulation (FrameLayout, indexed by this Id), so nothing layout-dependent
+        // is cached here. When ResetForTesting bumps _generation, the CachedGeneration mismatch forces re-population.
         public static int GetTypeId<T>() where T : unmanaged, IComponent
         {
             if (TypeIdCache<T>.CachedGeneration != _generation)
@@ -327,8 +326,6 @@ namespace xpTURN.Klotho.ECS
                             $"Ensure [KlothoComponent] attribute + typeId assignment via KlothoGenerator.");
                 }
                 TypeIdCache<T>.Id     = id;
-                if (_layouts != null && id < _layouts.Length)
-                    TypeIdCache<T>.Layout = _layouts[id];
                 TypeIdCache<T>.IsSingleton = _isSingleton[id];
                 TypeIdCache<T>.CachedGeneration = _generation;
             }
@@ -347,19 +344,12 @@ namespace xpTURN.Klotho.ECS
         // === Layout computation + freeze transition ===
 
         /// <summary>
-        /// Whether these layout inputs disagree with a layout that is already frozen — the same
+        /// Whether these layout inputs disagree with the default layout that is already frozen — the
         /// comparison <see cref="EnsureLayoutComputed"/> makes on entry, without the side effects.
+        /// Simulations do not go through this: each computes its own layout (<see cref="ComputeLayout"/>),
+        /// so rooms in one process may use different inputs.
         ///
-        /// <para>Exists so a host that creates sessions one at a time can ASK before it commits.
-        /// The registry's own answer to a conflict is to recompute (editor/test) or throw
-        /// (release), and neither is survivable for a process that already has live rooms: the
-        /// recompute pulls <c>_layouts</c> and the type-id cache out from under workers mid-tick,
-        /// and the throw unwinds through whatever called it — in the dedicated server that is the
-        /// receive stage of the main loop, which has no handler between there and
-        /// <c>ServerLoop.Run</c>, so one mismatched room takes every healthy one with it. Asking
-        /// first turns that into a refused room.</para>
-        ///
-        /// <para>Not frozen yet → no conflict: the first caller defines the layout.</para>
+        /// <para>Not frozen yet → no conflict: the first caller defines the default layout.</para>
         /// </summary>
         /// <param name="conflict">Human-readable reason, or null when there is none.</param>
         internal static bool LayoutInputsConflict(
@@ -381,22 +371,53 @@ namespace xpTURN.Klotho.ECS
             conflict =
                 $"ComponentStorageRegistry frozen at maxEntities={_computedMaxEntities}, " +
                 $"attempted EnsureLayoutComputed({maxEntities}) with a different maxEntities, " +
-                $"maxCount-override map, or prune-set. Layout cannot be recomputed within a session " +
-                $"(these must be process-uniform).";
+                $"maxCount-override map, or prune-set. The process default layout cannot be recomputed " +
+                $"within a session.";
             return true;
         }
 
-        // No-override entry point (Frame ctor, GetHeapSize): re-affirms the currently-set overrides AND
-        // prune-set so a post-freeze Frame construction stays idempotent (never clobbers them to null).
+        /// <summary>
+        /// Computes an immutable layout from these inputs. It writes no layout state of the process, so
+        /// simulations created concurrently with different inputs each get their own.
+        /// <see cref="EcsSimulation"/> calls this once at construction. Like building a <see cref="Frame"/>,
+        /// it freezes component type registration for the process (<c>Register&lt;T&gt;</c> after it throws).
+        /// </summary>
+        public static FrameLayout ComputeLayout(int maxEntities,
+                                                IReadOnlyDictionary<int, int> maxCountOverrides = null,
+                                                IReadOnlyCollection<int> prunedComponentTypeIds = null)
+        {
+            // Scan first: _coreTypeIds and the per-type tables are complete only after the registrars ran,
+            // and after that they are read-only, which is what makes the computation below safe to run
+            // from any thread.
+            EnsureAllAssembliesScanned();
+            _typesFrozen = true;
+            return BuildLayout(maxEntities, maxCountOverrides, BuildEffectivePrunedSet(prunedComponentTypeIds));
+        }
+
+        // Layout behind the legacy maxEntities-only entry points (Frame(int, ...), FrameRingBuffer(int, int, ...),
+        // GetHeapSize): the default layout when its maxEntities matches, otherwise one computed from
+        // maxEntities alone. A pure function of maxEntities and the default — never of which simulations
+        // exist or of AllowLayoutRecompute — and it never changes the default.
+        internal static FrameLayout ResolveLegacyLayout(int maxEntities)
+        {
+            var defaultLayout = _defaultLayout;
+            if (defaultLayout != null && defaultLayout.MaxEntities == maxEntities)
+                return defaultLayout;
+            return ComputeLayout(maxEntities);
+        }
+
+        // No-override entry point: re-affirms the currently-set overrides AND prune-set so a post-freeze
+        // call stays idempotent (never clobbers them to null).
         public static void EnsureLayoutComputed(int maxEntities)
             => EnsureLayoutComputed(maxEntities, _maxCountOverrides, _prunedComponentTypeIds);
 
-        // Applies config-supplied per-type slot-cap overrides (typeId→maxCount) and the reservation-pruning
-        // denylist (typeIds to skip reserving; null/empty = prune nothing = current behavior). Both are
-        // process-global layout inputs (like maxEntities) — all concurrent sessions/rooms in a process must
-        // pass equal values. A different value while frozen recomputes (editor/test) or throws (release);
-        // for concurrent live rooms that would corrupt/abort, so source it once at server bootstrap,
-        // uniform. Call before any Frame is built.
+        // Fixes the process DEFAULT layout — the one the static readers below (GetLayout, LayoutFingerprint,
+        // RegisteredTypeIdsSorted, ...) and the legacy maxEntities-only Frame constructor use — from
+        // config-supplied per-type slot-cap overrides (typeId→maxCount) and the reservation-pruning denylist
+        // (typeIds to skip reserving; null/empty = prune nothing = current behavior). For single-simulation
+        // tools (memory report, replay verifier) and tests; simulations do not need it. A different value
+        // while frozen recomputes the default (editor/test) or throws (release); live simulations keep
+        // their own layouts either way.
         public static void EnsureLayoutComputed(int maxEntities, IReadOnlyDictionary<int, int> maxCountOverrides,
                                                 IReadOnlyCollection<int> prunedComponentTypeIds = null)
         {
@@ -430,46 +451,10 @@ namespace xpTURN.Klotho.ECS
             // Effective prune-set = (game denylist − core base-set); null = no pruning (reserve all).
             _prunedSet = BuildEffectivePrunedSet(prunedComponentTypeIds);
 
-            _layouts = new StorageLayout[MaxTypeId + 1];
-            var registeredList = new List<int>();
-            int offset = 0;
-            for (int typeId = 1; typeId <= MaxTypeId; typeId++)
-            {
-                if (!_idToType.TryGetValue(typeId, out var type)) continue;
-                // Reservation pruning: skip typeIds inside the effective prune-set (denylist − core).
-                // A skipped typeId keeps _layouts[typeId]=default (TotalSize 0) and stays out of
-                // _registeredTypeIdsSorted → auto-elided from heap/serialize/hash/clear loops.
-                if (_prunedSet != null && _prunedSet.Contains(typeId)) continue;
-                int componentSize = _componentSizes[type];
-
-                // Sparse is entity-indexed (maxEntities); singletons hold at most one carrier,
-                // so dense/components shrink to a single slot. Non-singletons resolve a per-type
-                // maxCount cap (0 = unspecified = maxEntities); the singleton branch takes priority.
-                int slotCapacity = _isSingleton[typeId] ? 1 : ResolveSlotCapacity(typeId, maxEntities);
-
-                int countOffset      = offset;
-                int sparseOffset     = AlignTo(countOffset + 4, kAlignment);
-                int denseOffset      = AlignTo(sparseOffset + maxEntities * 4, kAlignment);
-                int componentsOffset = AlignTo(denseOffset + slotCapacity * 4, kAlignment);
-                int end              = componentsOffset + slotCapacity * componentSize;
-
-                _layouts[typeId] = new StorageLayout(typeId, maxEntities, slotCapacity, countOffset, sparseOffset,
-                                                     denseOffset, componentsOffset, componentSize,
-                                                     end - countOffset);
-                offset = AlignTo(end, kAlignment);   // Next storage boundary (Pack=4 mandate → 4-byte sufficient)
-                registeredList.Add(typeId);
-            }
-            _heapSize = offset;
-            _registeredTypeIdsSorted = registeredList.ToArray();   // Guaranteed ascending typeId order (loop order)
-            BuildCleanupTypeIdCaches();
+            _typesFrozen = true;
+            _defaultLayout = BuildLayout(maxEntities, maxCountOverrides, _prunedSet);
             _computedMaxEntities = maxEntities;
-            _layoutFingerprint = ComputeLayoutFingerprint(maxEntities);
             _frozen = true;
-            // Invalidate TypeIdCache<T> populated before the layout existed. A typeId resolved pre-compute
-            // (e.g. SimulationConfig.PruneComponent<T> at bootstrap, when _layouts was null) cached a
-            // default(0) layout; without this bump GetTypeId<T> would keep that stale layout after freeze and
-            // the GetStorage pruned-type guard would falsely reject it. Bumping here forces a lazy refresh on next GetTypeId.
-            _generation++;
 
             // Diagnostic logging at freeze time — first-line defense against missing ModuleInitializers.
             // The Runtime asmdef has noEngineReferences=true → UnityEngine.Debug is unavailable.
@@ -477,12 +462,51 @@ namespace xpTURN.Klotho.ECS
 #if UNITY_EDITOR || DEBUG
             Trace.WriteLine(
                 $"[ComponentStorageRegistry] Frozen at maxEntities={maxEntities}, " +
-                $"registered types={_typeToId.Count}, heapSize={_heapSize}");
+                $"registered types={_typeToId.Count}, heapSize={_defaultLayout.HeapSize}");
 #endif
         }
 
+        private static FrameLayout BuildLayout(int maxEntities, IReadOnlyDictionary<int, int> maxCountOverrides,
+                                               HashSet<int> prunedSet)
+        {
+            var layouts = new StorageLayout[MaxTypeId + 1];
+            var registeredList = new List<int>();
+            int offset = 0;
+            for (int typeId = 1; typeId <= MaxTypeId; typeId++)
+            {
+                if (!_idToType.TryGetValue(typeId, out var type)) continue;
+                // Reservation pruning: skip typeIds inside the effective prune-set (denylist − core).
+                // A skipped typeId keeps layouts[typeId]=default (TotalSize 0) and stays out of the sorted
+                // typeIds → auto-elided from heap/serialize/hash/clear loops.
+                if (prunedSet != null && prunedSet.Contains(typeId)) continue;
+                int componentSize = _componentSizes[type];
+
+                // Sparse is entity-indexed (maxEntities); singletons hold at most one carrier,
+                // so dense/components shrink to a single slot. Non-singletons resolve a per-type
+                // maxCount cap (0 = unspecified = maxEntities); the singleton branch takes priority.
+                int slotCapacity = _isSingleton[typeId] ? 1 : ResolveSlotCapacity(typeId, maxEntities, maxCountOverrides);
+
+                int countOffset      = offset;
+                int sparseOffset     = AlignTo(countOffset + 4, kAlignment);
+                int denseOffset      = AlignTo(sparseOffset + maxEntities * 4, kAlignment);
+                int componentsOffset = AlignTo(denseOffset + slotCapacity * 4, kAlignment);
+                int end              = componentsOffset + slotCapacity * componentSize;
+
+                layouts[typeId] = new StorageLayout(typeId, maxEntities, slotCapacity, countOffset, sparseOffset,
+                                                    denseOffset, componentsOffset, componentSize,
+                                                    end - countOffset);
+                offset = AlignTo(end, kAlignment);   // Next storage boundary (Pack=4 mandate → 4-byte sufficient)
+                registeredList.Add(typeId);
+            }
+            int[] registeredSorted = registeredList.ToArray();   // Guaranteed ascending typeId order (loop order)
+            BuildCleanupTypeIdCaches(registeredSorted, out int[] cleanupClear, out int[] cleanupDestroy);
+            long fingerprint = ComputeLayoutFingerprint(maxEntities, registeredSorted, layouts);
+            return new FrameLayout(maxEntities, offset, fingerprint, layouts, registeredSorted, cleanupClear, cleanupDestroy);
+        }
+
         /// <summary>
-        /// Fingerprint of the frozen layout: which component types are registered, and how each is
+        /// Fingerprint of the default layout (0 without one; a simulation's own value is
+        /// <see cref="FrameLayout.LayoutFingerprint"/>): which component types are registered, and how each is
         /// sized. Peers whose fingerprints differ CANNOT produce equal state hashes —
         /// <c>Frame.CalculateHash</c> folds every registered type, including the ones with zero
         /// instances, so the registered SET is itself hash input. This property therefore adds no
@@ -502,31 +526,31 @@ namespace xpTURN.Klotho.ECS
         /// stayed harmless until the day it silently became fatal. That is why the fingerprint is logged
         /// unconditionally rather than behind a diagnostic flag.
         /// </summary>
-        public static long LayoutFingerprint => _layoutFingerprint;
+        public static long LayoutFingerprint => _defaultLayout?.LayoutFingerprint ?? 0;
 
         /// <summary>
-        /// Number of component types in the frozen LAYOUT — i.e. the set that
+        /// Number of component types in the default LAYOUT (0 without one) — i.e. the set that
         /// <c>Frame.CalculateHash</c> folds. Differs from <see cref="RegisteredTypeCount"/>, which
         /// counts every scanned type including reservation-pruned ones.
         /// </summary>
-        public static int LayoutTypeCount => _registeredTypeIdsSorted?.Length ?? 0;
+        public static int LayoutTypeCount => _defaultLayout?.LayoutTypeCount ?? 0;
 
         /// <summary>
         /// Number of layout types declaring a <see cref="CleanupMode"/> other than None. Reported next
         /// to <see cref="LayoutTypeCount"/> in fingerprint diagnostics: when the type counts match but
         /// the fingerprints differ, this number tells a human whether component metadata is the cause.
         /// </summary>
-        public static int CleanupTypeCount => _cleanupClearTypeIds.Length + _cleanupDestroyTypeIds.Length;
+        public static int CleanupTypeCount => _defaultLayout?.CleanupTypeCount ?? 0;
 
-        private static long ComputeLayoutFingerprint(int maxEntities)
+        private static long ComputeLayoutFingerprint(int maxEntities, int[] registeredTypeIdsSorted, StorageLayout[] layouts)
         {
             ulong h = FPHash.FNV_OFFSET;
             h = FPHash.Hash(h, maxEntities);
-            h = FPHash.Hash(h, _registeredTypeIdsSorted.Length);
-            for (int i = 0; i < _registeredTypeIdsSorted.Length; i++)
+            h = FPHash.Hash(h, registeredTypeIdsSorted.Length);
+            for (int i = 0; i < registeredTypeIdsSorted.Length; i++)
             {
-                int typeId = _registeredTypeIdsSorted[i];
-                ref readonly StorageLayout layout = ref _layouts[typeId];
+                int typeId = registeredTypeIdsSorted[i];
+                ref readonly StorageLayout layout = ref layouts[typeId];
                 h = FPHash.Hash(h, typeId);
                 h = FPHash.Hash(h, HashTypeName(_idToType[typeId].FullName));
                 h = FPHash.Hash(h, layout.SlotCapacity);
@@ -551,13 +575,17 @@ namespace xpTURN.Klotho.ECS
             return h;
         }
 
-        public static ref readonly StorageLayout GetLayout(int typeId) => ref _layouts[typeId];
+        // The default layout's storage for typeId. Throws without a default layout: a simulation's
+        // layout is Frame.Layout / EcsSimulation.Layout, and silently answering for another one would be
+        // a misread.
+        public static ref readonly StorageLayout GetLayout(int typeId) => ref RequireDefaultLayout().Layouts[typeId];
 
-        public static int GetHeapSize(int maxEntities)
-        {
-            EnsureLayoutComputed(maxEntities);
-            return _heapSize;
-        }
+        public static int GetHeapSize(int maxEntities) => ResolveLegacyLayout(maxEntities).HeapSize;
+
+        private static FrameLayout RequireDefaultLayout()
+            => _defaultLayout ?? throw new InvalidOperationException(
+                "ComponentStorageRegistry has no default layout (EnsureLayoutComputed was not called). " +
+                "Read the simulation's own layout instead: Frame.Layout / EcsSimulation.Layout.");
 
         /// <summary>
         /// Whether a conflicting <see cref="EnsureLayoutComputed"/> may silently recompute the
@@ -608,46 +636,42 @@ namespace xpTURN.Klotho.ECS
         private static void ResetForRecompute()
         {
             _computedMaxEntities = -1;
-            _layoutFingerprint = 0;
             _frozen = false;
-            _layouts = null;
-            _heapSize = 0;
+            _typesFrozen = false;
+            _defaultLayout = null;   // live simulations keep their own FrameLayout instances
             _maxCountOverrides = null;   // next EnsureLayoutComputed re-supplies; prevents cross-fixture leak
             _prunedComponentTypeIds = null;   // next EnsureLayoutComputed re-supplies (same reason)
             _prunedSet = null;
-            _registeredTypeIdsSorted = Array.Empty<int>();
-            _cleanupClearTypeIds = Array.Empty<int>();       // derived from the above; must not outlive it
-            _cleanupDestroyTypeIds = Array.Empty<int>();
             _generation++;   // Bulk-invalidate TypeIdCache<T>
             // _typeToId / _idToType / _componentSizes / dispatch tables / _coreTypeIds are retained (ModuleInitializer-based)
         }
 
-        // Split the frozen type set by cleanup mode, preserving ascending typeId order so the tick
-        // pass has no registration-order dependency. Called from EnsureLayoutComputed right after
-        // _registeredTypeIdsSorted is built.
-        private static void BuildCleanupTypeIdCaches()
+        // Split a layout's type set by cleanup mode, preserving ascending typeId order so the tick
+        // pass has no registration-order dependency. Empty array = no cleanup work, which the tick pass
+        // checks before doing anything.
+        private static void BuildCleanupTypeIdCaches(int[] registeredTypeIdsSorted, out int[] clearIds, out int[] destroyIds)
         {
             int clearCount = 0, destroyCount = 0;
-            for (int i = 0; i < _registeredTypeIdsSorted.Length; i++)
+            for (int i = 0; i < registeredTypeIdsSorted.Length; i++)
             {
-                switch (_cleanupMode[_registeredTypeIdsSorted[i]])
+                switch (_cleanupMode[registeredTypeIdsSorted[i]])
                 {
                     case CleanupMode.RemoveComponent: clearCount++; break;
                     case CleanupMode.DestroyEntity:   destroyCount++; break;
                 }
             }
 
-            _cleanupClearTypeIds   = clearCount   > 0 ? new int[clearCount]   : Array.Empty<int>();
-            _cleanupDestroyTypeIds = destroyCount > 0 ? new int[destroyCount] : Array.Empty<int>();
+            clearIds   = clearCount   > 0 ? new int[clearCount]   : Array.Empty<int>();
+            destroyIds = destroyCount > 0 ? new int[destroyCount] : Array.Empty<int>();
 
             int c = 0, d = 0;
-            for (int i = 0; i < _registeredTypeIdsSorted.Length; i++)
+            for (int i = 0; i < registeredTypeIdsSorted.Length; i++)
             {
-                int typeId = _registeredTypeIdsSorted[i];
+                int typeId = registeredTypeIdsSorted[i];
                 switch (_cleanupMode[typeId])
                 {
-                    case CleanupMode.RemoveComponent: _cleanupClearTypeIds[c++]   = typeId; break;
-                    case CleanupMode.DestroyEntity:   _cleanupDestroyTypeIds[d++] = typeId; break;
+                    case CleanupMode.RemoveComponent: clearIds[c++]   = typeId; break;
+                    case CleanupMode.DestroyEntity:   destroyIds[d++] = typeId; break;
                 }
             }
         }
@@ -663,10 +687,10 @@ namespace xpTURN.Klotho.ECS
         // Resolves the dense/components slot cap for a non-singleton type (singletons are handled at the
         // call site and never reach here). Priority: config override map > build-baked per-type _maxCount
         // (0 = unspecified) > maxEntities. Every source clamps to maxEntities.
-        private static int ResolveSlotCapacity(int typeId, int maxEntities)
+        private static int ResolveSlotCapacity(int typeId, int maxEntities, IReadOnlyDictionary<int, int> maxCountOverrides)
         {
             // Config override takes priority over the build-baked attribute cap; both clamp to maxEntities.
-            if (_maxCountOverrides != null && _maxCountOverrides.TryGetValue(typeId, out int ov) && ov > 0)
+            if (maxCountOverrides != null && maxCountOverrides.TryGetValue(typeId, out int ov) && ov > 0)
                 return Math.Min(ov, maxEntities);
             int mc = _maxCount[typeId];
             return mc > 0 ? Math.Min(mc, maxEntities) : maxEntities;
